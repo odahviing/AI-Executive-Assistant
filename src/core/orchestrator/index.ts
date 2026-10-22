@@ -601,6 +601,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // checker retry's appended [SYSTEM NOTE …] is not something the owner
       // said and must never satisfy a "did the owner name this" check.
       currentUserMessage: userMessage,
+      interactive: input.interactive !== false,
     };
 
     const toolResults: Anthropic.ToolResultBlockParam[] = [];

@@ -158,6 +158,8 @@ export interface SkillContext {
    * without checking `interactive` first.
    */
   currentUserMessage?: string;
+  /** True for live turns, false for synthetic runs. Absent in direct contexts means unknown. */
+  interactive?: boolean;
 }
 
 /** All supported communication channels */

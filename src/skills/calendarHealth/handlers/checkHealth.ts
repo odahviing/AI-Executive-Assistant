@@ -14,6 +14,9 @@ import {
   upsertCluster,
   markStaleResolved,
   getSuppressedEventIds,
+  getAcceptedCalendarExceptions,
+  acceptedOverlap,
+  acceptedCategoryLimit,
   dayLevelIssueSyntheticId,
   updateCalendarIssueStatus,
   type DetectedIssue,
@@ -176,6 +179,7 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
         //     cleared clash is BACK, he reverted it (by hand or via
         //     revert_last_auto_move); re-moving is the exact "no memory" bug.
         const dismissedEventIds = getSuppressedEventIds(context.profile.user.slack_user_id);
+        const acceptedExceptions = getAcceptedCalendarExceptions(context.profile.user.slack_user_id);
         // missing-category-detection-has-no-suppression-set — the OTHER axis
         // (db/calendarIssues.ts QUESTION_ONLY_CLASSES), read the same way
         // dismissedEventIds is: BEFORE the day loop, so the missing_category
@@ -418,6 +422,9 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
               const bEnd = parseGraphDt(b.end.dateTime, b.end.timeZone, timezone);
 
               if (aStart < bEnd && aEnd > bStart) {
+                if (acceptedOverlap(acceptedExceptions,
+                  {id: a.id, start: aStart.toMillis(), end: aEnd.toMillis()},
+                  {id: b.id, start: bStart.toMillis(), end: bEnd.toMillis()})) continue;
                 // v3.7.x (#139) — auto-fix memory: skip a pair the owner already
                 // settled. (a) dismissed/approved/resolved → he told us to leave
                 // it. (b) I auto-moved one side in the last 12h and the clash is
@@ -736,6 +743,9 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
             rangeEnd,
           });
           for (const v of violations) {
+            if (acceptedCategoryLimit(acceptedExceptions, v, events.map(e => ({id: e.id,
+              start: parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis(),
+              end: parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis()})))) continue;
             const window = v.rule_broken === 'per_day' ? 'on' : 'in the';
             issues.push({
               type: 'category_limit_exceeded',

@@ -1,3 +1,19 @@
+## 5.2.1 — Remember accepted calendar exceptions
+
+Maelle remembers disclosed calendar conflicts the owner explicitly accepts when a move succeeds, so Calendar Health does not repeatedly flag the same accepted facts. Slack replies are shorter and proportional to the request while retaining warmth, requested coverage and material tradeoffs.
+
+### Fixed
+- Preserve explicitly accepted overlap and weekly category-limit exceptions after confirmed owner moves. New conflicts, longer overlaps and increased weekly counts remain visible; failed or uncertain moves do not create accepted exceptions.
+- Keep Slack answers concise without dropping meaningful caveats or claiming unconfirmed outcomes.
+
+### Validation and limits
+- Two product corrections independently verified through deterministic regressions and structural prompt checks. The quick PATCH checkpoint passed 66 suites, 78 executions and 2,157 assertions, with typechecking passed. Existing model judgment still interprets acceptance language; prompt captures do not prove future reply style or live production outcomes.
+
+### Framework
+- X252 bounds coordination and uses fresh contexts at completed work boundaries.
+- X253 keeps release-runner output compact while retaining full evidence.
+- X254 adds a read-only preflight for checkpoint, verification and bookkeeping validation.
+
 ## 5.2.0 — Truthful calendar, briefing and approval context
 
 Maelle now carries calendar occupancy, invitation provenance and current approval outcomes through scheduling and reply checks. This cumulative MINOR checkpoint also covers the meeting-option and confirmation fixes shipped in 5.1.1.

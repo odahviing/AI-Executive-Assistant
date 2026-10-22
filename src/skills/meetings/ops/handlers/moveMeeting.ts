@@ -113,6 +113,70 @@ export async function checkCoordinatedMoves(args: Record<string, unknown>, ctx: 
     execution_order: order.map(i => moves[i].meeting_id), moves: order.map(i => ({...moves[i], meeting_subject: originals[i].subject})) };
 }
 
+/** Record only independently evidenced accepted facts, after a confirmed move.
+ * The existing model interprets quote meaning; code proves source, identity and
+ * current bounds. A booking override alone never proves informed acceptance. */
+export async function recordAcceptedMoveExceptions(args: Record<string, unknown>, ctx: OpCtx,
+  newStart: string, newEnd: string): Promise<boolean> {
+  const { context, timezone, userEmail } = ctx;
+  if (!Array.isArray(args.accepted_exceptions) || !args.accepted_exceptions.length) return true;
+  if (context.interactive !== true || context.authority !== 'owner' || context.senderRole !== 'owner'
+    || context.surface !== 'owner_dm' || context.userId !== context.profile.user.slack_user_id) return true;
+  const instant = (s: unknown): number => typeof s === 'string' && /(?:Z|[+-]\d{2}:\d{2})$/.test(s)
+    ? DateTime.fromISO(s).toMillis() : NaN;
+  const start = instant(newStart), end = instant(newEnd);
+  const candidates = args.accepted_exceptions.filter((f: any) => f && f.event_id === args.meeting_id
+    && instant(f.start) === start && instant(f.end) === end && end > start
+    && typeof f.acceptance_quote === 'string' && f.acceptance_quote.trim()
+    && context.currentUserMessage?.includes(f.acceptance_quote)
+    && typeof f.disclosure_quote === 'string' && f.disclosure_quote.trim()
+    && context.conversationHistory?.some(message => {
+      const summaries = (message as {toolSummaries?: string[]}).toolSummaries;
+      // Only provenance-bearing delivered history is eligible. Old history and
+      // summary-only/tool findings cannot establish what the owner actually saw.
+      if (message.role !== 'assistant' || !Array.isArray(summaries) || !summaries.every(s => typeof s === 'string')) return false;
+      const prefix = summaries.length ? `${summaries.join(' ')}\n` : '';
+      return message.content.startsWith(prefix) && message.content.slice(prefix.length).includes(f.disclosure_quote);
+    }));
+  if (!candidates.length) return true;
+  try {
+    const { getOwnerEventsForDecision } = await import('../../../../connectors/graph/calendar');
+    const { findCategoryViolations } = await import('../../../../utils/categoryRules');
+    const { recordAcceptedCalendarException } = await import('../../../../db/calendarIssues');
+    const day = DateTime.fromMillis(start, { zone: timezone });
+    const rangeStart = day.startOf('week'), rangeEnd = day.endOf('week');
+    const events = await getOwnerEventsForDecision(userEmail, rangeStart.toISO()!, rangeEnd.toISO()!, timezone);
+    const interval = (e: typeof events[number]) => ({ start: DateTime.fromISO(e.start.dateTime, {zone: e.start.timeZone || timezone}).toMillis(),
+      end: DateTime.fromISO(e.end.dateTime, {zone: e.end.timeZone || timezone}).toMillis() });
+    const event = events.find(e => e.id === args.meeting_id && !e.isCancelled && e.type !== 'seriesMaster');
+    if (!event || interval(event).start !== start || interval(event).end !== end) return false;
+    const violations = findCategoryViolations({ events, profile: context.profile, rangeStart, rangeEnd });
+    for (const f of candidates) {
+      const base = {eventId: event.id, start, end, disclosure: f.disclosure_quote as string, acceptance: f.acceptance_quote as string};
+      if (f.kind === 'overlap' && typeof f.peer_event_id === 'string' && f.peer_event_id !== event.id) {
+        const peer = events.find(e => e.id === f.peer_event_id && !e.isCancelled && e.showAs !== 'free' && e.type !== 'seriesMaster');
+        if (!peer) continue;
+        const overlapStart = Math.max(start, interval(peer).start), overlapEnd = Math.min(end, interval(peer).end);
+        if (overlapEnd > overlapStart && instant(f.overlap_start) === overlapStart && instant(f.overlap_end) === overlapEnd) {
+          recordAcceptedCalendarException(context.profile.user.slack_user_id, day.toISODate()!,
+            {...base, kind: 'overlap', peerEventId: peer.id, overlapStart, overlapEnd});
+        }
+      } else if (f.kind === 'category_limit' && Number.isInteger(f.accepted_count) && Number.isInteger(f.rule_value)) {
+        const v = violations.find(v => v.category_name === f.category && v.rule_broken === f.rule_broken
+          && v.window_start === f.window_start && v.current_count === f.accepted_count && v.rule_value === f.rule_value
+          && v.event_ids.includes(event.id));
+        if (v) recordAcceptedCalendarException(context.profile.user.slack_user_id, day.toISODate()!,
+          {...base, kind: 'category_limit', category: v.category_name, rule: v.rule_broken,
+            windowStart: v.window_start, count: v.current_count, limit: v.rule_value}, v.event_ids);
+      }
+    }
+    return true;
+  } catch (err) {
+    logger.warn('move_meeting accepted exception memory unavailable', {error: String(err).slice(0,160)});
+    return false;
+  }
+}
+
 /** An explicit owner correction rejects only the automatic move still reflected in the calendar. */
 export async function recordOwnerAutoMoveCorrection(params: {
   ownerUserId: string; eventId: string; priorStart?: string; priorEnd?: string;
@@ -2671,8 +2735,10 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         if (preMoveStartIso && preMoveEndIso
           && DateTime.fromISO(preMoveStartIso, { zone: timezone }).toMillis() === DateTime.fromISO(effectiveStart, { zone: timezone }).toMillis()
           && DateTime.fromISO(preMoveEndIso, { zone: timezone }).toMillis() === DateTime.fromISO(effectiveEnd, { zone: timezone }).toMillis()) {
+          const remembered = await recordAcceptedMoveExceptions(args, ctx, effectiveStart, effectiveEnd);
           return { success: true, unchanged: true, meetingId: args.meeting_id,
             booked_start: effectiveStart, booked_end: effectiveEnd,
+            ...(!remembered ? {warning: 'The meeting is at that time, but I could not save the accepted exceptions.'} : {}),
             message: 'The identified meeting is already at that exact time. No calendar update was sent.' };
         }
         let moveWriteError: unknown;
@@ -2739,6 +2805,9 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           newStartIso: effectiveStart,
           newEndIso: effectiveEnd,
         });
+        if (!await recordAcceptedMoveExceptions(args, ctx, effectiveStart, effectiveEnd)) {
+          ownerDecisionWarning = 'The meeting moved, but I could not save the accepted exceptions.';
+        }
         // v4.2.x — WHEN HE CHANGES AN AUTOFIX, THAT IS THE DECISION (owner
         // 2026-07-26: "if i change the auto fix, don't change it again").
         //

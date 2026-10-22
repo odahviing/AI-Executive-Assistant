@@ -174,6 +174,7 @@ function healthHarness(opts = {}) {
   const active = () => rows.filter(r => ['awaiting_owner', 'in_progress', 'owner_side'].includes(r.status));
   const db = {
     getActiveCalendarIssues: active, getSuppressedEventIds: () => new Set(), getWaivedFloatingBlockEventIds: () => new Set(),
+    getAcceptedCalendarExceptions: () => [], acceptedOverlap: () => false, acceptedCategoryLimit: () => false,
     dayLevelIssueSyntheticId: (type, date) => `${type}:${date}`,
     buildClusters: (issues, dates) => issues.map(i => ({ ...i, event_date: dates.get(i.event_id) })),
     upsertCluster: (owner, c) => { let row = rows.find(r => r.event_id === c.event_id); if (row) return { action: 'update', row_id: row.id }; row = { ...c, id: `ci_${c.event_id}`, status: 'awaiting_owner', issue_class: c.class }; rows.push(row); return { action: 'insert', row_id: row.id }; },

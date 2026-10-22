@@ -22,6 +22,7 @@ function harness(opts = {}) {
   const profile = { user: { name: 'Owner', email: 'owner@company.test', slack_user_id: 'owner', timezone: 'Asia/Jerusalem' }, behavior: { calendar_health_mode: 'passive' }, meetings: { floating_blocks: opts.blocks ?? [], protected: [], private_emails: [] }, schedule: { office_days: { days: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'] }, home_days: { days: [] } }, categories: [{ name: 'Meeting', description: 'Work' }] };
   const active = () => rows.filter(r => ['awaiting_owner', 'in_progress', 'owner_side'].includes(r.status));
   const db = {
+    getAcceptedCalendarExceptions: () => [], acceptedOverlap: () => false, acceptedCategoryLimit: () => false,
     getActiveCalendarIssues: active, getSuppressedEventIds: () => new Set(),
     getWaivedFloatingBlockEventIds: () => { if (opts.waiverError) throw Error('waiver unavailable'); return new Set(); },
     dayLevelIssueSyntheticId: (type, date) => `${type}:${date}`,
@@ -35,6 +36,7 @@ function harness(opts = {}) {
     auditLog: () => {},
     getDb: () => ({ transaction: fn => () => { const savedRows = structuredClone(rows), savedRequests = structuredClone(requestRows); try { return fn(); } catch (e) { rows.splice(0, rows.length, ...savedRows); requestRows.splice(0, requestRows.length, ...savedRequests); throw e; } } }),
   };
+  Object.assign(db, opts.issueStore ?? {});
   const requests = {
     getRecentlyAutoMovedEventIds: () => new Set(calls.filter(c => c[0] === 'close' && c[1].closureReason === 'auto_move_executed').map(() => 'movable')),
     getRequestsByExternalEventId: () => opts.pendingMove ? [{ subkind: 'auto_move' }] : [],
@@ -59,7 +61,7 @@ function harness(opts = {}) {
     if (modules.has(name)) return modules.get(name);
     const file = ['meetingProtection', 'attendeeScope'].includes(name) ? path.join(root, 'src/utils', `${name}.ts`) : before ? path.join(dir, 'before', `${name}.ts`) : path.join(root, 'src/skills/calendarHealth', ['checkHealth', 'categoryOps'].includes(name) ? 'handlers' : '', `${name}.ts`);
     const m = { exports: {} }; modules.set(name, m.exports);
-    const source = name === 'classify' && opts.classifySource ? opts.classifySource : fs.readFileSync(file, 'utf8');
+    const source = name === 'checkHealth' && opts.healthSource ? opts.healthSource : name === 'classify' && opts.classifySource ? opts.classifySource : fs.readFileSync(file, 'utf8');
     const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
     const req = spec => {
       if (spec === 'luxon') return require(spec);
@@ -78,7 +80,7 @@ function harness(opts = {}) {
       if (spec.endsWith('/db/jobs')) return { getOpenRescheduleOutreach: () => [] };
       if (spec.endsWith('/attendeeAvailability')) return { attendeeCheckParams: emails => ({ attendeeEmails: emails }) };
       if (spec.endsWith('/scheduleRules')) return { requiredFreeMinutesForWorkDay: () => 0 };
-      if (spec.endsWith('/categoryRules')) return { findCategoryViolations: () => [] };
+      if (spec.endsWith('/categoryRules')) return opts.categoryRules ?? { findCategoryViolations: () => [] };
       if (spec.endsWith('/llm/client')) return { getAnthropicClient: () => { if (opts.client) return opts.client; throw Error('Live LLM forbidden'); } };
       if (spec.endsWith('/llm/models')) return require('./load-test-models.cjs');
       if (spec.endsWith('/rebalanceFloatingBlocks')) return { rebalanceFloatingBlocksAfterMutation: async () => { calls.push(['rebalance']); return opts.rebalanceResult ?? ({ moved: 0, movedBlockEventIds: [] }); } };

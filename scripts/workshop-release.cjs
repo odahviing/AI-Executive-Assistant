@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// One local release execution: discovered regressions + typecheck. Golden30 and
-// independent review retain their separate contracts. No boot, deploy or ledger write.
+// Local regression/typecheck execution and read-only preflight of existing evidence.
+// Golden30 and independent review retain their contracts. No boot, deploy or ledger write.
 const fs = require('node:fs'), path = require('node:path'), cp = require('node:child_process');
 const { snapshot } = require('./workshop-verification.cjs');
 const verification = require('./workshop-verification.cjs');
@@ -121,7 +121,9 @@ function bookkeepingPlan(refs, version, root) {
 }
 function checkBookkeeping(draft, root) {
   const current = bookkeepingPlan(draft.refs, draft.version, root);
-  return { status: current.status !== 'blocked' && JSON.stringify(current) === JSON.stringify(draft) ? 'current-draft' : 'blocked', blockers: current.blockers };
+  const stale = JSON.stringify(current) !== JSON.stringify(draft);
+  return { status: current.status !== 'blocked' && !stale ? 'current-draft' : 'blocked', blockers: current.blockers,
+    ...(stale ? { errors: ['bookkeeping draft changed; regenerate and reconcile before metadata edits'] } : {}) };
 }
 function goldenSnapshot(root) {
   return [...sourceSnapshot(root), ...snapshot(['.claude/GOLDEN_PATHS.md'], root)];
@@ -146,8 +148,113 @@ function goldenResult(report, root, evidenceRoot) {
   return { status: errors.length ? 'blocked' : 'current', errors, answered: traces.length,
     passed: traces.filter(t => t?.verdict === 'pass').length, staleAnchors: traces.filter(t => t?.verdict === 'stale-anchor').length };
 }
+function checkpointFile(file, root, scope) {
+  const report = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const result = checkpointResult(report, root, path.dirname(path.resolve(file)), scope), ok = report.status === 'passed' && result.ok;
+  return { status: ok ? 'current' : 'blocked', previousStatus: report.status, changed: result.changed, errors: result.errors };
+}
+function newOutput(out) {
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  fs.mkdirSync(out); // Refuse to overwrite a prior attempt, including its logs.
+}
+function showFailure(check, out) {
+  const { stdout, ...details } = check;
+  const diagnostic = JSON.stringify(details, null, 2), limit = 4000;
+  console.error(JSON.stringify({
+    ...(diagnostic.length <= limit ? details : { id: check.id, status: check.status, errorCount: check.errors?.length || 0, blockerCount: check.blockers?.length || 0,
+      diagnostics: diagnostic.slice(0, limit), omittedCharacters: diagnostic.length - limit }),
+    ...(stdout ? { stdoutBytesRetained: Buffer.byteLength(stdout) } : {}),
+    ...(check.output ? { output: path.join(out, check.output) } : {}),
+    report: path.join(out, 'report.json'),
+  }, null, 2));
+}
+// Fixed local read-only sequence, never arbitrary commands, writers or review judgments.
+async function preflight(args, root, summary) {
+  const full = args[1] === '--check';
+  const expected = full
+    ? ['--preflight', '--check', null, '--check-golden', null, '--check-bookkeeping', null, '--out', null]
+    : ['--preflight', '--check-package', null, '--check-bookkeeping', null, '--out', null];
+  if (args.length !== expected.length || expected.some((flag, i) => flag ? args[i] !== flag : !args[i] || args[i].startsWith('--'))) throw Error('Usage: --preflight (--check REPORT --check-golden GOLDEN | --check-package REPORT) --check-bookkeeping PLAN --out NEW_DIRECTORY [--summary]');
+  const out = path.resolve(args.at(-1)), checkpoint = path.resolve(args[2]), golden = full ? path.resolve(args[4]) : null, draft = path.resolve(args[full ? 6 : 4]);
+  newOutput(out);
+  const inputs = [checkpoint, draft, ...(golden ? [golden] : []), '.claude/agent-loop/ledger.jsonl', '.claude/agent-loop/report.md', '.claude/agent-loop/state.json'];
+  const capture = () => {
+    const sources = full ? goldenSnapshot(root) : sourceSnapshot(root), files = new Set(inputs), outputs = new Set();
+    // Discover the files consumed by the existing gates, including attachments
+    // and reviewed prose outside sourceSnapshot. Malformed discovery is deferred
+    // to its authoritative gate so first-failure order remains unchanged.
+    const json = file => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } };
+    for (const file of [checkpoint, ...(golden ? [golden] : [])]) {
+      const value = json(file);
+      for (const entry of [...(Array.isArray(value?.checks) ? value.checks : []), value?.typecheck, value]) {
+        if (typeof entry?.output === 'string' && path.basename(entry.output) === entry.output) {
+          const output = path.join(path.dirname(file), entry.output);
+          files.add(output); outputs.add(output);
+        }
+      }
+    }
+    const savedDraft = json(draft);
+    for (const input of Array.isArray(savedDraft?.inputs) ? savedDraft.inputs : []) if (typeof input?.file === 'string') files.add(input.file);
+    const ledger = path.join(root, '.claude/agent-loop/ledger.jsonl');
+    try {
+      const rows = fs.readFileSync(ledger, 'utf8').split(/\r?\n/).filter(s => s.trim()).map(JSON.parse);
+      for (const row of rows) for (const ref of [row.evidenceRef, row.reviewRef]) if (typeof ref?.file === 'string') files.add(ref.file);
+      for (const row of verification.collapseRows(verification.readRows(ledger)).latest)
+        for (const input of Array.isArray(row.snapshot) ? row.snapshot : []) if (typeof input?.file === 'string') files.add(input.file);
+    } catch {} // Missing/malformed native evidence is still rejected by verification/bookkeeping.
+    const key = file => path.relative(root, path.resolve(root, file)).replaceAll('\\', '/');
+    const known = new Set(sources.map(s => s.file)), requiredFiles = new Set([...outputs].map(key));
+    const dependencies = snapshot([...new Set([...files].map(key))].filter(file => !known.has(file)).sort(), root);
+    return [...sources, ...dependencies].map(s => {
+      if (requiredFiles.has(s.file)) {
+        // Retained-output validators require a regular file, not just equal bytes.
+        try { if (!fs.lstatSync(path.resolve(root, s.file)).isFile()) return { ...s, sha256: null }; }
+        catch { return { ...s, sha256: null }; }
+      }
+      return s;
+    });
+  };
+  const report = { scope: 'preflight', checkpointScope: full ? 'release' : 'package', status: 'running', startedAt: new Date().toISOString(), checks: [],
+    limitation: 'Local pre-metadata validation only; no release authorization, new independent review or postcommit checks.' };
+  const steps = [
+    ['checkpoint', () => checkpointFile(checkpoint, root, full ? 'release' : 'package')],
+    ...(golden ? [['golden', () => goldenResult(JSON.parse(fs.readFileSync(golden, 'utf8')), root, path.dirname(golden))]] : []),
+    ['verification', async () => {
+      const run = await execute(['scripts/ledger-stats.cjs', '--verification', '--json'], { root, output: path.join(out, 'verification.log') });
+      let blockers, errors = [];
+      try { blockers = JSON.parse(run.stdout); if (!Array.isArray(blockers)) throw Error('expected blocker array'); }
+      catch (e) { errors.push(`verification output unavailable or malformed: ${e.message}`); }
+      const ok = run.exitCode === 0 && !run.timedOut && !run.overflow && !run.error && Array.isArray(blockers) && blockers.length === 0;
+      return { status: ok ? 'current' : 'blocked', ...run, blockers, errors, output: 'verification.log', outputSha256: snapshot(['verification.log'], out)[0].sha256 };
+    }],
+    ['bookkeeping', () => checkBookkeeping(JSON.parse(fs.readFileSync(draft, 'utf8')), root)],
+  ];
+  fs.writeFileSync(path.join(out, 'started.json'), JSON.stringify(report, null, 2), { flag: 'wx' });
+  try {
+    report.snapshot = capture();
+    for (const [id, check] of steps) {
+      let result;
+      try { result = await check(); } catch (e) { result = { status: 'blocked', errors: [e.message] }; }
+      report.checks.push({ id, ...result });
+      if (result.status === 'blocked') { showFailure({ id, ...result }, out); break; }
+      if (!summary) console.log(`PASS ${id}: ${result.status}`);
+    }
+    report.changed = changedFiles(report.snapshot, capture());
+    if (report.changed.length) report.errors = ['preflight inputs or source changed during validation; repeat on a settled tree'];
+    report.status = report.checks.length === steps.length && report.checks.every(c => c.status !== 'blocked') && !report.changed.length ? 'passed' : 'blocked';
+  } catch (e) { report.status = 'blocked'; report.error = e.message; }
+  report.finishedAt = new Date().toISOString();
+  fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2), { flag: 'wx' });
+  if (report.error || report.errors) showFailure({ error: report.error, errors: report.errors, changed: report.changed }, out);
+  console.log(`Local preflight ${report.status}: ${report.checks.filter(c => c.status !== 'blocked').length}/${steps.length} checks; ${path.join(out, 'report.json')}; no release authorization`);
+  process.exitCode = report.status === 'passed' ? 0 : 1;
+}
 async function main() {
   const root = path.resolve(__dirname, '..'), args = process.argv.slice(2);
+  const summary = args.at(-1) === '--summary';
+  if (summary) args.pop();
+  if (args[0] === '--preflight') return preflight(args, root, summary);
+  if (summary && args.length && !['--out', '--suites'].includes(args[0])) throw Error('--summary is supported only for execution and --preflight; JSON producers retain their complete output');
   if (args[0] === '--golden-snapshot' && args.length === 1) {
     console.log(JSON.stringify(goldenSnapshot(root), null, 2)); return;
   }
@@ -172,17 +279,15 @@ async function main() {
     console.log(JSON.stringify(result, null, 2)); process.exitCode = result.status === 'blocked' ? 1 : 0; return;
   }
   if (['--check', '--check-package'].includes(args[0]) && args.length === 2) {
-    const report = JSON.parse(fs.readFileSync(args[1], 'utf8'));
-    const result = checkpointResult(report, root, path.dirname(path.resolve(args[1])), args[0] === '--check-package' ? 'package' : 'release'), ok = report.status === 'passed' && result.ok;
-    console.log(JSON.stringify({ status: ok ? 'current' : 'blocked', previousStatus: report.status, changed: result.changed, errors: result.errors }, null, 2));
-    process.exitCode = ok ? 0 : 1; return;
+    const result = checkpointFile(args[1], root, args[0] === '--check-package' ? 'package' : 'release');
+    console.log(JSON.stringify(result, null, 2));
+    process.exitCode = result.status === 'current' ? 0 : 1; return;
   }
   const packageRun = args[0] === '--suites' && args.length === 4 && args[2] === '--out';
   if (args.length && !packageRun && !(args.length === 2 && args[0] === '--out')) throw Error('Usage: workshop-release.cjs [--out NEW_DIRECTORY | --suites SUITES.json --out NEW_DIRECTORY | --check REPORT.json | --check-package REPORT.json | --bookkeeping-plan REFS.json --version VERSION | --check-bookkeeping PLAN.json | --golden-snapshot | --golden-report SNAPSHOT.json RETURN.json | --check-golden REPORT.json]');
   const files = packageRun ? selectedSuites(JSON.parse(fs.readFileSync(args[1], 'utf8')), root) : inventory(root);
   const out = path.resolve((packageRun ? args[3] : args[1]) || path.join(root, 'artifacts/workshop-verification/releases', new Date().toISOString().replace(/[:.]/g, '-')));
-  fs.mkdirSync(path.dirname(out), { recursive: true });
-  fs.mkdirSync(out); // Refuse to overwrite a prior attempt, including its logs.
+  newOutput(out);
   const before = sourceSnapshot(root), entries = plan(files);
   const report = { version: 1, scope: packageRun ? 'package' : 'release', startedAt: new Date().toISOString(), status: 'running', inventory: files, aggregate: 'test-timezone-regressions.cjs is expanded into its timezone children; never run twice', snapshot: before, checks: [] };
   fs.writeFileSync(path.join(out, 'started.json'), JSON.stringify(report, null, 2), { flag: 'wx' });
@@ -192,7 +297,8 @@ async function main() {
       const run = await execute([entry.file], { root, env: { TZ: entry.zone, WORKSHOP_TEST_OUTPUT_DIR: out }, output: path.join(out, logfile) });
       const result = testResult(run);
       report.checks.push({ ...entry, ...result, exitCode: run.exitCode, timedOut: run.timedOut, signal: run.signal, error: run.error, overflow: run.overflow, output: logfile, outputSha256: snapshot([logfile], out)[0].sha256 });
-      console.log(`${result.ok ? 'PASS' : 'FAIL'} ${entry.file} ${entry.zone}: ${result.passed} passed, ${result.failed} failed, ${result.skipped} skipped`);
+      if (!summary || !result.ok) console.log(`${result.ok ? 'PASS' : 'FAIL'} ${entry.file} ${entry.zone}: ${result.passed} passed, ${result.failed} failed, ${result.skipped} skipped`);
+      if (summary && !result.ok) showFailure(report.checks.at(-1), out);
     }
     const typecheck = await execute(['node_modules/typescript/bin/tsc', '--noEmit'], { root, output: path.join(out, 'typecheck.log') });
     report.typecheck = { exitCode: typecheck.exitCode, timedOut: typecheck.timedOut, error: typecheck.error, overflow: typecheck.overflow, output: 'typecheck.log', outputSha256: snapshot(['typecheck.log'], out)[0].sha256 };
@@ -203,6 +309,7 @@ async function main() {
   } catch (e) { report.status = 'blocked'; report.error = e.message; }
   report.finishedAt = new Date().toISOString();
   fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2), { flag: 'wx' });
+  if (summary && report.status !== 'passed') showFailure({ error: report.error, errors: report.errors, changed: report.changed, typecheck: report.typecheck && { ...report.typecheck, output: path.join(out, report.typecheck.output) } }, out);
   console.log(`Release execution ${report.status}: ${report.checks.filter(c => c.ok).length}/${entries.length} suite/zone executions; ${path.join(out, 'report.json')}`);
   process.exitCode = report.status === 'passed' ? 0 : 1;
 }

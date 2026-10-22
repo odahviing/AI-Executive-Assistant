@@ -1,7 +1,10 @@
 /**
  * Calendar Issues — v3.0.3 redesign.
  *
- * One row per CLUSTER of linked events, PER AXIS. Clusters form via shared
+ * Detected issues have one row per CLUSTER of linked events, PER AXIS. Scoped
+ * accepted conditions also use this store, under synthetic receipt identities;
+ * their bounds live in notes and never grant event-wide suppression.
+ * Clusters form via shared
  * overlap edges: events linked by an overlap issue belong to the same cluster.
  * Single-event issues (work_on_day_off, missing_floating_block, etc.) each
  * own a single-event cluster. Pair issues (overlap) merge their two events
@@ -51,6 +54,85 @@
  * clean start). No data migration path.
  */
 import { getDb } from './client';
+
+/** Scoped acceptance is distinct from an owner's permanent rejection of an event.
+ * Synthetic identities keep these rows out of event-wide dismissal matching. */
+export interface AcceptedCalendarException {
+  kind: 'overlap' | 'category_limit';
+  eventId: string;
+  start: number;
+  end: number;
+  peerEventId?: string;
+  overlapStart?: number;
+  overlapEnd?: number;
+  category?: string;
+  rule?: 'per_day' | 'per_week';
+  windowStart?: string;
+  count?: number;
+  limit?: number;
+  disclosure: string;
+  acceptance: string;
+}
+
+export function recordAcceptedCalendarException(owner: string, date: string, fact: AcceptedCalendarException, relatedIds: string[] = [fact.eventId]): void {
+  // Same occurrence/condition retries replace the same receipt. Quotes are evidence,
+  // not identity, so a replay cannot multiply acceptance rows.
+  const identity = `accepted-condition:${JSON.stringify([fact.eventId, fact.start, fact.end,
+    fact.kind, fact.peerEventId ?? null, fact.category ?? null, fact.rule ?? null, fact.windowStart ?? null])}`;
+  const id = `ci_${owner}_${identity}`;
+  getDb().transaction(() => {
+  getDb().prepare(`INSERT INTO calendar_issues
+    (id, owner_user_id, event_id, peer_event_id, event_date, event_end_ms, issue_class, axis, status, notes, request_id)
+    VALUES (?, ?, ?, NULL, ?, ?, ?, 'conflict', 'approved', ?, NULL)
+    ON CONFLICT(owner_user_id,event_id,axis) DO UPDATE SET notes=excluded.notes, updated_at=datetime('now')`
+  ).run(id, owner, identity, date, fact.end, fact.kind === 'overlap' ? 'overlap' : 'category_limit', JSON.stringify(fact));
+  // Retire the old cluster without turning its automatic closure into a blanket
+  // event waiver. A subsequent distinct/worse condition must be detected again.
+  // Explicit permanent approvals/dismissals remain untouched.
+  const ids = [...new Set([...relatedIds, fact.eventId, ...(fact.peerEventId ? [fact.peerEventId] : [])])];
+  const placeholders = ids.map(() => '?').join(',');
+  getDb().prepare(`UPDATE calendar_issues SET status='resolved', event_end_ms=0,
+    notes=COALESCE(notes,'') || ' [superseded by scoped acceptance]', updated_at=datetime('now')
+    WHERE owner_user_id=? AND axis='conflict' AND status IN ('new','awaiting_owner','in_progress','owner_side','resolved')
+      AND (event_id IN (${placeholders}) OR peer_event_id IN (${placeholders}))`
+  ).run(owner, ...ids, ...ids);
+  })();
+}
+
+export function getAcceptedCalendarExceptions(owner: string): AcceptedCalendarException[] {
+  const rows = getDb().prepare(`SELECT notes FROM calendar_issues WHERE owner_user_id=?
+    AND status='approved' AND substr(event_id,1,19)='accepted-condition:'`).all(owner) as Array<{notes: string}>;
+  return rows.flatMap(row => {
+    try {
+      const f = JSON.parse(row.notes) as AcceptedCalendarException;
+      return (f.kind === 'overlap' || f.kind === 'category_limit') && typeof f.eventId === 'string'
+        && Number.isFinite(f.start) && Number.isFinite(f.end) && f.end > f.start ? [f] : [];
+    } catch { return []; }
+  });
+}
+
+export function acceptedOverlap(facts: AcceptedCalendarException[], a: {id: string; start: number; end: number},
+  b: {id: string; start: number; end: number}): boolean {
+  const start = Math.max(a.start, b.start), end = Math.min(a.end, b.end);
+  return end > start && facts.some(f => {
+    const event = f.eventId === a.id ? a : f.eventId === b.id ? b : undefined;
+    const peer = event === a ? b : a;
+    return f.kind === 'overlap' && event && f.peerEventId === peer.id
+      && f.start === event.start && f.end === event.end
+      && Number.isFinite(f.overlapStart) && Number.isFinite(f.overlapEnd)
+      && start >= f.overlapStart! && end <= f.overlapEnd!;
+  });
+}
+
+export function acceptedCategoryLimit(facts: AcceptedCalendarException[], violation: {
+  category_name: string; rule_broken: string; window_start: string; current_count: number; rule_value: number; event_ids: string[];
+}, intervals: Array<{id: string; start: number; end: number}>): boolean {
+  return facts.some(f => f.kind === 'category_limit' && f.category === violation.category_name
+    && f.rule === violation.rule_broken && f.windowStart === violation.window_start
+    && f.limit === violation.rule_value && Number.isInteger(f.count) && violation.current_count <= f.count!
+    && violation.event_ids.includes(f.eventId)
+    && intervals.some(e => e.id === f.eventId && e.start === f.start && e.end === f.end));
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
