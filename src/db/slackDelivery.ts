@@ -38,8 +38,8 @@ function hydrate(db: Database.Database, row: Omit<SlackDeliveryAttempt, 'inbound
  * without changing the shared connection's policy for unrelated work. These
  * synchronous callbacks cannot interleave with other JS database callers.
  * A nested transaction would only release a savepoint, not commit the claim. */
-function durableTransaction<T>(db: Database.Database, operation: () => T): T {
-  if (db.inTransaction) throw new Error('Slack delivery requires an independent durable transaction');
+export function durableTransaction<T>(db: Database.Database, operation: () => T): T {
+  if (db.inTransaction) throw new Error('Slack durable state requires an independent durable transaction');
   const previous = db.pragma('synchronous', { simple: true }) as number;
   try {
     db.pragma('synchronous = FULL');

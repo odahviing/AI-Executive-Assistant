@@ -12,7 +12,7 @@ export async function readSlackThread(
   const seen = new Set<string>();
   do {
     const page = await client.conversations.replies({ token, channel, ts, limit: 200, cursor });
-    if (!page.ok) throw new Error('Slack thread unavailable');
+    if (!page.ok || !Array.isArray(page.messages)) throw new Error('Slack thread unavailable');
     messages.push(...((page.messages ?? []) as SlackHistoryMessage[]));
     messages.sort((a, b) => Number(a.ts) - Number(b.ts));
     if (Number.isFinite(keep)) messages = messages.slice(-keep);

@@ -831,12 +831,14 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           }
 
           // v3.6.4 — union the internal colleagues the orchestrator resolved
-          // from THIS turn's named participants (deterministic pre-search pass).
+          // from current named participants or a classified continuation
+          // grounded in an indexed human request (pre-search resolution).
           // This is the guarantee that a KNOWN named colleague is in the search
           // even when Sonnet passed a partial attendee_emails (Lori dropped,
           // 07-08) or the wrong shape — resolution no longer depends on Sonnet
-          // remembering to call find_slack_user. Per-turn set (no thread
-          // staleness), owner AND colleague paths, deduped; the owner-self and
+          // remembering to call find_slack_user. The producer checks continuation
+          // provenance rather than unioning all historical names. Owner AND
+          // colleague paths, deduped; the owner-self and
           // any ambiguous/external names were already filtered out upstream.
           if (Array.isArray(context.resolvedMeetingAttendees) && context.resolvedMeetingAttendees.length > 0) {
             const existingLower = new Set(attendeeEmails.map(e => e.toLowerCase()));

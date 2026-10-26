@@ -25,6 +25,7 @@ function harness(options={}){
  const app={client,event:(name,fn)=>events[name]=fn,message:fn=>events.dm=fn};
  const append=(thread,channel,row)=>db.set(thread,[...(db.get(thread)||[]),row].slice(-20));
  const mocks={
+  'src/db/slackCatchup.ts':options.catchupStore||{listSlackCatchupRetries:()=>[],deferSlackCatchupRetry:row=>row,clearSlackCatchupRetry:()=>true},
   'src/connectors/slack/deliveryAttempt.ts':delivery.module,
   'src/utils/logger.ts':logger,'src/config.ts':{config:{}},'src/llm/client.ts':{getAnthropicClient:()=>({messages:{create:async()=>{classifierCalls++;if(classifierCalls===1&&options.classifierPause)await options.classifierPause.promise;return {content:[{type:'tool_use',input:{target:1,verdict:classifierCalls===1?'approve':'pass_to_sonnet'}}]};}}})},'src/core/threadActions.ts':{ownerPostedInThread:rows=>rows.slice(-5).some(m=>m.user==='UOWNER'),classifyThreadAction:async()=> 'other',buildThreadRoster:()=>[],buildThreadActionDirective:()=>''},
   'src/db.ts':{getConversationHistory:t=>[...(db.get(t)||[])],appendToConversation:append,upsertPersonMemory:()=>{},auditLog:()=>{},logEvent:()=>{},getPersonMemory:()=>({person_id:'fixture'}),touchPersonSeenById:()=>{},getSummarySessionByThread:()=>null},
@@ -61,7 +62,7 @@ function harness(options={}){
    compiled.set(file,ts.transpileModule(fs.readFileSync(file,'utf8')+extra,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,esModuleInterop:true}}).outputText);
   }
   const exports={};modules.set(rel,exports);
-  vm.runInNewContext(compiled.get(file),{exports,require:n=>n==='luxon'?{DateTime:{fromISO:()=>({setZone:()=>({isValid:true,toFormat:()=> 'future slot'})})}}:load(path.posix.normalize(path.posix.join(path.posix.dirname(rel),n))+'.ts'),console,AbortController,setImmediate:fn=>jobs.push(fn),setTimeout:(fn,ms)=>{const t={fn,ms,cancelled:false,unref(){}};timers.push(t);return t;},clearTimeout:t=>{t.cancelled=true;}},{filename:rel});
+  vm.runInNewContext(compiled.get(file),{exports,Date:options.clock||Date,require:n=>n==='luxon'?{DateTime:{fromISO:()=>({setZone:()=>({isValid:true,toFormat:()=> 'future slot'})})}}:load(path.posix.normalize(path.posix.join(path.posix.dirname(rel),n))+'.ts'),console,AbortController,setImmediate:fn=>jobs.push(fn),setTimeout:(fn,ms)=>{const t={fn,ms,cancelled:false,unref(){}};timers.push(t);return t;},clearTimeout:t=>{t.cancelled=true;}},{filename:rel});
   return exports;
  }
  const processor=()=>load('src/connectors/slack/app/processMessage.ts');

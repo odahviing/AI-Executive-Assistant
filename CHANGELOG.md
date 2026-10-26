@@ -1,3 +1,23 @@
+## 5.2.2 — Preserve meeting participants and Slack recovery
+
+Maelle carries grounded participants into continuing private Slack scheduling requests and retains unresolved Slack catch-up intervals across restarts. Meeting guidance asks her to consult an accessible existing meeting before requesting missing details.
+
+### Fixed
+- Retain participants from bounded recent user requests in private Slack DMs, while preserving current-message attendee checks and existing search, booking and disclosure boundaries.
+- Preserve unavailable or incomplete catch-up scans with durable per-conversation retry cursors. Retries recheck eligibility and retain unresolved work until a complete scan observes no unanswered messages.
+- Distinguish meeting titles from participant names and consult unambiguous accessible meeting context before asking remaining questions.
+
+### Changed
+- Remove duplicate meeting guidance. The measured main prompt/tool fixture shrank by 333 UTF-16 characters (361 UTF-8 bytes), while the classifier grew by 298 characters before continuity context; a one-user-message continuity fixture adds 1,329 characters. No net live token or cost saving is established.
+- Exclude generated local artifacts from Git while retaining source tests and canonical ledger evidence.
+
+### Migration
+- Add the owner-approved Slack catch-up cursor table automatically at database initialization. Older code ignores it; retaining the table preserves pending intervals across rollback and upgrade.
+
+### Validation and limits
+- Four correction refs independently verified; quick PATCH checkpoint passed 45 affected suites and 880 assertions with typechecking, zero failures and zero skips. Independent replay reproduced 31 before failures with 20 preserved controls and passed 51 behavioral plus 7 structural checks afterward.
+- Roster continuation and removal semantics remain model-dependent and bounded to recent private Slack DM user history. Prompt captures do not prove historical meeting lookup, model obedience or live incident outcomes. Stored cursors grant no access and do not promise exactly-once delivery. Travel-location normalization and separately held document persistence remain unresolved.
+
 ## 5.2.1 — Remember accepted calendar exceptions
 
 Maelle remembers disclosed calendar conflicts the owner explicitly accepts when a move succeeds, so Calendar Health does not repeatedly flag the same accepted facts. Slack replies are shorter and proportional to the request while retaining warmth, requested coverage and material tradeoffs.

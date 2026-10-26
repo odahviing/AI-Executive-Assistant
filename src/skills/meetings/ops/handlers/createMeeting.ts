@@ -188,19 +188,22 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         }
         const attendees = rawAttendees as Array<{ name?: string; email?: string; slack_id?: string }>;
         // v3.6.4 — recover resolved internal attendees into the booking. The
-        // orchestrator already resolved this turn's named participants
+        // orchestrator already resolved current named participants or a
+        // classified continuation grounded in an indexed human request
         // (context.resolvedMeetingAttendees — a known internal colleague's email
         // is in hand, owner + requester excluded upstream). Union any Sonnet left
         // out of args.attendees so the invite includes them DETERMINISTICALLY and
         // never depends on her re-supplying — or asking a colleague for — an email
         // we already resolved (the "what's Simon's email?" bug). `attendees`
         // aliases args.attendees, so the push is what the normalizer reads. Dedupe
-        // by email; per-turn set, so nothing stale from earlier in the thread.
+        // by email; the producer checks continuation provenance rather than
+        // accumulating every participant previously mentioned in the thread.
         //
         // 2026-09-14 — ONLY when this booking already names at least one
         // attendee. `context.resolvedMeetingAttendees` is the orchestrator's
-        // per-TURN resolution of every person NAMED IN THE MESSAGE, with no
-        // notion of which booking they belong to — so on "add me 1 hour drive
+        // per-turn participant resolution, including a provenance-checked
+        // continuing roster. It does not identify which individual calendar
+        // write each person belongs to — so on "add me 1 hour drive
         // before my onsite with einav" / "add a drive home and move Michal's
         // meeting" it unioned a colleague into the owner's SOLO drive block.
         // Both went to Graph with a real invite and were stripped seconds later

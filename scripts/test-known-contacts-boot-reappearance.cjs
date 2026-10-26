@@ -16,6 +16,7 @@ function bootFunction() {
     // This suite calls initSchema directly. The separate Slack schema is
     // invoked by getDb and exercised by the actual storage/durability suites.
     if (name === './slackDelivery') return { initSlackDeliverySchema() { throw Error('Unexpected getDb Slack initialization in initSchema-only audit'); } };
+    if (name === './slackCatchup') return { initSlackCatchupSchema() { throw Error('Unexpected getDb catch-up initialization in initSchema-only audit'); } };
     if (name.startsWith('./migrations/')) return {}; // These are invoked by getDb, not initSchema.
     throw Error('unexpected dependency ' + name);
   }, m, m.exports);

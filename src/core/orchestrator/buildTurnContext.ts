@@ -142,6 +142,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // them. Threaded into the search so a known colleague is never dropped
   // because Sonnet forgot to resolve the name (Lori 07-08, Simon 07-09).
   let turnMeetingPeople: string[] = [];
+  let currentMessageMeetingPeople: string[] = [];
   let resolvedMeetingAttendees: string[] = [];
   // gh#158 residual — `resolvedMeetingAttendees` serves two purposes that need
   // different scopes: WHO to auto-add to the search (everyone genuinely on the
@@ -199,14 +200,21 @@ export async function buildTurnContext(input: OrchestratorInput) {
       // This is input to the existing call, not durable agreement state.
       const recentMessages = conversationHistory.slice(-4);
       const lastAssistantIndex = recentMessages.map(m => m.role).lastIndexOf('assistant');
-      const recentContext = recentMessages
+      const meetingContextMessages = recentMessages
         .map((m, i) => {
           const content = i === lastAssistantIndex
             ? (m.content.length <= 8000 ? m.content : `${m.content.slice(0, 4000)}\n[...middle omitted...]\n${m.content.slice(-4000)}`)
             : m.content.slice(0, 280);
-          return `${m.role === 'user' ? (input.senderName ?? profile.user.name.split(' ')[0]) : profile.assistant.name}: ${content}`;
-        })
+          return { role: m.role, content };
+        });
+      const recentContext = meetingContextMessages
+        .map(m => `${m.role === 'user' ? (input.senderName ?? profile.user.name.split(' ')[0]) : profile.assistant.name}: ${m.content}`)
         .join('\n');
+      // Shared-surface history can contain transport roster framing rather
+      // than authored participant names. Only private Slack history supplies
+      // provenance for continuation; other surfaces keep current-turn extraction.
+      const canContinueMeetingRoster = input.channel === 'slack' && !isRoom
+        && (input.surface === 'owner_dm' || input.surface === 'colleague_dm');
       const turnResult = await classifyTurn({
         anthropic,
         message: userMessage,
@@ -217,6 +225,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
         senderRole: turnSenderRole,
         senderName: input.senderName,
         recentContext: recentContext || undefined,
+        meetingContextMessages: canContinueMeetingRoster ? meetingContextMessages : undefined,
       });
 
       if (needScopes) toolScopes = turnResult.scope.scopes;
@@ -245,11 +254,23 @@ export async function buildTurnContext(input: OrchestratorInput) {
         turnMeetingPeople = rawMeetingPeople.filter(
           name => typeof name === 'string' && name.trim() && normalizedMessage.includes(normalize(name)),
         );
+        currentMessageMeetingPeople = [...turnMeetingPeople];
         const droppedMeetingPeople = rawMeetingPeople.filter(name => !turnMeetingPeople.includes(name));
         if (droppedMeetingPeople.length > 0) {
           logger.warn('orchestrator — meeting_people dropped, not present in this turn\'s raw message (classifier context-bleed guard)', {
             dropped: droppedMeetingPeople, kept: turnMeetingPeople, senderRole: turnSenderRole,
           });
+        }
+        // A separate, explicitly classified continuation may retain people
+        // grounded in an indexed human request. Never relax the current-name
+        // guard above or accept an assistant-invented/historical union roster.
+        if (canContinueMeetingRoster && turnResult.meetingContinuation === true) {
+          const contextual = (turnResult.contextMeetingPeople ?? []).filter(entry => {
+            if (!Number.isInteger(entry.sourceMessageIndex) || typeof entry.name !== 'string' || !entry.name.trim()) return false;
+            const source = meetingContextMessages[entry.sourceMessageIndex];
+            return source?.role === 'user' && normalize(source.content).includes(normalize(entry.name));
+          }).map(entry => entry.name.trim());
+          turnMeetingPeople = [...new Set([...turnMeetingPeople, ...contextual])];
         }
       }
       // v3.x (Block 3 — calendar prose lazy-load). A free-time / buffer / "how
@@ -358,7 +379,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
 
   // v3.6.4 — DETERMINISTIC attendee resolution (the "resolve WHO before WHEN"
   // guarantee, moved from a prompt rule Sonnet ignored into code). Resolve the
-  // participant names classifyTurn extracted into KNOWN INTERNAL colleagues
+  // current or provenance-checked continuing participants into KNOWN INTERNAL colleagues
   // (single unambiguous people_memory match — never fuzzy-guessed). The
   // stored resolved set is (a) threaded into the search via skillContext so
   // find_available_slots can't run a partial list, and (b) surfaced to Sonnet as
@@ -379,7 +400,15 @@ export async function buildTurnContext(input: OrchestratorInput) {
         ownerName: profile.user.name,
       });
       resolvedMeetingAttendees = resolved.map(r => r.email);
-      namedInternalAttendeeEmails = resolvedMeetingAttendees;
+      // Continuation participants constrain the meeting search, but do not
+      // turn an owner-calendar question into a current named-person question.
+      namedInternalAttendeeEmails = turnMeetingPeople.length === currentMessageMeetingPeople.length
+        ? resolvedMeetingAttendees
+        : resolveNamedInternalAttendees({
+          names: currentMessageMeetingPeople,
+          ownerEmail: profile.user.email,
+          ownerName: profile.user.name,
+        }).resolved.map(r => r.email);
       // Memory ambiguity is not current directory ambiguity. Use the existing
       // surface-scoped lookup before asking the human for a known identity.
       // Identity alone does not establish required participation: these contacts

@@ -52,6 +52,7 @@ function fixture(opts = {}) {
     '../../utils/textScrubber': {}, '../../connections/registry': { getConnection: () => conn }, '../../utils/logger': log,
   });
   const background = load('src/core/background.ts', {
+    '../db/slackCatchup': {},
     '../tasks/runner': {}, '../tasks/routineMaterializer': {}, '../tasks/crons': {}, '../tasks/dispatchers/routine': routine,
     '../utils/logger': log, '../connections/slack/eligibility': {}, '../connectors/slack/threadHistory': {},
     // No catch-up invocation belongs to the interrupted-routine startup path.

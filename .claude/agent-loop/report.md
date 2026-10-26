@@ -1,7 +1,13 @@
 <!-- workshop-ledger-report-v1 -->
-**0 product decisions await you** — 1 open items; 0 captured, 0 ready for an authorized lane batch, 1 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
+**1 product decisions await you** — 2 open items; 0 captured, 0 ready for an authorized lane batch, 1 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (0):** none
+**Independently verified, awaiting wrap (4):** complete-attendee-availability · existing-meeting-before-questions · orchestrator-context-size · slack-inaccessible-dm-retries
+
+### Needs a product decision (1)
+
+| Lane · ref | What happened | Your options | Risk |
+|---|---|---|---|
+| librarian · travel-timezone-uncertainty | bug: Unresolved East Coast travel location retains stored-zone fallback. (1 retained example) | W2: no authoritative destination/provenance recovered. Durable targeted Cloud Logging query succeeded; only known reply preview. Exact production record query unavailable due expired SSH authentication. No travel edit or wrong-booking claim. Evidence artifacts/workshop-verification/opportunities-20261026/librarian/result.json. Recommend: defer — verify original destination and provenance before normalization | Not assessed |
 
 ### Held — recorded rulings / existing backlog (1)
 

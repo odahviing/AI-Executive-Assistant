@@ -181,6 +181,8 @@ Automatic move FYIs finish on confirmed delivery; explicit reply-required checks
 
 `src/core/background.ts::startBackgroundTimer` drives `materializeRoutineTasks → runDueTasks → processSlotHoldsIfDue` on the guarded five-minute pipeline, plus capture and slot-hold retention. Requests are not pruned by age. Startup recovers interrupted routine tasks; the separate ten-minute catch-up loop handles missed messages. Verify these background/restart consumers alongside interactive entry points.
 
+`src/db/slackCatchup.ts` retains durable profile/conversation scan cursors for unavailable or incomplete Slack catch-up. Startup, reconnect and heartbeat retry with fresh eligibility; only a complete no-unanswered scan clears the exact cursor. Existing delivery claims/receipts own duplicate prevention; cursors grant no access.
+
 ## Prompt and operational boundaries
 
 `systemPrompt.ts` returns static and dynamic blocks. The current `LANGUAGE — CURRENT TURN WINS` and `HEBREW GENDERED FORMS` guidance remains in `staticContent`, contrary to I8/I9's intended dynamic placement; that deviation is not a policy relaxation. The later NON-LATIN block no longer overrides the common title-translation and brand rules. Coda composition receives authoritative recipient gender through the existing call; structural captures prove inputs, not model obedience.

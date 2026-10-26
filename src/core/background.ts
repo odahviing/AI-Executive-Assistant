@@ -6,6 +6,7 @@ import { ensureBriefingCron, updateBriefingCronChannel } from '../tasks/crons';
 import { stopInterruptedRoutineTasks } from '../tasks/dispatchers/routine';
 import logger from '../utils/logger';
 import { readInternalSlackConversation } from '../connections/slack/eligibility';
+import { listSlackCatchupRetries, deferSlackCatchupRetry, clearSlackCatchupRetry } from '../db/slackCatchup';
 import { readSlackThread } from '../connectors/slack/threadHistory';
 import { hasHeldDelivery, reconcileSlackDeliveries } from '../connectors/slack/deliveryAttempt';
 
@@ -13,7 +14,7 @@ import { hasHeldDelivery, reconcileSlackDeliveries } from '../connectors/slack/d
 // cap — "since Maelle was last online", any length), one reply per distinct
 // unread THREAD (a person with two separate unanswered threads gets both),
 // posted in-thread. The legacy 24h LOOKBACK_HOURS was removed — the watermark
-// IS the window.
+// and durable unresolved conversation cursors define the window.
 //
 // Recovery covers DMs, MPIMs and joined channels. Each actual answer stays in
 // its original thread; room candidates reuse the live addressing boundary.
@@ -553,7 +554,8 @@ export async function catchUpMissedMessages(
   // every existing heartbeat, including when no new inbound history is due.
   await reconcileSlackDeliveries(app, profile.user.slack_user_id, botToken, botUserId);
 
-  // Gap = "since Maelle was last online", from the watermark. NO time cap
+  // New scan gap = "since Maelle was last online", from the watermark. Durable
+  // unresolved conversation cursors can extend it earlier. NO time cap
   // (owner direction): if she was off two days, recover two days; off a week,
   // a week. The per-conversation answered-check (latestHuman > latestBot)
   // decides; the window just bounds how far back we look.
@@ -566,7 +568,7 @@ export async function catchUpMissedMessages(
   // no watermark → gap starts NOW → replay nothing pre-existing. Once a
   // watermark exists, real outages of ANY length recover fully.
   const nowMs = Date.now();
-  const oldest = String((sinceMs != null ? sinceMs : nowMs) / 1000);
+  const retries = new Map(listSlackCatchupRetries(profile.user.slack_user_id).map(row => [row.channelId, row]));
 
   // Scan every listed surface, then verify internal eligibility before reading
   // content. Recovery answers each distinct unanswered thread, not just the
@@ -603,20 +605,34 @@ export async function catchUpMissedMessages(
     });
   }
 
-  type CatchUpEntry = { channelId: string; surface: 'dm' | 'mpim' | 'channel' };
-  const entries: CatchUpEntry[] = [
-    ...[...dmChannels].map(channelId => ({ channelId, surface: 'dm' as const })),
-    ...[...mpimChannels].map(channelId => ({ channelId, surface: 'mpim' as const })),
-    ...[...groupChannels].map(channelId => ({ channelId, surface: 'channel' as const })),
-  ];
-
-  await runWithConcurrency(entries, CATCHUP_SCAN_CONCURRENCY, async ({ channelId, surface }) => {
-    if (!await readInternalSlackConversation(app.client, botToken, channelId)) return;
+  // The durable cursor is discovery only, never an eligibility grant. Include
+  // omitted conversations and derive the surface from fresh metadata at retry.
+  const entries = [...new Set([...dmChannels, ...mpimChannels, ...groupChannels, ...retries.keys()])];
+  await runWithConcurrency(entries, CATCHUP_SCAN_CONCURRENCY, async channelId => {
+    const previous = retries.get(channelId);
+    if (previous && previous.nextCheckAt > nowMs) return;
+    // Commit before any uncertain I/O/replay. A crash must not discard this
+    // interval when the independent socket/global scan watermark advances.
+    const pending = deferSlackCatchupRetry({
+      profileId: profile.user.slack_user_id, channelId,
+      sinceMs: Math.min(previous?.sinceMs ?? Infinity, sinceMs ?? nowMs),
+      nextCheckAt: nowMs,
+    });
+    const conversation = await readInternalSlackConversation(app.client, botToken, channelId);
+    if (!conversation) {
+      deferSlackCatchupRetry({ ...pending, nextCheckAt: nowMs + 60 * 60 * 1000 });
+      return;
+    }
+    const surface = conversation.is_im === true ? 'dm' : conversation.is_mpim === true ? 'mpim' : 'channel';
+    const oldest = String(pending.sinceMs / 1000);
+    let complete = true;
+    const onUnavailable = () => { complete = false; };
     const opts: CheckOpts = {
       app, profile, botToken, botUserId,
       channelId,
       ownerId: profile.user.slack_user_id,
       oldest,
+      onUnavailable,
     };
     // One reply per distinct unread THREAD (owner direction): the same person
     // can have two separate unanswered conversations — a top-level DM and a
@@ -632,39 +648,51 @@ export async function catchUpMissedMessages(
     const candidates: UnansweredCandidate[] = [];
     if (surface === 'dm') {
       try {
-        for (const parentTs of await discoverThreadParents(app, botToken, channelId, { oldest, includeUnmentioned: true })) {
+        for (const parentTs of await discoverThreadParents(app, botToken, channelId, { oldest, includeUnmentioned: true, onUnavailable })) {
           try {
             const c = await findUnansweredInThread(opts, parentTs);
             if (c) candidates.push(c);
           } catch (err) {
+            onUnavailable();
             logger.warn('Catch-up: per-panel-thread error, continuing', {
               channelId, threadTs: parentTs, err: String(err).slice(0, 200),
             });
           }
         }
       } catch (err) {
+        onUnavailable();
         logger.warn('Catch-up: panel discovery threw — continuing', { channelId, err: String(err).slice(0, 200) });
       }
     } else {
       // Channels require explicit mentions; MPIM top-level messages can be
       // naturally addressed and are classified by the existing live gate.
       try {
-        const roots = await discoverThreadParents(app, botToken, channelId, { includeMentionsOf: botUserId, oldest, includeUnmentioned: surface === 'mpim' });
+        const roots = await discoverThreadParents(app, botToken, channelId, { includeMentionsOf: botUserId, oldest, includeUnmentioned: surface === 'mpim', onUnavailable });
         for (const rootTs of roots) {
           try {
             const c = await findUnansweredMentionInThread(opts, rootTs, surface);
             if (c) candidates.push(c);
           } catch (err) {
+            onUnavailable();
             logger.warn('Catch-up: per-mention-thread error, continuing', {
               channelId, threadTs: rootTs, err: String(err).slice(0, 200),
             });
           }
         }
       } catch (err) {
+        onUnavailable();
         logger.warn('Catch-up: mention discovery threw — continuing', { channelId, err: String(err).slice(0, 200) });
       }
     }
-    if (candidates.length === 0) return;
+    if (candidates.length === 0) {
+      if (complete) clearSlackCatchupRetry(pending);
+      else deferSlackCatchupRetry({ ...pending, nextCheckAt: nowMs + 10 * 60 * 1000 });
+      return;
+    }
+    // Replay enqueues work; returning does not prove delivery. Retain the
+    // cursor until a subsequent complete history scan sees no unanswered work.
+    // Existing message claims/delivery receipts prevent duplicate effects.
+    deferSlackCatchupRetry({ ...pending, nextCheckAt: nowMs + 10 * 60 * 1000 });
     // Dedup by thread — keep the latest unanswered message per distinct thread,
     // so an overlap (a panel parent surfacing both as a top-level candidate and
     // a thread candidate) is answered once, not twice.
@@ -723,7 +751,7 @@ function mentionsBot(text: unknown, botUserId: string): boolean {
  */
 async function discoverThreadParents(
   app: App, botToken: string, channelId: string,
-  opts?: { includeMentionsOf?: string; oldest?: string; includeUnmentioned?: boolean },
+  opts?: { includeMentionsOf?: string; oldest?: string; includeUnmentioned?: boolean; onUnavailable?: () => void },
 ): Promise<string[]> {
   try {
     const parents: string[] = [];
@@ -731,7 +759,7 @@ async function discoverThreadParents(
     const cursors = new Set<string>();
     do {
     const res = await app.client.conversations.history({ token: botToken, channel: channelId, limit: 200, cursor });
-    if (!res.ok) throw new Error('Slack history unavailable');
+    if (!res.ok || !Array.isArray(res.messages)) throw new Error('Slack history unavailable');
     for (const m of (res.messages ?? []) as Array<Record<string, unknown>>) {
       if (typeof m.ts !== 'string') continue;
       const replyCount = typeof m.reply_count === 'number' ? m.reply_count : 0;
@@ -746,6 +774,7 @@ async function discoverThreadParents(
     } while (cursor);
     return parents;
   } catch (err) {
+    opts?.onUnavailable?.();
     logger.warn('Catch-up: thread discovery unavailable', { channelId, err: String(err).slice(0, 160) });
     return [];
   }
@@ -759,6 +788,7 @@ interface CheckOpts {
   channelId: string;
   ownerId: string;
   oldest: string;
+  onUnavailable?: () => void;
 }
 
 // v3.2.6 (#122) — assistant-PANEL catch-up. Messages typed in the Slack
@@ -778,6 +808,7 @@ async function findUnansweredInThread(opts: CheckOpts, threadTs: string): Promis
   try {
     messages = await readSlackThread(app.client, botToken, channelId, threadTs, Infinity);
   } catch (err) {
+    opts.onUnavailable?.();
     logger.debug('Catch-up: assistant thread not accessible', { channelId, threadTs });
     return null;
   }
@@ -813,6 +844,7 @@ async function findUnansweredMentionInThread(
   try {
     messages = await readSlackThread(app.client, botToken, channelId, rootTs, Infinity);
   } catch {
+    opts.onUnavailable?.();
     return null;  // no access / no history — nothing to discover
   }
 

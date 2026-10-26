@@ -12,6 +12,7 @@ import { runCalendarIssuesAxisMigration } from './migrations/v4_5_3_calendar_iss
 import { runPurgeWorkShapedSocialSubjects } from './migrations/v4_5_9_purge_work_subjects';
 import { runSocialCategoryScoreRebase } from './migrations/v4_5_9_social_category_scores';
 import { initSlackDeliverySchema } from './slackDelivery';
+import { initSlackCatchupSchema } from './slackCatchup';
 
 let db: Database.Database | undefined;
 
@@ -26,6 +27,7 @@ export function getDb(): Database.Database {
       db.pragma('foreign_keys = ON');
       initSchema(db);
       initSlackDeliverySchema(db);
+      initSlackCatchupSchema(db);
       // v2.0.7 — one-shot migration: back up + drop pending_requests + approval_queue.
       // Runs AFTER initSchema so new installs (that never had the tables) don't
       // create-then-drop; existing installs back up first, then drop. Idempotent.

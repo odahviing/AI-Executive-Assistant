@@ -57,6 +57,7 @@ function harness(t, options = {}) {
     } }),
   };
   const mocks = {
+    'src/db/slackCatchup.ts': {},
     'src/connectors/slack/deliveryAttempt.ts': require('./fixtures/slack-delivery.cjs')().module,
     'src/tasks/runner.ts': {}, 'src/tasks/routineMaterializer.ts': {}, 'src/tasks/crons.ts': {},
     'src/tasks/dispatchers/routine.ts': { stopInterruptedRoutineTasks: async () => {} },

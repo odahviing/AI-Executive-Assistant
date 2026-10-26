@@ -99,6 +99,11 @@ export interface ClassifyTurnResult {
    * forgot to resolve the name. Never fuzzy-matched here; this is raw extraction.
    */
   meetingPeople: string[];
+  /** Transient continuation evidence, grounded to caller-supplied user messages.
+   * Continuation/removal semantics remain classifier judgments; callers must
+   * independently enforce transport and source provenance before using names. */
+  meetingContinuation?: boolean;
+  contextMeetingPeople?: Array<{ name: string; sourceMessageIndex: number }>;
 }
 
 /** Pure-ack short-circuit — shared by both halves. Bare ack/greeting/close-out
@@ -128,6 +133,9 @@ export async function classifyTurn(params: {
   senderRole?: 'owner' | 'colleague';
   senderName?: string;
   recentContext?: string;
+  /** Same bounded recent context, indexed for participant provenance. Supply
+   * only where the caller can authenticate historical human authorship. */
+  meetingContextMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
 }): Promise<ClassifyTurnResult> {
   const { anthropic, message, profile, needIntent, needScopes, recentContext } = params;
   const needMeetingPeople = params.needMeetingPeople === true;
@@ -248,6 +256,7 @@ MEETING ACTION (meeting_action) — classify the LAST message's meaning using re
 
 MEETING PARTICIPANTS (meeting_people) — set this ONLY when ${senderName} is giving a NEW instruction to set up, schedule, move, or book a MEETING WITH someone. List the people that meeting is WITH, exactly as each is named in the message (first name, full name, nickname, @handle — however written; any language or script).
 - Include everyone named as a participant EXCEPT ${assistantName} (you) and ${senderName} (the person writing this message).
+- Extract people in participant roles, keeping title/topic/company tokens as meeting context. "Schedule the LN profile meeting" names a topic, not a person; "schedule a meeting with LN" explicitly names a participant. Preserve explicitly named people even when their identity needs clarification.
 - "${isOwner ? 'book 30 min with Lori and Simon' : `I need a meeting with ${ownerFirst} and Simon`}" → the participants named are the OTHER people (e.g. Lori, Simon${isOwner ? '' : `, ${ownerFirst}`}).
 - A name can surface without being an instruction to include them. Test each named person: is this a REAL ASK to include them (now or going forward), or a question DISPUTING whether you already checked them, with nothing new asked?
   - Disputing, nothing new asked ("are you sure you didn't check Yael?", "you didn't even look at Yael's calendar") → that name is excluded, even though it's named.
@@ -255,12 +264,23 @@ MEETING PARTICIPANTS (meeting_people) — set this ONLY when ${senderName} is gi
 - The two can share one sentence: "you didn't check Yael — anyway find me 25 min with Levana" disputes Yael (excluded) and separately asks for Levana (included) → return only Levana, never both.
 - NOT a scheduling request, or nobody named → return an empty array.
 - Do NOT invent, translate, or normalize names — copy them as written. Do NOT guess who a vague reference means; only list explicitly named people.
+${params.meetingContextMessages ? `
+MEETING CONTINUATION (meeting_continuation, context_meeting_people):
+- Use the indexed recent conversation only to identify the SAME still-active scheduling request. Return meeting_continuation=true only when the current message continues that request; new task, dispute without a scheduling ask, missing task anchor, or uncertainty means false and an empty context_meeting_people array.
+- For a continuation, list only participants explicitly named in a prior USER scheduling request, copying each name exactly and citing its sourceMessageIndex. Assistant suggestions are never a source. Include only people still requested after all intervening messages and the current message.
+- "Find time with Dana and Lev" followed by "what about Thursday?" carries Dana and Lev. "Replace Lev with Sara" carries Dana only (Sara belongs in current meeting_people). "Without Dana" excludes Dana. "Instead book a separate meeting with Sara" starts a new task and carries nobody. A historical name alone is insufficient evidence of continuation.
+- Keep meeting_people strictly current-message-only; historical names belong only in context_meeting_people. Never carry participants from a finished, abandoned, replaced or unrelated request.
+` : ''}
 ` : '';
+
+  const renderedContext = params.meetingContextMessages
+    ? params.meetingContextMessages.map((m, i) => `[${i}] ${m.role}: ${m.content}`).join('\n')
+    : recentContext;
 
   const systemPrompt = `You classify a single message from ${senderName} (${isOwner ? `${ownerFirst} — the executive who owns this account` : `a colleague talking to ${assistantName}`}) to ${assistantName}.
 
 Output EXACTLY ONE call to classify_turn. No prose.
-${intentSection}${scopeSection}${meetingPeopleSection}${recentContext ? `\nRecent conversation (classify the LAST message from ${senderName}):\n${recentContext}\n` : ''}`;
+${intentSection}${scopeSection}${meetingPeopleSection}${renderedContext ? `\nRecent conversation (classify the LAST message from ${senderName}):\n${renderedContext}\n` : ''}`;
 
   // ── Build the tool schema — include only the requested fields ──
   const properties: Record<string, any> = {};
@@ -308,6 +328,18 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${recentContext ? `\nRecen
       description: 'People named as participants in a scheduling request, copied as written. Empty array when this is not a scheduling request or nobody is named.',
       items: { type: 'string' },
     };
+    if (params.meetingContextMessages) {
+      properties.meeting_continuation = { type: 'boolean' };
+      properties.context_meeting_people = {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { name: { type: 'string' }, sourceMessageIndex: { type: 'integer' } },
+          required: ['name', 'sourceMessageIndex'],
+          additionalProperties: false,
+        },
+      };
+    }
     // Deliberately NOT in `required` — an empty array (the common non-scheduling
     // case) must be a first-class answer, not a forced hallucination.
   }
@@ -328,7 +360,7 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${recentContext ? `\nRecen
     logLlmUsage('classify_turn', MODEL, resp);
 
     const toolUse = resp.content.find((b: any) => b.type === 'tool_use') as any;
-    const raw = toolUse?.input as (OwnerIntentClassification & { scopes?: string[]; free_time_inquiry?: boolean; meeting_people?: unknown; meeting_action?: unknown }) | undefined;
+    const raw = toolUse?.input as (OwnerIntentClassification & { scopes?: string[]; free_time_inquiry?: boolean; meeting_people?: unknown; meeting_action?: unknown; meeting_continuation?: unknown; context_meeting_people?: unknown }) | undefined;
 
     // ── Resolve intent ──
     let intent: OwnerIntentClassification = INTENT_OTHER;
@@ -384,6 +416,19 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${recentContext ? `\nRecen
     const meetingAction = needMeetingPeople
       && (rawMeetingAction === 'execute' || rawMeetingAction === 'explore' || rawMeetingAction === 'none')
       ? rawMeetingAction : undefined;
+    const meetingContinuation = needMeetingPeople && !!params.meetingContextMessages
+      && raw?.meeting_continuation === true;
+    const contextMeetingPeople: Array<{ name: string; sourceMessageIndex: number }> = [];
+    if (meetingContinuation && Array.isArray(raw?.context_meeting_people)) {
+      for (const entry of raw.context_meeting_people.slice(0, 12)) {
+        if (!entry || typeof entry.name !== 'string' || !entry.name.trim()
+          || !Number.isInteger(entry.sourceMessageIndex)) continue;
+        const source = params.meetingContextMessages?.[entry.sourceMessageIndex];
+        const name = entry.name.trim();
+        if (source?.role !== 'user' || !source.content.includes(name)) continue;
+        contextMeetingPeople.push({ name, sourceMessageIndex: entry.sourceMessageIndex });
+      }
+    }
 
     logger.info('classifyTurn', {
       ...(needIntent ? {
@@ -401,7 +446,7 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${recentContext ? `\nRecen
 
     const freeTimeInquiry = isOwner && needIntent && raw?.free_time_inquiry === true;
 
-    return { intent, scope, freeTimeInquiry, meetingPeople, meetingAction };
+    return { intent, scope, freeTimeInquiry, meetingPeople, meetingAction, meetingContinuation, contextMeetingPeople };
   } catch (err) {
     logger.warn('classifyTurn threw — defaulting to other / general', { err: String(err).slice(0, 300) });
     return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false, meetingPeople: [] };

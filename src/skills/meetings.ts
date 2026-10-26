@@ -246,7 +246,7 @@ Return shape in this mode is DIFFERENT:
 
 When ALL candidates are blocked: narrate WHY using each \`broken_rule_label\` verbatim ("Jun 9 7pm is outside the attendee's working hours; Jun 10 5:30pm conflicts with another meeting…") and offer to widen the search. When at least one is available: surface those.
 
-ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidates are concrete times the user named. ONE call instead of N saves real time. \`search_from\` / \`search_to\` are ignored in this mode — omit them (the candidate range is used).`,
+Omit \`search_from\` / \`search_to\` in candidate mode; the candidate range is used.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -1431,11 +1431,7 @@ DIRECT BOOKING PATH — find the slot, then book it. One flow:
 There is no separate "approve and send" step — create_meeting IS the booking. When email/subject/slot are all known, fire create_meeting in the same turn — don't narrate "I will" in future tense, just do it.
 
 CONCISION — bundle missing fields into ONE ask, not a ping-pong (v2.3.6 / #72b):
-When you need multiple inputs from ${firstName} before booking (topic, mode, duration, override confirmation, location, etc.), ASK ALL OF THEM IN ONE MESSAGE — not one per turn. Owner-facing example:
-- ❌ Wrong: "Want to override?" → owner says yes → "What's the topic?" → owner answers → "Online or in-person?" → owner answers → "How long?" → owner answers → 4 separate turns
-- ✅ Right: "Got it, override approved. Just need the topic, mode (online or in-person), and duration." → owner answers all three in one reply → done in 2 turns total
-
-Don't sequence questions that are independent of each other. ${firstName} can read three short questions in one message faster than he can answer four sequential turns.
+For a named meeting that may already exist, first use the supplied MEETINGS YOU REQUESTED context or get_calendar within the stated date range when that tool is available. Reuse details only from an unambiguous accessible match; multiple matches, unavailable lookup or missing dates call for a focused clarification. A title/topic is not a participant identity, and a match alone grants no mutation authority. Bundle only the remaining independent questions (topic, mode, duration, override confirmation, location) into one message.
 
 MEETINGS HONESTY (extends base RULE 1/2/5 — calendar-specific facts only):
 
