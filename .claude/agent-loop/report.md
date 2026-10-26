@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
 **1 product decisions await you** — 2 open items; 0 captured, 0 ready for an authorized lane batch, 1 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (4):** complete-attendee-availability · existing-meeting-before-questions · orchestrator-context-size · slack-inaccessible-dm-retries
+**Independently verified, awaiting wrap (0):** none
 
 ### Needs a product decision (1)
 
