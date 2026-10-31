@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
 **2 product decisions await you** — 4 open items; 1 captured, 0 ready for an authorized lane batch, 1 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (7):** morning-brief-unidentified-reschedules · boston-calendar-health-stale-next-run · vacation-days-workload-and-lunch-warnings · internal-requester-attendance-extra-questions · meeting-duration-rounding-unnecessary-explanation · paul-completed-signing-and-unclear-paypal-brief · yael-additional-working-hours-capability
+**Independently verified, awaiting wrap (0):** none
 
 ### Captured — pending batch assessment (1)
 
