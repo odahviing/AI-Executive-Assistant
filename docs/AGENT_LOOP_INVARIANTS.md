@@ -108,7 +108,7 @@ MPIM thread mentions are handled by the MPIM owner-in-group authority model else
 
 ## 10. Catch-up's `markProcessed(msgTs)` fires BEFORE the reply post
 
-Where: `core/background.ts:944` (inside `replayMissedMessage`, which starts at `:906`). The mark happens before dispatch through the registered live inbound replay path. If we re-ordered (mark after post), Slack's at-least-once re-delivery in the window between post and mark could double-reply.
+Where: `core/background.ts`, the `markProcessed(msgTs)` call inside `replayMissedMessage`. The mark happens before dispatch through the registered live inbound replay path. If we re-ordered (mark after post), Slack's at-least-once re-delivery in the window between post and mark could double-reply.
 
 Why it matters: current socket-first boot allows catch-up and live delivery to overlap. Both must acquire the shared claim before processing; the replay handoff preserves that claim when entering the live handler.
 

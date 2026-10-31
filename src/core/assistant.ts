@@ -74,7 +74,7 @@ function describeHoursWrite(
     },
     notes: [
       `working_hours_structured for ${name} was not confirmed as saved (${outcome ?? "no write outcome"}). Slot searches still use ${still}.`,
-      'Use working_hours_structured.week for recurring weekday clocks or null for a day off; preserve unspecified days. Omitted duration means recurring. Ask for exact start and end clocks for vague hours. Temporary changes use the existing dated override tools.',
+      'Use working_hours_structured.week for recurring weekday arrays of clock windows or [] for a day off; preserve unspecified days. Omitted duration means recurring. Ask for exact start and end clocks for vague hours. Use operation add to append recurring windows in the existing timezone; replace changes supplied weekdays. Dated colleague exceptions are unsupported. Confirm a save only from the write result.',
     ],
   };
 }
@@ -243,19 +243,20 @@ Use real evidence; omit unknown fields. Save explicit corrections when given; in
             },
             working_hours_structured: {
               type: 'object',
-              description: 'Recorded complete regular week, initialized from timezone defaults once until stated. Send week with only changed weekdays: {hoursStart,hoursEnd}, or null for a day off; other days stay unchanged. Omitted duration means recurring. Temporary changes use the existing dated override tools. Save stated hours or strong calendar metadata; the result confirms the write and echoes the week. Ask for exact start and end clocks for vague hours. Windows end after they start on the same day.',
+              description: 'Recorded complete regular week, initialized from timezone defaults once until stated. Send week with only changed weekdays: arrays of {hoursStart,hoursEnd}, or [] for a day off; other days stay unchanged. Omitted duration means recurring. Use operation add to append recurring windows in the existing timezone; replace changes supplied weekdays. Dated colleague exceptions are unsupported. Confirm a save only from the write result. Save stated hours or strong calendar metadata; the result confirms the write and echoes the week. Ask for exact start and end clocks for vague hours. Windows end after they start on the same day.',
               properties: {
                 week: {
                   type: 'object',
                   properties: Object.fromEntries(['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map(day => [day, {
-                    anyOf: [{ type: 'null' }, {
+                    type: 'array', items: {
                       type: 'object', properties: {
                         hoursStart: { type: 'string' }, hoursEnd: { type: 'string' },
                       }, required: ['hoursStart', 'hoursEnd'], additionalProperties: false,
-                    }],
+                    },
                   }])),
                   additionalProperties: false,
                 },
+                operation: { type: 'string', enum: ['replace', 'add'], description: 'Replace supplied days (default), or add windows while preserving existing windows and gaps. Add must keep the existing timezone.' },
                 timezone:   { type: 'string', description: 'Optional IANA TZ — only set if it differs from their people_memory.timezone (rare). e.g. "America/New_York".' },
               },
               additionalProperties: false,
@@ -475,7 +476,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         return { updated: false, merged: false, reason: 'merge_unavailable_or_unconfirmed' };
       }
     }
-    if (toolName === 'update_person_profile' && Object.prototype.hasOwnProperty.call(args, 'working_hours')) return { updated: false, error: 'retired_working_hours', reason: 'Use working_hours_structured.week for the regular week; historical prose was not changed.', _note: 'Use working_hours_structured.week for recurring weekday clocks or null for a day off; preserve unspecified days. Omitted duration means recurring. Ask for exact start and end clocks for vague hours. Temporary changes use the existing dated override tools.' };
+    if (toolName === 'update_person_profile' && Object.prototype.hasOwnProperty.call(args, 'working_hours')) return { updated: false, error: 'retired_working_hours', reason: 'Use working_hours_structured.week for the regular week; historical prose was not changed.', _note: 'Use working_hours_structured.week for recurring weekday arrays of clock windows or [] for a day off; preserve unspecified days. Omitted duration means recurring. Ask for exact start and end clocks for vague hours. Use operation add to append recurring windows in the existing timezone; replace changes supplied weekdays. Dated colleague exceptions are unsupported. Confirm a save only from the write result.' };
     const notSavedFields: string[] = [];
     // Authority permits writes; a shared surface still withholds private reads
     // and the existing owner preference / markdown tools.
@@ -973,7 +974,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
                   ...hours,
                   note: hours.source === 'manual'
                     ? `Stated window — what slot searches clip to. It outranks any hours mentioned in notes or content (older prose); report THIS as ${row?.name ?? query}'s hours.`
-                    : `No hours stated for ${row?.name ?? query} yet — this recorded regular week was initialized from timezone defaults once; it stays until edited. Temporary changes use dated overrides.`,
+                    : `No hours stated for ${row?.name ?? query} yet — this recorded regular week was initialized from timezone defaults once; it stays until edited. Dated colleague exceptions are unsupported.`,
                 },
               }
             : {}),

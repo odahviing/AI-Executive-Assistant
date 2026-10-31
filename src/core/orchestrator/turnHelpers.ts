@@ -579,7 +579,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // ACTIVITY to match and got hedged as invented. Surface each day's
         // real day-off/OOF status here too, from the per-day DayAnalysis
         // fields (`dayType`, `outOfOfficeAllDay` —
-        // skills/meetings/ops/analysis.ts:284,303) claimChecker's owner_fact
+        // skills/meetings/ops/analysis.ts, interface DayAnalysis) claimChecker's owner_fact
         // mode is written to treat as ground truth. Sibling of the
         // `off_days=` marker find_available_slots emits below; same bug.
         const dayOffDates = days.filter((d: any) => d.dayType === 'day_off').map((d: any) => d.date);

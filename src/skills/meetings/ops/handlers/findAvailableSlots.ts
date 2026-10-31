@@ -890,23 +890,19 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // Busy overrides can soften calendar conflicts. M17 keeps attendee
           // hours hard in general offerings; a specifically named slot is
           // checked separately below with the existing owner approval grant.
-          // REQUESTER ≠ ATTENDEE — but DEFAULT-SAFE for the common case. When a
-          // colleague asks to book a meeting they're
-          // ATTENDING, they ARE an attendee: their TZ drives per_attendee_local
-          // (correct cross-TZ labels) and their work-hours correctly steer the
-          // search — dropping them would BREAK that (lose the ET conversion +
-          // the clip). So we only drop the requester when Sonnet explicitly
-          // flags her as organizing-not-attending (`requester_is_attending:
-          // false` — e.g. an EA collecting options for OTHERS, like Yael). Then
-          // her own calendar/work-hours stop clipping the search and she's not
-          // annotated "busy" back to herself. Default (flag unset/true) = keep,
-          // so the attending-requester case is untouched.
-          if (!isOwnerInitiatedSearch && context.userId && args.requester_is_attending === false) {
+          // The authenticated colleague attends by default, matching create_meeting.
+          // Normalize after every roster recovery so omission cannot skip their hours
+          // and explicit nonattendance removes only them, preserving all other people.
+          if (!isOwnerInitiatedSearch && context.userId) {
             try {
               const requesterEmailLower = (getPersonMemory(context.userId)?.email ?? '').toLowerCase();
               if (requesterEmailLower) {
                 const before = attendeeEmails.length;
-                attendeeEmails = attendeeEmails.filter(e => e.toLowerCase() !== requesterEmailLower);
+                if (args.requester_is_attending === false) {
+                  attendeeEmails = attendeeEmails.filter(e => e.toLowerCase() !== requesterEmailLower);
+                } else if (!attendeeEmails.some(e => e.toLowerCase() === requesterEmailLower)) {
+                  attendeeEmails = [...attendeeEmails, requesterEmailLower];
+                }
                 if (attendeeEmails.length < before) {
                   logger.info('find_available_slots — dropped requester from attendees (organizer, not attendee)', {
                     requester: requesterEmailLower,
@@ -914,7 +910,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 }
               }
             } catch (err) {
-              logger.warn('find_available_slots — requester-exclusion lookup threw, continuing', {
+              logger.warn('find_available_slots — requester attendance lookup threw, continuing', {
                 err: String(err).slice(0, 200),
               });
             }
@@ -957,13 +953,19 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               if (!ownerHoursAuthority && ovEmail !== requesterEmail) continue;
               const entry = attendeeAvailability.find(a => a.email.toLowerCase() === ovEmail);
               if (!entry) continue;
-              // This search's explicit bound applies to each regular workday;
-              // preserve each day's other bound when only one was supplied.
-              entry.week = Object.fromEntries(Object.entries(entry.week).map(([day, hours]) => [day, hours && {
-                  ...hours,
-                  ...(typeof ov.start === 'string' && hhmm.test(ov.start.trim()) ? { hoursStart: ov.start.trim() } : {}),
-                  ...(typeof ov.end === 'string' && hhmm.test(ov.end.trim()) ? { hoursEnd: ov.end.trim() } : {}),
-                }])) as typeof entry.week;
+              // A complete explicit search window replaces regular-day windows.
+              // One bound moves only that outer edge, preserving interior gaps.
+              const start = typeof ov.start === 'string' && hhmm.test(ov.start.trim()) ? ov.start.trim().padStart(5, '0') : undefined;
+              const end = typeof ov.end === 'string' && hhmm.test(ov.end.trim()) ? ov.end.trim().padStart(5, '0') : undefined;
+              entry.week = Object.fromEntries(Object.entries(entry.week).map(([day, windows]) => {
+                if (!windows.length) return [day, []];
+                if (start && end) return [day, start < end ? [{ hoursStart: start, hoursEnd: end }] : []];
+                const adjusted = windows.map((hours, index) => ({
+                  hoursStart: start ? (index === 0 || hours.hoursStart < start ? start : hours.hoursStart) : hours.hoursStart,
+                  hoursEnd: end ? (index === windows.length - 1 || hours.hoursEnd > end ? end : hours.hoursEnd) : hours.hoursEnd,
+                })).filter(hours => hours.hoursStart < hours.hoursEnd);
+                return [day, adjusted];
+              })) as typeof entry.week;
               if (typeof ov.tz === 'string' && ov.tz.trim()) {
                 entry.workingHoursTimezone = ov.tz.trim();
                 // Same rule as `tzTempDifferingForDay`, third path: the hedge

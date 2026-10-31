@@ -185,7 +185,7 @@ test('regression: never-engaged recipient — scheduled send floors to the Slack
   assert.equal(p?.timezone_set_by, 'auto');
   assert.equal(p?.name, 'Colleague Slack');
   assert.equal(p?.email, 'colleague@example.com');
-  assert.equal(JSON.parse(p?.profile_json ?? '{}')?.working_hours_structured?.week.Monday.hoursStart, '09:00');
+  assert.equal(JSON.parse(p?.profile_json ?? '{}')?.working_hours_structured?.week.Monday[0].hoursStart, '09:00');
   assert.equal(p?.working_hours_auto, null);
 });
 test('regression: never-engaged recipient — immediate awaited send arms the reply deadline in the recipient\'s zone', async () => {

@@ -322,6 +322,8 @@ interface DayAnalysis {
    * has `isWorkDay:false` and cannot be misled by the absence.
    */
   outOfOfficeAllDay?: true;
+  /** A full-day busy/tentative commitment; occupancy alone does not mean vacation. */
+  allDayBusy?: true;
   events: ProcessedEvent[];   // sorted by start, mine only, not cancelled
   issues: CalendarIssue[];
   stats: {
@@ -463,6 +465,7 @@ export function analyzeCalendar(
     const outOfOfficeAllDay = coveringOofSpan !== undefined;
     const nonAllDayMeetings = myEvents.filter(e => !e.isAllDay && e.showAs !== 'oof');
     const coveringBusySpans = busySpans.filter(s => s.startDate <= dateStr && dateStr < s.endDateExclusive);
+    const workdayQualityApplies = !outOfOfficeAllDay && coveringBusySpans.length === 0;
     for (const block of coveringBusySpans) {
       // Personal/solo commitments and floating objects can intentionally sit
       // within a full-day hold. Report work with others, without moving it.
@@ -640,7 +643,7 @@ export function analyzeCalendar(
     if (outOfOfficeAllDay || coveringBusySpans.length > 0) freeMin = 0;
 
     const requiredFreeMin = requiredFreeMinutesForWorkDay(workTotalMin, profile.meetings.work_hours_per_free_hour);
-    if (!outOfOfficeAllDay && requiredFreeMin > 0 && freeMin < requiredFreeMin) {
+    if (workdayQualityApplies && requiredFreeMin > 0 && freeMin < requiredFreeMin) {
       issues.push({
         type: 'no_buffer',
         severity: 'high',
@@ -668,6 +671,9 @@ export function analyzeCalendar(
       `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
 
     for (const block of floatingBlocks) {
+      // An all-day commitment/absence is not an ordinary workday to optimize.
+      // Keep its appointments and genuine conflicts, without inventing lunch duties.
+      if (!workdayQualityApplies) continue;
       if (!fb.blockAppliesOnDay(block, dayName, profile)) continue;
 
       const [bsH, bsM] = block.preferred_start.split(':').map(Number);
@@ -770,6 +776,7 @@ export function analyzeCalendar(
       dayType,
       isWorkDay: true,
       ...(outOfOfficeAllDay ? { outOfOfficeAllDay: true as const } : {}),
+      ...(coveringBusySpans.length > 0 ? { allDayBusy: true as const } : {}),
       events: myEvents,
       issues,
       stats: {

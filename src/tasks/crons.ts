@@ -244,10 +244,23 @@ export function getBriefingRoutineHourMin(profile: UserProfile): [number, number
   return [slots[0].h, slots[0].m];
 }
 
-/**
- * Ensures the system briefing cron exists and is up to date.
- * Called at startup — idempotent.
- */
+/** Reconcile only future/missing cursors; overdue firings belong to catch-up. */
+export function reconciledRoutineNextRunAt(
+  routine: Pick<Routine, 'schedule_type' | 'schedule_time' | 'schedule_day' | 'next_run_at'>,
+  profile: UserProfile,
+): string | null {
+  const now = DateTime.utc();
+  const stored = routine.next_run_at ? DateTime.fromISO(routine.next_run_at, { zone: 'utc' }) : null;
+  if (stored?.isValid && stored <= now) return routine.next_run_at;
+  const invalid = scheduleError(routine.schedule_type, routine.schedule_time, routine.schedule_day);
+  if (invalid) throw new Error(`Invalid persisted routine schedule: ${invalid}`);
+  const next = computeNextRunAt(routine.schedule_type, routine.schedule_time, routine.schedule_day,
+    profile.user.timezone, now, getProfileWorkDays(profile));
+  return stored?.isValid && stored.toMillis() === DateTime.fromISO(next).toMillis()
+    ? routine.next_run_at : next;
+}
+
+/** Ensures the system briefing cron exists and is up to date at startup. */
 export function ensureBriefingCron(profile: UserProfile): void {
   const db = getDb();
   const ownerUserId = profile.user.slack_user_id;
@@ -263,21 +276,8 @@ export function ensureBriefingCron(profile: UserProfile): void {
     const scheduleTime = existing.schedule_time;
     const invalidSchedule = scheduleError(existing.schedule_type, scheduleTime, existing.schedule_day);
     if (invalidSchedule) throw new Error(`Invalid persisted briefing schedule: ${invalidSchedule}`);
-    const now = DateTime.utc();
-    const nextRunAt = computeNextRunAt(existing.schedule_type, scheduleTime, existing.schedule_day, profile.user.timezone, now, workDays);
-    const storedNext = existing.next_run_at
-      ? DateTime.fromISO(existing.next_run_at, { zone: 'utc' })
-      : null;
-    // The profile timezone and workday union are part of the schedule even
-    // though routines persist only the clock string. Refresh a future cursor
-    // whenever it is no longer the next occurrence under the current profile.
-    // Preserve an overdue cursor: the materializer must still get the chance
-    // to apply its existing catch-up/lateness policy to that firing.
-    const futureCursorChanged = storedNext != null && (
-      !storedNext.isValid ||
-      (storedNext > now && storedNext.toMillis() !== DateTime.fromISO(nextRunAt).toMillis())
-    );
-    if (futureCursorChanged) {
+    const nextRunAt = reconciledRoutineNextRunAt(existing, profile);
+    if (existing.next_run_at !== nextRunAt) {
       db.prepare(`
         UPDATE routines SET schedule_time = ?, next_run_at = ?, updated_at = datetime('now')
         WHERE id = ?

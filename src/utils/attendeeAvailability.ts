@@ -165,8 +165,8 @@ export interface AttendeeWorkSegment {
 
 /** Partition a meeting at every local midnight and trip boundary. Fixed
  * workingHoursTimezone continues to own the work window while physical travel
- * owns presentation only. Each segment uses that frame's weekday override,
- * falling back to the uniform window. A slot must fit every visited wall clock
+ * owns presentation only. Each segment uses that frame's weekday windows.
+ * A slot must fit one continuous window at every visited wall clock
  * (DST too). */
 export function attendeeWorkSegmentsBetween(
   entry: AttendeeAvailabilityEntry, from: DateTime, until: DateTime,
@@ -184,12 +184,12 @@ export function attendeeWorkSegmentsBetween(
     const timezone = entry.workingHoursTimezone ?? attendeeTzForDay(entry, instant.toISO()!);
     const start = instant.setZone(timezone), end = DateTime.fromMillis(points[i + 1], { zone: timezone });
     const day = start.toFormat('EEEE') as WeekDay;
-    const hours = entry.week[day];
-    if (!hours) return { start, end, timezone, fitsWorkHours: false };
-    const [sh, sm] = hours.hoursStart.split(':').map(Number);
-    const [eh, em] = hours.hoursEnd.split(':').map(Number);
     const { startMin, endMin } = slotDayMinutes(start, end);
-    const fitsWorkHours = startMin >= sh * 60 + sm && endMin <= eh * 60 + em;
+    const fitsWorkHours = entry.week[day].some(hours => {
+      const [sh, sm] = hours.hoursStart.split(':').map(Number);
+      const [eh, em] = hours.hoursEnd.split(':').map(Number);
+      return startMin >= sh * 60 + sm && endMin <= eh * 60 + em;
+    });
     return { start, end, timezone, fitsWorkHours };
   });
 }
@@ -203,12 +203,13 @@ export function attendeeWorkIntervalsBetween(
   const result: Array<{ start: DateTime; end: DateTime }> = [];
   for (const segment of attendeeWorkSegmentsBetween(entry, from, until)) {
     const day = segment.start.toFormat('EEEE') as WeekDay;
-    const hours = entry.week[day];
-    if (!hours) continue;
-    const [sh, sm] = hours.hoursStart.split(':').map(Number);
-    const [eh, em] = hours.hoursEnd.split(':').map(Number);
+    const windows = entry.week[day].map(hours => {
+      const [sh, sm] = hours.hoursStart.split(':').map(Number);
+      const [eh, em] = hours.hoursEnd.split(':').map(Number);
+      return { startMin: sh * 60 + sm, endMin: eh * 60 + em };
+    });
     result.push(...configuredWorkIntervalsBetween(segment.start, segment.end, segment.timezone,
-      [{ startMin: sh * 60 + sm, endMin: eh * 60 + em }]));
+      windows));
   }
   return result;
 }

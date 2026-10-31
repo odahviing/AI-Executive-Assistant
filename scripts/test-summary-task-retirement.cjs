@@ -30,7 +30,7 @@ function fixture(t){
   'src/tasks/dispatchers/calendarFix.ts':{dispatchCalendarFix:handler},
   'src/tasks/dispatchers/summaryActionFollowup.ts':{dispatchSummaryActionFollowup:async(...args)=>{effects.sends.push('summary send');await handler(...args);}},
   'src/utils/logger.ts':{__esModule:true,default:logger},'src/utils/threadActivity.ts':{reactActivityComplete:async()=>{}},
-  'src/tasks/routineMaterializer.ts':{backfillNullNextRunAt:()=>0},'src/tasks/crons.ts':{ensureBriefingCron(){},updateBriefingCronChannel(){}},
+  'src/tasks/routineMaterializer.ts':{reconcileRoutineSchedules:()=>0},'src/tasks/crons.ts':{ensureBriefingCron(){},updateBriefingCronChannel(){}},
   'src/db/migrations/v2_9_3_calendar_health_twice_daily.ts':{runV293CalendarHealthTwiceDaily(){}},
   'src/db/socialSubjects.ts':{ensureCategoriesSeeded(){}},'src/db/engagementRank.ts':{migrateLegacyEngagementLevel(){}},
   'src/connections/registry.ts':{getConnection:()=>({postToChannel:async()=>{effects.sends.push('owner notice');return {ok:true};}})},

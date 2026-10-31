@@ -7,37 +7,61 @@ import { isStrictIana } from './timezoneValidator';
 export const WEEK_ORDER = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'] as const;
 export type WeekDay = typeof WEEK_ORDER[number];
 export interface ClockWindow { hoursStart: string; hoursEnd: string }
-export type WeeklySchedule = Record<WeekDay, ClockWindow | null>;
+export type WeeklySchedule = Record<WeekDay, ClockWindow[]>;
 export interface WorkingHours { week: WeeklySchedule; timezone?: string; source: 'manual' | 'auto' }
-export interface WorkingHoursUpdate { week: Partial<WeeklySchedule>; timezone?: string }
+export interface WorkingHoursUpdate { week: Partial<WeeklySchedule>; timezone?: string; operation?: 'replace' | 'add' }
 const clock = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 
+/** Canonicalize intervals without opening gaps; touching windows form one interval. */
+export function normalizeClockWindows(raw: unknown): ClockWindow[] {
+  if (!Array.isArray(raw)) throw new Error('Invalid working hours');
+  const sorted = raw.map(value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid working hours');
+    const h = value as ClockWindow;
+    if (Object.keys(h).some(k => !['hoursStart', 'hoursEnd'].includes(k)) || typeof h.hoursStart !== 'string' || typeof h.hoursEnd !== 'string' || !clock.test(h.hoursStart) || !clock.test(h.hoursEnd) || h.hoursStart >= h.hoursEnd) throw new Error('Invalid working hours');
+    return { hoursStart: h.hoursStart, hoursEnd: h.hoursEnd };
+  }).sort((a, b) => a.hoursStart.localeCompare(b.hoursStart) || a.hoursEnd.localeCompare(b.hoursEnd));
+  const result: ClockWindow[] = [];
+  for (const window of sorted) {
+    const last = result[result.length - 1];
+    if (last && window.hoursStart <= last.hoursEnd) last.hoursEnd = last.hoursEnd > window.hoursEnd ? last.hoursEnd : window.hoursEnd;
+    else result.push(window);
+  }
+  return result;
+}
 function validateDays(raw: unknown, complete: boolean): asserts raw is WeeklySchedule {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid regular week');
   const days = raw as Record<string, unknown>;
   if (Object.keys(days).some(d => !WEEK_ORDER.includes(d as WeekDay)) || (complete && WEEK_ORDER.some(d => !(d in days)))) throw new Error('Invalid regular week');
-  for (const hours of Object.values(days)) {
-    if (hours === null) continue;
-    if (!hours || typeof hours !== 'object' || Array.isArray(hours)) throw new Error('Invalid working hours');
-    const h = hours as ClockWindow;
-    if (Object.keys(h).some(k => !['hoursStart', 'hoursEnd'].includes(k)) || typeof h.hoursStart !== 'string' || typeof h.hoursEnd !== 'string' || !clock.test(h.hoursStart) || !clock.test(h.hoursEnd) || h.hoursStart >= h.hoursEnd) throw new Error('Invalid working hours');
-  }
+  for (const hours of Object.values(days)) normalizeClockWindows(hours);
+}
+/** Only migration may read the retired singleton/null representation. */
+function migrateDays(raw: unknown, complete: boolean): WeeklySchedule {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid regular week');
+  const week = Object.fromEntries(Object.entries(raw).map(([day, value]) => [day, normalizeClockWindows(Array.isArray(value) ? value : value === null ? [] : [value])])) as WeeklySchedule;
+  validateDays(week, complete);
+  return week;
 }
 
 export function defaultWorkingHoursForTz(iana: string | null | undefined): WorkingHours {
   const israel = iana === 'Asia/Jerusalem' || iana === 'Asia/Tel_Aviv';
   const workdays: readonly WeekDay[] = israel ? WEEK_ORDER.slice(0, 5) : WEEK_ORDER.slice(1, 6);
-  return { week: Object.fromEntries(WEEK_ORDER.map(day => [day, workdays.includes(day) ? { hoursStart: '09:00', hoursEnd: israel ? '18:00' : '17:00' } : null])) as WeeklySchedule, source: 'auto' };
+  return { week: Object.fromEntries(WEEK_ORDER.map(day => [day, workdays.includes(day) ? [{ hoursStart: '09:00', hoursEnd: israel ? '18:00' : '17:00' }] : []])) as WeeklySchedule, source: 'auto' };
 }
 
-/** Recurring edits replace supplied days in the base; absent days survive. */
-export function mergeWorkingHoursUpdate(existing: WorkingHours | undefined, update: unknown, defaults?: WorkingHours): WorkingHours {
+/** Replace supplied days by default; add unions them in the same clock frame. */
+export function mergeWorkingHoursUpdate(existing: WorkingHours | undefined, update: unknown, defaults?: WorkingHours, effectiveTimezone?: string | null): WorkingHours {
   if (!update || typeof update !== 'object' || Array.isArray(update)) throw new Error('Invalid working hours');
   const value = update as WorkingHoursUpdate;
-  if (Object.keys(value).some(k => !['week', 'timezone'].includes(k)) || (value.timezone !== undefined && !isStrictIana(value.timezone))) throw new Error('Invalid working hours');
+  if (Object.keys(value).some(k => !['week', 'timezone', 'operation'].includes(k)) || (value.timezone !== undefined && !isStrictIana(value.timezone)) || (value.operation !== undefined && !['replace', 'add'].includes(value.operation))) throw new Error('Invalid working hours');
   validateDays(value.week, false);
+  if (!Object.keys(value.week).length) throw new Error('Empty working hours update');
   const prior = existing ?? defaults;
-  const week = { ...prior?.week, ...value.week } as WeeklySchedule;
+  const frame = prior?.timezone ?? effectiveTimezone;
+  if (value.operation === 'add' && value.timezone !== undefined && value.timezone !== frame) throw new Error('Add working hours must use the existing timezone');
+  if (value.operation === 'add' && Object.values(value.week).some(w => !w.length)) throw new Error('Empty added working hours');
+  const week = { ...prior?.week } as WeeklySchedule;
+  for (const day of Object.keys(value.week) as WeekDay[]) week[day] = normalizeClockWindows(value.operation === 'add' ? [...(week[day] ?? []), ...value.week[day]!] : value.week[day]);
   validateDays(week, true);
   return { week, source: 'manual', ...(value.timezone ?? prior?.timezone ? { timezone: value.timezone ?? prior?.timezone } : {}) };
 }
@@ -58,28 +82,28 @@ export function materializeLegacyWorkingHours(stated: unknown, auto: unknown, ti
   if (stated && typeof stated === 'object' && 'week' in stated) {
     const current = stated as WorkingHours;
     if (Object.keys(current).some(k => !['week', 'source', 'timezone'].includes(k))) throw new Error('Invalid recorded week');
-    validateDays(current.week, true);
+    const week = migrateDays(current.week, true);
     if (!['manual', 'auto'].includes(current.source) || (current.timezone !== undefined && !isStrictIana(current.timezone))) throw new Error('Invalid recorded week');
-    return current;
+    return { ...current, week };
   }
   const legacy = stated as { workdays?: WeekDay[]; hoursStart?: string; hoursEnd?: string; dayOverrides?: Partial<Record<WeekDay, ClockWindow>>; timezone?: string } | undefined;
   const inferred = auto as { workdays?: WeekDay[]; hoursStart?: string; hoursEnd?: string } | undefined;
   if (legacy && (typeof legacy !== 'object' || Array.isArray(legacy) || Object.keys(legacy).some(k => !['workdays', 'hoursStart', 'hoursEnd', 'dayOverrides', 'timezone'].includes(k)))) throw new Error('Invalid legacy working hours');
   if (legacy?.dayOverrides !== undefined) {
-    validateDays(legacy.dayOverrides, false);
+    migrateDays(legacy.dayOverrides, false);
     if (Object.values(legacy.dayOverrides).some(h => h === null)) throw new Error('Invalid legacy day override');
   }
   if (!legacy && !inferred && !timezone) return null;
   const defaults = defaultWorkingHoursForTz(timezone);
-  const first = Object.values(defaults.week).find(Boolean)!;
-  const days = legacy?.workdays ?? (timezone ? WEEK_ORDER.filter(d => defaults.week[d]) : inferred?.workdays);
+  const first = Object.values(defaults.week).find(w => w.length)![0];
+  const days = legacy?.workdays ?? (timezone ? WEEK_ORDER.filter(d => defaults.week[d].length) : inferred?.workdays);
   if (!days || days.some(d => !WEEK_ORDER.includes(d))) throw new Error('Invalid legacy workdays');
   // The old manual reader used regional defaults for omitted clocks, never
   // the separately stored auto clocks. Preserve that exact effective value.
   const start = legacy ? legacy.hoursStart ?? (timezone ? first.hoursStart : undefined) : inferred?.hoursStart ?? first.hoursStart;
   const end = legacy ? legacy.hoursEnd ?? (timezone ? first.hoursEnd : undefined) : inferred?.hoursEnd ?? first.hoursEnd;
   if (typeof start !== 'string' || typeof end !== 'string' || !clock.test(start) || !clock.test(end) || start >= end) throw new Error('Invalid legacy clocks');
-  const week = Object.fromEntries(WEEK_ORDER.map(day => [day, legacy?.dayOverrides?.[day] ?? (days.includes(day) ? { hoursStart: start, hoursEnd: end } : null)])) as WeeklySchedule;
+  const week = Object.fromEntries(WEEK_ORDER.map(day => [day, legacy?.dayOverrides?.[day] ? [legacy.dayOverrides[day]] : (days.includes(day) ? [{ hoursStart: start, hoursEnd: end }] : [])])) as WeeklySchedule;
   validateDays(week, true);
   if (legacy?.timezone !== undefined && !isStrictIana(legacy.timezone)) throw new Error('Invalid legacy timezone');
   return { week, source: legacy ? 'manual' : 'auto', ...(legacy?.timezone ? { timezone: legacy.timezone } : {}) };
@@ -115,7 +139,7 @@ export function formatWorkingHoursWindow(hours: Pick<WorkingHours, 'week' | 'tim
   const groups = new Map<string, WeekDay[]>();
   for (const day of WEEK_ORDER) {
     const window = hours.week[day];
-    const key = window ? `${window.hoursStart}–${window.hoursEnd}` : 'off';
+    const key = window.length ? window.map(w => `${w.hoursStart}–${w.hoursEnd}`).join(', ') : 'off';
     groups.set(key, [...(groups.get(key) ?? []), day]);
   }
   const names = (days: WeekDay[]): string => {

@@ -641,6 +641,9 @@ function runAnalysisDetection({ timedMeetings, gaps, block = { ...lunch, can_ski
     && n.getText().includes("type: 'missing_floating_block'")), 'analysis missing-block loop');
   const profile = { ...rebalanceProfile, meetings: { floating_blocks: [block] } };
   return compile(`${fmt.getText()}\n${loop.getText()}\nmodule.exports = { issues };`, {
+    // These placement cases are ordinary workdays; full-day occupancy is covered
+    // by test-vacation-requester-defaults through the complete analyzer.
+    workdayQualityApplies: true,
     floatingBlocks: [block], fb: floatingBlocks, dayName: 'Sunday', profile, timedMeetings, gaps, issues: [],
   }).issues;
 }

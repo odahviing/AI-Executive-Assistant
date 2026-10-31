@@ -1,0 +1,26 @@
+// Structural prompt capture only; no model obedience or live outcome claimed.
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),{createRequire}=require('node:module'),assert=require('node:assert/strict'),{test}=require('node:test');
+const root=path.resolve(__dirname,'..'),before=process.argv.includes('--before'),dir='artifacts/workshop-verification/batch-20261029/instructor';
+const snapshot=path.join(root,dir,'before');
+if(before)process.env.PERSON_MEMORY_SNAPSHOT=path.relative(root,snapshot);
+let loader=fs.readFileSync(path.join(__dirname,'test-instructor-meetings-contract.cjs'),'utf8').split('let passed = 0, failed = 0;')[0];
+loader=loader.replace('const srcRoot = at < 0 ? root : path.resolve(process.argv[at + 1]);',`const srcRoot = ${JSON.stringify(before?snapshot:root)};`);
+const m={exports:{}};
+vm.runInNewContext('(function(require,module,__dirname){'+loader+'\nmodule.exports={tools,owner,colleague,email};})',{console,process})(createRequire(path.join(__dirname,'test-instructor-meetings-contract.cjs')),m,__dirname);
+const {tools,owner,colleague,email}=m.exports,tool=n=>tools.find(t=>t.name===n);
+const hm={exports:{}};
+const hs=fs.readFileSync(path.join(__dirname,'person-memory-test-harness.cjs'),'utf8').replace("'src/utils/skillPreferences.ts':{},", "'src/utils/skillPreferences.ts':{PREF_SKILLS:[]},");
+vm.runInNewContext('(function(require,module,__dirname){'+hs+'\n})',{console,process,Buffer,setTimeout,clearTimeout})(createRequire(path.join(__dirname,'person-memory-test-harness.cjs')),hm,__dirname);
+const {harness,chris}=hm.exports;
+const h=harness([chris]),assistant=h.load('src/core/assistant.ts'),profileTools=new assistant.AssistantSkill().getTools(h.profile);
+const hours=profileTools.find(t=>t.name==='update_person_profile').input_schema.properties.working_hours_structured.description;
+const capture=fs.readFileSync(path.join(before?snapshot:root,'src/memory/capturePass.ts'),'utf8').split('\n').find(l=>l.startsWith('- working_hours_structured:'));
+const metrics={meetingToolJsonChars:JSON.stringify(tools).length,ownerPromptChars:owner.length,colleaguePromptChars:colleague.length,emailPromptChars:email.length,hoursDescriptionChars:hours.length,captureHoursChars:capture.length,tokenCounts:'unavailable; character counts are exact, not tokens'};
+console.log('METRICS '+JSON.stringify(metrics));
+fs.writeFileSync(path.join(root,process.env.INSTRUCTOR_CAPTURE_DIR||dir,before?'capture-before.json':'capture-after.json'),JSON.stringify({tools,owner,colleague,email,hours,capture,metrics},null,2));
+test('duration wording uses configured presets and natural times',()=>{const d=tool('find_available_slots').input_schema.properties.duration_minutes;assert.deepEqual(Array.from(d.enum),[25,55]);assert.match(d.description,/nearest allowed preset/);assert.match(d.description,/exact allowed lengths stay exact/);assert.match(d.description,/explain normalization only if asked/);});
+test('search and booking use explicit-only nonattendance without routine question',()=>{for(const n of ['find_available_slots','create_meeting']){const d=tool(n).input_schema.properties.requester_is_attending.description;assert.match(d,/without asking/);assert.match(d,/explicit/);assert.match(d,/interview category/);assert.match(d,/only.*requester|requester.*only/);}});
+test('attendee contract keeps requested optional participants and ambiguous identity resolution',()=>{const d=tool('create_meeting').input_schema.properties.attendees.description;assert.match(d,/including optional invitees/);assert.match(d,/Clarify ambiguous/);assert.match(d,/emails resolve from the directory/);});
+test('all current colleague hours guidance names unsupported capability truthfully',async()=>{assert.match(hours,(before?/split windows and dated exceptions are unsupported/:/Dated colleague exceptions are unsupported/));assert.match(hours,/Omitted duration means recurring/);assert.match(hours,/Confirm a save only from the write result/);const r=await h.tool('update_person_profile',{colleague_name:chris.name,colleague_slack_id:chris.slack_id,working_hours:'evening'});assert.match(r._note,(before?/split windows and dated exceptions are unsupported/:/Dated colleague exceptions are unsupported/));const text=fs.readFileSync(path.join(before?snapshot:root,'src/core/assistant.ts'),'utf8');assert.doesNotMatch(text,/Temporary changes use (the existing )?dated override/);});
+test('capture describes the authorized weekly capability without dated persistence',()=>{assert.match(capture,before?/additive split windows/:/operation.*add/);assert.match(capture,/Omitted duration means recurring/);assert.doesNotMatch(capture,/those use the existing dated override tools/);});
+test('CONTROL configured schema and scope remain intact',()=>{assert.ok(!tool('find_available_slots').input_schema.required.includes('duration_minutes'));assert.match(owner,/ACTUAL duration/);assert.match(colleague,/SCHEDULE IS PRIVATE/);assert.doesNotMatch(email,/DELETE-MEETING PROTOCOL/);assert.match(hours,/other days stay unchanged/);assert.match(capture,before?/null means explicitly not working/:/\[\] means explicitly not working/);});

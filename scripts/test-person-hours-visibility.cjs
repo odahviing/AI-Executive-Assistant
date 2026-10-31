@@ -76,7 +76,7 @@ test('HV-roster-default: owner roster marks the timezone default as not stated',
  assert.match(line(r,'Kevin External'),/external — no Slack account.*, hours: Mon–Fri 09:00–17:00; Sun\/Sat off \(tz default, not stated\),/);});
 test('HV-roster-social-off: the slim social-off roster line carries the same window',()=>{const h=harness(PEOPLE);assert.match(line(h.roster(undefined,true),'Alex Wiggins'),/hours: Mon–Fri 08:00–17:00/);assert.match(line(h.roster(new Set(['UALEX']),true),'Alex Wiggins'),/hours: Mon–Fri 08:00–17:00/);});
 test('HV-memory-effective: get_person_memory returns the effective window with its zone and provenance',async()=>{const h=harness(PEOPLE);
- const a=await h.memory('Alex Wiggins');assert.equal(a.found,true);assert.equal(a.working_hours.source,'manual');assert.equal(Object.keys(a.working_hours.week).filter(d=>a.working_hours.week[d]).join(','),MF.join(','));assert.equal(a.working_hours.week.Monday.hoursStart,'08:00');assert.equal(a.working_hours.week.Monday.hoursEnd,'17:00');assert.equal(a.working_hours.timezone,'America/New_York');assert.equal(a.timezone,'America/New_York');assert.equal(a.timezone_set_by,'person');assert.equal(a.state,'Boston');
+ const a=await h.memory('Alex Wiggins');assert.equal(a.found,true);assert.equal(a.working_hours.source,'manual');assert.equal(Object.keys(a.working_hours.week).filter(d=>a.working_hours.week[d].length).join(','),MF.join(','));assert.equal(a.working_hours.week.Monday[0].hoursStart,'08:00');assert.equal(a.working_hours.week.Monday[0].hoursEnd,'17:00');assert.equal(a.working_hours.timezone,'America/New_York');assert.equal(a.timezone,'America/New_York');assert.equal(a.timezone_set_by,'person');assert.equal(a.state,'Boston');
  const d=await h.memory('Dan Beauregard');assert.equal(d.working_hours.source,'auto');assert.match(d.working_hours.note,/initialized from timezone defaults once/);assert.equal(d.timezone_set_by,'auto');});
 test('HV-memory-note-rank: get_person_memory ranks the stated window above a stale free-text note',async()=>{const i=await harness(PEOPLE).memory('Isaac Levy');
  assert.equal(i.working_hours.source,'manual');assert.equal(i.working_hours.window,'Mon/Thu 09:00–17:00; Sun/Tue/Wed/Fri/Sat off Asia/Jerusalem');assert.match(i.working_hours.note,/outranks any hours mentioned in notes/);assert.equal(i.notes.length,1);});
@@ -104,24 +104,24 @@ test('HV-measure-25: roster size measured on a 25-contact fixture (5 no-tz, 10 d
 
 test('DH incremental owner windows preserve siblings and default after reload',()=>{
  const h=harness(PEOPLE),p=h.load('src/db/people.ts'),w=h.load('src/utils/workingHoursDefault.ts');
- p.updatePersonProfile('UALEX',{working_hours_structured:{week:{Monday:{hoursStart:'08:00',hoursEnd:'14:00'}}}},'owner');
- p.updatePersonProfile('UALEX',{working_hours_structured:{week:{Tuesday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'owner');
+ p.updatePersonProfile('UALEX',{working_hours_structured:{week:{Monday:[{hoursStart:'08:00',hoursEnd:'14:00'}]}}},'owner');
+ p.updatePersonProfile('UALEX',{working_hours_structured:{week:{Tuesday:[{hoursStart:'10:00',hoursEnd:'16:00'}]}}},'owner');
  const row=p.getPersonMemory('UALEX'),eff=w.getEffectiveWorkingHours(row);
- assert.equal(eff.week.Wednesday.hoursStart,'08:00'); assert.equal(eff.week.Wednesday.hoursEnd,'17:00');
- assert.equal(eff.week.Monday.hoursEnd,'14:00'); assert.equal(eff.week.Tuesday.hoursStart,'10:00');
+ assert.equal(eff.week.Wednesday[0].hoursStart,'08:00'); assert.equal(eff.week.Wednesday[0].hoursEnd,'17:00');
+ assert.equal(eff.week.Monday[0].hoursEnd,'14:00'); assert.equal(eff.week.Tuesday[0].hoursStart,'10:00');
  assert.ok(w.describeEffectiveWorkingHours(row).window.includes('Mon 08:00–14:00; Tue 10:00–16:00'));
- const replay=p.updatePersonProfile('UALEX',{working_hours_structured:{week:{Tuesday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'owner');
- assert.equal(w.getEffectiveWorkingHours(p.getPersonMemory('UALEX')).week.Monday.hoursEnd,'14:00');
+ const replay=p.updatePersonProfile('UALEX',{working_hours_structured:{week:{Tuesday:[{hoursStart:'10:00',hoursEnd:'16:00'}]}}},'owner');
+ assert.equal(w.getEffectiveWorkingHours(p.getPersonMemory('UALEX')).week.Monday[0].hoursEnd,'14:00');
 });
 test('DH day-only initial write uses region defaults and explicit non-default weekday',()=>{
  const h=harness(PEOPLE),p=h.load('src/db/people.ts'),w=h.load('src/utils/workingHoursDefault.ts');
- p.updatePersonProfile('UDAN',{working_hours_structured:{week:{Sunday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'person');
+ p.updatePersonProfile('UDAN',{working_hours_structured:{week:{Sunday:[{hoursStart:'10:00',hoursEnd:'16:00'}]}}},'person');
  const eff=w.getEffectiveWorkingHours(p.getPersonMemory('UDAN'));
- assert.equal(eff.source,'manual'); assert.equal(eff.week.Monday.hoursStart,'09:00'); assert.ok(eff.week.Sunday); assert.equal(eff.week.Sunday.hoursEnd,'16:00');
+ assert.equal(eff.source,'manual'); assert.equal(eff.week.Monday[0].hoursStart,'09:00'); assert.ok(eff.week.Sunday); assert.equal(eff.week.Sunday[0].hoursEnd,'16:00');
 });
 test('DH invalid weekday or clock cannot replace durable valid hours',()=>{
  const h=harness(PEOPLE),p=h.load('src/db/people.ts');
- for(const patch of [{week:{Tuesday:{hoursStart:'late',hoursEnd:'16:00'}}},{week:{Funday:{hoursStart:'10:00',hoursEnd:'16:00'}}}]) {
+ for(const patch of [{week:{Tuesday:[{hoursStart:'late',hoursEnd:'16:00'}]}},{week:{Funday:[{hoursStart:'10:00',hoursEnd:'16:00'}]}}]) {
   const original=p.getPersonMemory('UALEX').profile_json;
   assert.throws(()=>p.updatePersonProfile('UALEX',{working_hours_structured:patch},'owner'));
   assert.equal(p.getPersonMemory('UALEX').profile_json,original);
@@ -129,9 +129,9 @@ test('DH invalid weekday or clock cannot replace durable valid hours',()=>{
 });
 test('DH lower authority cannot amend owner day overrides; unknown timezone cannot invent default',()=>{
  const h=harness(PEOPLE),p=h.load('src/db/people.ts'),w=h.load('src/utils/workingHoursDefault.ts');
- p.updatePersonProfile('UALEX',{working_hours_structured:{week:{Tuesday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'owner');
- assert.equal(p.updatePersonProfile('UALEX',{working_hours_structured:{week:{Monday:{hoursStart:'06:00',hoursEnd:'12:00'}}}},'person').working_hours_structured,'refused_lower_authority');
- assert.equal(w.getEffectiveWorkingHours(p.getPersonMemory('UALEX')).week.Monday.hoursStart,'08:00');
- assert.throws(()=>p.updatePersonProfile('UEREZ',{working_hours_structured:{week:{Tuesday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'owner'));
+ p.updatePersonProfile('UALEX',{working_hours_structured:{week:{Tuesday:[{hoursStart:'10:00',hoursEnd:'16:00'}]}}},'owner');
+ assert.equal(p.updatePersonProfile('UALEX',{working_hours_structured:{week:{Monday:[{hoursStart:'06:00',hoursEnd:'12:00'}]}}},'person').working_hours_structured,'refused_lower_authority');
+ assert.equal(w.getEffectiveWorkingHours(p.getPersonMemory('UALEX')).week.Monday[0].hoursStart,'08:00');
+ assert.throws(()=>p.updatePersonProfile('UEREZ',{working_hours_structured:{week:{Tuesday:[{hoursStart:'10:00',hoursEnd:'16:00'}]}}},'owner'));
  assert.equal(w.getEffectiveWorkingHours(p.getPersonMemory('UEREZ')),null);
 });

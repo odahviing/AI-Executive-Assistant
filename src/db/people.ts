@@ -1408,7 +1408,7 @@ export function updatePersonProfileById(personId: string, updates: Partial<Perso
     }
     if (field === 'working_hours_structured') {
       const { mergeWorkingHoursUpdate, defaultWorkingHoursForTz } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
-      existing.working_hours_structured = mergeWorkingHoursUpdate(existing.working_hours_structured, value, row.timezone ? defaultWorkingHoursForTz(row.timezone) : undefined);
+      existing.working_hours_structured = mergeWorkingHoursUpdate(existing.working_hours_structured, value, row.timezone ? defaultWorkingHoursForTz(row.timezone) : undefined, row.timezone);
     } else {
       (existing as Record<string, unknown>)[field] = value;
     }

@@ -1,0 +1,11 @@
+// Structural inputs only: captures real tool builders, not model obedience.
+const fs=require('fs'),path=require('path'),vm=require('vm'),{createRequire}=require('module'),assert=require('assert/strict'),{test}=require('node:test');
+const root=path.resolve(__dirname,'..'),before=process.argv.includes('--before');
+let loader=fs.readFileSync(path.join(__dirname,'test-instructor-meetings-contract.cjs'),'utf8').split('let passed = 0, failed = 0;')[0];
+if(before)loader=loader.replace("path.join(srcRoot, 'src/skills/meetings.ts')", "path.join(root, 'artifacts/workshop-verification/weekly-windows-20261029/instructor/before/meetings.ts')");
+const m={exports:{}};vm.runInNewContext('(function(require,module,__dirname){'+loader+'\nmodule.exports={tools,owner,colleague,email};})',{console,process})(createRequire(path.join(__dirname,'test-instructor-meetings-contract.cjs')),m,__dirname);
+const {tools,owner,colleague,email}=m.exports,tool=n=>tools.find(t=>t.name===n);
+console.log('METRICS '+JSON.stringify({meetingToolJsonChars:JSON.stringify(tools).length,ownerPromptChars:owner.length,colleaguePromptChars:colleague.length,emailPromptChars:email.length,tokens:'unavailable; exact character counts only'}));
+test('temporary bounds explain replacement and preserved gaps',()=>{const d=tool('find_available_slots').input_schema.properties.attendee_hours.description;assert.match(d,/Both bounds replace/);assert.match(d,/one bound.*preserving interior gaps/);assert.match(d,/Nonworking days stay off/);});
+test('recurring additions route to profile while dated exceptions remain unsaved',()=>{const d=tool('find_available_slots').input_schema.properties.attendee_hours.description;assert.match(d,/update_person_profile with operation add, preserving existing windows/);assert.match(d,/colleague dated exceptions are unsaved/);});
+test('CONTROL explicit named-time booking and colleague conflict consent remain',()=>{for(const n of ['create_meeting','move_meeting'])assert.match(tool(n).input_schema.properties.confirm_attendee_conflict.description,/ONLY once they say yes/);assert.match(tool('find_available_slots').input_schema.properties.attendee_hours.description,/only that dated instant in candidate_slots/);assert.match(colleague,/SCHEDULE IS PRIVATE/);assert.match(owner,/ACTUAL duration/);});

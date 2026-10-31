@@ -1,0 +1,253 @@
+{
+  "timestamp": "2026-10-29T17:10:43.936Z",
+  "scope": "Independent read-only deployed helpers and isolated clock tests",
+  "checks": [
+    {
+      "name": "maelle online",
+      "pass": true
+    },
+    {
+      "name": "Live loader exact timezone boundary days windows",
+      "pass": true
+    },
+    {
+      "name": "Effective today 2026-03-08 04:59",
+      "pass": true
+    },
+    {
+      "name": "Effective today 2026-03-08 05:00",
+      "pass": true
+    },
+    {
+      "name": "Effective today 2026-03-09 04:59",
+      "pass": true
+    },
+    {
+      "name": "Effective today 2026-03-09 05:00",
+      "pass": true
+    },
+    {
+      "name": "Effective today 2026-10-29 04:59",
+      "pass": true
+    },
+    {
+      "name": "Effective today 2026-10-29 05:00",
+      "pass": true
+    },
+    {
+      "name": "Effective today 2026-11-01 04:59",
+      "pass": true
+    },
+    {
+      "name": "Effective today 2026-11-01 05:00",
+      "pass": true
+    },
+    {
+      "name": "Effective today 2026-11-02 04:59",
+      "pass": true
+    },
+    {
+      "name": "Effective today 2026-11-02 05:00",
+      "pass": true
+    },
+    {
+      "name": "Effective windows 2026-11-02",
+      "pass": true
+    },
+    {
+      "name": "Effective windows 2026-11-03",
+      "pass": true
+    },
+    {
+      "name": "Effective windows 2026-11-04",
+      "pass": true
+    },
+    {
+      "name": "Effective windows 2026-11-05",
+      "pass": true
+    },
+    {
+      "name": "Effective windows 2026-11-06",
+      "pass": true
+    },
+    {
+      "name": "Effective windows 2026-11-07",
+      "pass": true
+    },
+    {
+      "name": "Effective windows 2026-11-08",
+      "pass": true
+    }
+  ],
+  "findings": [
+    "Active Calendar health check declares weekdays 13:00 but next_run_at is 2026-11-01T11:00Z = Sunday 06:00 Boston. Persisted next run is inconsistent; not changed by this review."
+  ],
+  "processes": [
+    {
+      "name": "maelle",
+      "pid": 3957712,
+      "status": "online",
+      "startedAt": "2026-10-29T17:08:24.626Z"
+    },
+    {
+      "name": "maelle-deploy-watcher",
+      "pid": 3297206,
+      "status": "online",
+      "startedAt": "2026-10-14T22:46:23.408Z"
+    }
+  ],
+  "configSha256": "de8faf75ae8cdf2d36d11180033b309f81c46d1e2ed20d377252dc02c267e038",
+  "futureOverrideCount": 0,
+  "week": [
+    {
+      "date": "2026-11-02",
+      "isWorkday": true,
+      "windows": [
+        {
+          "startMin": 540,
+          "endMin": 1020
+        }
+      ],
+      "location": "office",
+      "timezone": "America/New_York",
+      "isAway": false,
+      "hasOverride": false,
+      "source": "yaml"
+    },
+    {
+      "date": "2026-11-03",
+      "isWorkday": true,
+      "windows": [
+        {
+          "startMin": 540,
+          "endMin": 1020
+        }
+      ],
+      "location": "office",
+      "timezone": "America/New_York",
+      "isAway": false,
+      "hasOverride": false,
+      "source": "yaml"
+    },
+    {
+      "date": "2026-11-04",
+      "isWorkday": true,
+      "windows": [
+        {
+          "startMin": 480,
+          "endMin": 1020
+        }
+      ],
+      "location": "home",
+      "timezone": "America/New_York",
+      "isAway": false,
+      "hasOverride": false,
+      "source": "yaml"
+    },
+    {
+      "date": "2026-11-05",
+      "isWorkday": true,
+      "windows": [
+        {
+          "startMin": 540,
+          "endMin": 1020
+        }
+      ],
+      "location": "office",
+      "timezone": "America/New_York",
+      "isAway": false,
+      "hasOverride": false,
+      "source": "yaml"
+    },
+    {
+      "date": "2026-11-06",
+      "isWorkday": true,
+      "windows": [
+        {
+          "startMin": 480,
+          "endMin": 1020
+        }
+      ],
+      "location": "home",
+      "timezone": "America/New_York",
+      "isAway": false,
+      "hasOverride": false,
+      "source": "yaml"
+    },
+    {
+      "date": "2026-11-07",
+      "isWorkday": false,
+      "windows": [],
+      "location": "elsewhere",
+      "timezone": "America/New_York",
+      "isAway": false,
+      "hasOverride": false,
+      "source": "yaml"
+    },
+    {
+      "date": "2026-11-08",
+      "isWorkday": false,
+      "windows": [],
+      "location": "elsewhere",
+      "timezone": "America/New_York",
+      "isAway": false,
+      "hasOverride": false,
+      "source": "yaml"
+    }
+  ],
+  "routines": [
+    {
+      "id": "system_briefing_U0F28CK6H",
+      "title": "Morning Briefing",
+      "schedule_type": "weekdays",
+      "schedule_time": "07:30",
+      "schedule_day": null,
+      "status": "active",
+      "next_run_at": "2026-10-30T11:30:00Z",
+      "nextRunBoston": "2026-10-30T13:30:00+02:00"
+    },
+    {
+      "id": "routine_1776925723262_v214",
+      "title": "Calendar health check",
+      "schedule_type": "weekdays",
+      "schedule_time": "13:00",
+      "schedule_day": null,
+      "status": "active",
+      "next_run_at": "2026-11-01T11:00:00Z",
+      "nextRunBoston": "2026-11-01T13:00:00+02:00"
+    },
+    {
+      "id": "system_calhealth_midday_U0F28CK6H",
+      "title": "Calendar health check (midday)",
+      "schedule_type": "weekdays",
+      "schedule_time": "13:00",
+      "schedule_day": null,
+      "status": "cancelled",
+      "next_run_at": "2026-05-24T10:00:00Z",
+      "nextRunBoston": "2026-05-24T13:00:00+03:00"
+    },
+    {
+      "id": "routine_1776115723284_rzbx",
+      "title": "Morning briefing",
+      "schedule_type": "weekdays",
+      "schedule_time": "08:00",
+      "schedule_day": null,
+      "status": "deleted",
+      "next_run_at": "2026-04-16T05:00:00Z",
+      "nextRunBoston": "2026-04-16T08:00:00+03:00"
+    },
+    {
+      "id": "routine_1775935889360_f7r7",
+      "title": "Sunday LinkedIn content ideas",
+      "schedule_type": "weekly",
+      "schedule_time": "09:00",
+      "schedule_day": "Sunday",
+      "status": "deleted",
+      "next_run_at": "2026-09-06T06:00:00Z",
+      "nextRunBoston": "2026-09-06T09:00:00+03:00"
+    }
+  ],
+  "limit": "Whole-week helper tests isolate override reader to null; live future override count separately observed. No calendar/API calls or database/config changes.",
+  "passed": 19,
+  "failed": 0
+}

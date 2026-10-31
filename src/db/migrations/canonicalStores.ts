@@ -257,11 +257,70 @@ export async function migrateCanonicalStores(db: Database.Database, profiles: Us
  * No implicit import, fallback reader, or source deletion happens without it. */
 export async function activateCanonicalStores(db: Database.Database, profiles: UserProfile[], stateDirectory: string): Promise<void> {
   if (fs.existsSync(path.join(stateDirectory, 'canonical-stores-backup.json.reversing'))) throw new Error('migration_reversal_in_progress');
+  migrateWeeklyWindows(db, path.join(stateDirectory, 'weekly-windows-backup.json'));
   try { assertCanonicalStoresReady(db); return; } catch { /* inspected again by the exact reviewed migration */ }
   const planFile = path.join(stateDirectory, 'canonical-stores-plan.json');
   if (!fs.existsSync(planFile)) throw new Error('canonical_migration_reviewed_plan_required');
   await migrateCanonicalStores(db, profiles, JSON.parse(fs.readFileSync(planFile, 'utf8')), path.join(stateDirectory, 'canonical-stores-backup.json'));
   assertCanonicalStoresReady(db);
+}
+
+/** Lossless singleton-week upgrade before channels start. The private journal
+ * retains exact source bytes; the DB transaction is atomic across all people.
+ * Legacy pre-week records still require the existing reviewed canonical plan. */
+export function migrateWeeklyWindows(db: Database.Database, backupFile: string): void {
+  if (fs.existsSync(`${backupFile}.reversing`)) throw new Error('migration_reversal_in_progress');
+  const rows = people(db);
+  const changes = rows.flatMap(row => {
+    const profile = parsedProfile(row);
+    const hours = profile.working_hours_structured;
+    if (!hours || typeof hours !== 'object' || !('week' in hours)) return [];
+    const next = materializeLegacyWorkingHours(hours, undefined, row.timezone);
+    if (canonicalMigrationHash(hours) === canonicalMigrationHash(next)) return [];
+    return [{ before: row, after: { ...row, profile_json: JSON.stringify({ ...profile, working_hours_structured: next }) } }];
+  });
+  if (!changes.length) return;
+  if (fs.existsSync(backupFile)) {
+    const saved = JSON.parse(fs.readFileSync(backupFile, 'utf8'));
+    if (canonicalMigrationHash(saved) !== canonicalMigrationHash(changes)) throw new Error('migration_weekly_journal_conflict');
+  } else {
+    fs.mkdirSync(path.dirname(backupFile), { recursive: true, mode: 0o700 });
+    const fd = fs.openSync(backupFile, 'wx', 0o600);
+    try { fs.writeFileSync(fd, JSON.stringify(changes)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    durableDirectory(path.dirname(backupFile));
+  }
+  fullTransaction(db, () => {
+    const update = db.prepare('UPDATE people_memory SET profile_json=? WHERE person_id=? AND timezone IS ? AND profile_json IS ? AND working_hours_auto IS ?');
+    for (const { before, after } of changes) {
+      if (update.run(after.profile_json, before.person_id, before.timezone, before.profile_json, before.working_hours_auto).changes !== 1) throw new Error('migration_person_cas_failed');
+    }
+  });
+}
+
+/** Offline reverse refuses newer edits; restart remains blocked until the
+ * operator restores the old binary. Every original profile byte is restored. */
+export function reverseWeeklyWindows(db: Database.Database, backupFile: string): void {
+  const changes = JSON.parse(fs.readFileSync(backupFile, 'utf8')) as { before: PersonRow; after: PersonRow }[];
+  for (const change of changes) {
+    const profile = parsedProfile(change.before);
+    const expected = { ...change.before, profile_json: JSON.stringify({ ...profile, working_hours_structured: materializeLegacyWorkingHours(profile.working_hours_structured, undefined, change.before.timezone) }) };
+    if (canonicalMigrationHash(expected) !== canonicalMigrationHash(change.after)) throw new Error('migration_weekly_journal_conflict');
+  }
+  const check = (): void => {
+    const current = people(db);
+    for (const { before, after } of changes) {
+      const row = current.find(r => r.person_id === before.person_id);
+      if (![canonicalMigrationHash(before), canonicalMigrationHash(after)].includes(canonicalMigrationHash(row))) throw new Error('migration_reversal_newer_person');
+    }
+  };
+  check();
+  const marker = `${backupFile}.reversing`;
+  if (!fs.existsSync(marker)) fs.writeFileSync(marker, canonicalMigrationHash(changes), { flag: 'wx', mode: 0o600 });
+  durableFile(marker);
+  fullTransaction(db, () => {
+    check();
+    for (const { before } of changes) db.prepare('UPDATE people_memory SET profile_json=? WHERE person_id=?').run(before.profile_json, before.person_id);
+  });
 }
 
 /** Offline reversal only. Requires the complete durable postimage, refuses

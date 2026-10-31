@@ -1288,11 +1288,11 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         pendingTurnWork.push({ tool: toolUse.name, args: structuredClone(toolInputForCall), result });
       }
 
-      // v2.7.1 (bug 2.3 / 3.1) — open a follow_up request when owner-initiated
-      // meeting work spills past this turn (rule_violation, options to pick,
-      // not_organizer, etc.). Closure rides on existing closeMeetingArtifacts
-      // cascade + closeLoopOnOwnerHandled scanner. No new tool exposed to
-      // Sonnet — purely an orchestrator-level tracking hook.
+      // Track incomplete owner-initiated meeting mutations. Availability searches
+      // only explore alternatives; explicit future commitments use the task,
+      // approval or outreach spine. Existing closeMeetingArtifacts cascade and
+      // closeLoopOnOwnerHandled scanner close admitted mutation requests.
+      // No new tool exposed to Sonnet — an orchestrator-level tracking hook.
       try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const m = require('../requests/maybeOpenInFlightMeetingRequest') as
@@ -1313,12 +1313,10 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         });
       }
 
-      // gh#201-d — the ONE case maybeOpenInFlightMeetingRequest deliberately
-      // excludes: a colleague-initiated find_available_slots search that
-      // dead-ends purely because the owner is in a known away period. That
-      // exclusion is still correct for every other colleague reason (those
-      // route through message_colleague/create_approval already); this is
-      // the new path for the one reason that had none. See
+      // Colleague-initiated availability search can dead-end because the owner
+      // is in a known away period. The owner mutation backstop excludes colleague
+      // searches; the existing OOF continuation below tracks this specific case.
+      // See
       // core/requests/colleagueOofReengage.ts for the full mechanism.
       //
       // gh#201-d (D2 fix, bouncer overturn) — gated on `input.authority`, NOT

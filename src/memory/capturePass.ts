@@ -15,7 +15,7 @@
  *      channel is (`resolveChannelCounterpart`) and skips owner DMs. No
  *      transport client is touched here — this module knows people, not pipes.
  *   4. It loads the colleague's current state (people_memory profile_json
- *      + canonical memory view) and the just-completed chat.
+ *      + canonical memory view) and messages since the prior capture.
  *   5. A single Haiku call extracts deltas — facts the chat revealed
  *      that aren't already on file. Comparing against current state
  *      means re-runs on the same chat (idempotency) are no-ops.
@@ -34,6 +34,7 @@
  */
 
 import type Anthropic from '@anthropic-ai/sdk';
+import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import { getConnection } from '../connections/registry';
 import {
@@ -141,7 +142,7 @@ What counts as a learnable fact (operational, changes how Maelle should interact
 - timezone: STRICT IANA Region/City form only — "America/New_York", "Europe/London", "Asia/Tokyo", "Australia/Sydney". When the chat names a nickname (ET, PT, BST, IST, "Sydney time"), map to IANA before emitting. SKIP the field if you can't confidently resolve to a Region/City form. Never emit bare abbreviations — they get rejected downstream.
 - state: city / country mentioned as their location ("Boston", "Tel Aviv", "Israel")
 - name_he: the native-script spelling of their name (Hebrew/Cyrillic/Arabic) if they wrote it or it became clear — capture it so it's never re-guessed
-- working_hours_structured: only explicit recurring regular-week clocks, as {"week":{"Monday":{"hoursStart":"09:00","hoursEnd":"17:00"},"Friday":null}}. Emit only stated weekdays; null means explicitly not working. Exact local HH:MM pairs only. Omitted duration means recurring. Do not emit temporary trips/dated changes here; those use the existing dated override tools. Omit vague windows rather than guessing clocks. Never emit legacy working_hours prose.
+- working_hours_structured: only explicit recurring regular-week clocks, as {"week":{"Monday":[{"hoursStart":"09:00","hoursEnd":"17:00"}],"Friday":[]}}. Emit only stated weekdays; [] means explicitly not working. Exact local HH:MM pairs only. Omitted duration means recurring. Use operation:"add" for additional windows, emitting only the added intervals; existing daytime windows and gaps survive. Default operation:"replace" replaces only stated weekdays with their complete windows. An explicit timezone must be an IANA zone in the existing schedule's frame for additions. Omit temporary trips and dated exceptions; these cannot be stored as colleague weekly hours. Omit vague windows rather than guessing clocks. Never emit legacy working_hours prose.
 - communication_style: brief vs lengthy, direct vs warm, asks questions back vs not
 - response_speed: how quickly they replied (immediate/fast/hours/day/slow/unreliable)
 - role_summary: their role, what they focus on
@@ -198,11 +199,29 @@ function chatToTranscript(messages: Array<{ role: string; content: string }>, hu
   }).join('\n');
 }
 
+/** Already captured turns are history, never a newly completed interaction.
+ * Unstamped assistant receipts can follow a new stamped turn; before that
+ * boundary their age is unknown. Leave the durable full thread untouched. */
+function uncapturedMessages<T extends { ts?: string }>(messages: T[], capturedAt: string | null | undefined): T[] {
+  if (!capturedAt) return messages;
+  const iso = DateTime.fromISO(capturedAt, { zone: 'utc' });
+  const cutoff = (iso.isValid ? iso : DateTime.fromSQL(capturedAt, { zone: 'utc' })).toMillis();
+  if (!Number.isFinite(cutoff)) return [];
+  let inNewTurn = false;
+  return messages.filter(message => {
+    if (message.ts !== undefined) {
+      const stamp = /^\d+(?:\.\d+)?$/.test(message.ts) ? Number(message.ts) * 1000 : NaN;
+      inNewTurn = Number.isFinite(stamp) && stamp > cutoff;
+    }
+    return inNewTurn;
+  });
+}
+
 /**
  * Parse Haiku's strict-JSON output. Returns null on any parse failure —
  * caller logs malformed capture separately from an empty valid delta.
  */
-function parseDelta(raw: string): CaptureDelta | null {
+function parseDelta(raw: string, currentProfile: PersonProfile, timezone: string | null | undefined): CaptureDelta | null {
   try {
     const match = extractFirstJsonObject(raw);
     if (!match) return null;
@@ -211,8 +230,8 @@ function parseDelta(raw: string): CaptureDelta | null {
     const allowed = new Set(['timezone', 'state', 'name_he', 'working_hours_structured', 'communication_style', 'response_speed', 'role_summary', 'reports_to', 'collaboration_notes', 'interaction_summary', 'durable_note']);
     for (const [key, field] of Object.entries(value)) {
       if (key === 'working_hours_structured') {
-        const { mergeWorkingHoursUpdate, WEEK_ORDER } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
-        mergeWorkingHoursUpdate(undefined, field, { week: Object.fromEntries(WEEK_ORDER.map(day => [day, null])) as import('../utils/workingHoursDefault').WeeklySchedule, source: 'auto' });
+        const { mergeWorkingHoursUpdate } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
+        mergeWorkingHoursUpdate(currentProfile.working_hours_structured, field, { week: { Sunday: [], Monday: [], Tuesday: [], Wednesday: [], Thursday: [], Friday: [], Saturday: [] }, source: 'auto' }, timezone);
         continue;
       }
       if (!allowed.has(key) || typeof field !== 'string') return null;
@@ -396,50 +415,54 @@ export async function runCapturePass(profile: UserProfile): Promise<void> {
         markThreadCaptured(row.thread_ts);
         continue;
       }
-      const transcript = chatToTranscript(messages, personRow.name);
+      const freshMessages = uncapturedMessages(messages, row.captured_at);
+      if (freshMessages.length > 0) {
+        const transcript = chatToTranscript(freshMessages, personRow.name);
 
-      // 4. Single Haiku call to extract deltas.
-      const userMsg = buildUserMessage(personRow.name, currentProfile, currentMemory, transcript);
-      const resp = await anthropic.messages.create({
-        ...HAIKU,
-        max_tokens: 800,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: userMsg }],
-      });
-      const text = resp.content
-        .filter(b => b.type === 'text')
-        .map(b => (b as Anthropic.TextBlock).text)
-        .join('')
-        .trim();
-      const delta = parseDelta(text);
-
-      if (!delta || Object.keys(delta).length === 0) {
-        // Haiku said "nothing new to learn" on the person-PROFILE side — but
-        // subject reconciliation (step 6 below) is an INDEPENDENT judgment
-        // ("did they answer a subject Maelle raised?") and must never be
-        // skipped just because this unrelated pass produced no profile
-        // delta. gh#198-LIB-9: an empty delta used to `continue` here,
-        // which meant runSubjectReconciliation never ran for the thread, so
-        // a person who replied (without teaching Haiku a new profile fact)
-        // still had the raise counted against them at the next coda
-        // trigger. Reconciliation is the ONLY path that reaches an
-        // answered-raise write: `recordSubjectAnswered`/`recordSubjectTouch`
-        // are called only from core/social/logEngagement.ts, whose own two
-        // entry points (`applyRaiseFeedbackForMatches`,
-        // `applyOrganicMatchSignal`) have no caller outside this file's
-        // reconciliation pass. So it must run regardless of this branch's
-        // outcome — log and fall through instead of bailing.
-        if (delta === null) logger.warn('capturePass: malformed profile capture; no facts applied', { threadTs: row.thread_ts, colleague: personRow.name });
-        else logger.info('capturePass: no new deltas', { threadTs: row.thread_ts, colleague: personRow.name });
-      } else {
-        // 5. Apply deltas to the canonical record.
-        await applyDelta(profile, colleagueId, personRow.name, delta);
-
-        logger.info('capturePass: applied deltas', {
-          threadTs: row.thread_ts,
-          colleague: personRow.name,
-          deltaKeys: Object.keys(delta),
+        // 4. Single Haiku call to extract deltas.
+        const userMsg = buildUserMessage(personRow.name, currentProfile, currentMemory, transcript);
+        const resp = await anthropic.messages.create({
+          ...HAIKU,
+          max_tokens: 800,
+          system: SYSTEM_PROMPT,
+          messages: [{ role: 'user', content: userMsg }],
         });
+        const text = resp.content
+          .filter(b => b.type === 'text')
+          .map(b => (b as Anthropic.TextBlock).text)
+          .join('')
+          .trim();
+        const delta = parseDelta(text, currentProfile, personRow.timezone);
+
+        if (!delta || Object.keys(delta).length === 0) {
+          // Haiku said "nothing new to learn" on the person-PROFILE side — but
+          // subject reconciliation (step 6 below) is an INDEPENDENT judgment
+          // ("did they answer a subject Maelle raised?") and must never be
+          // skipped just because this unrelated pass produced no profile
+          // delta. gh#198-LIB-9: an empty delta used to `continue` here,
+          // which meant runSubjectReconciliation never ran for the thread, so
+          // a person who replied (without teaching Haiku a new profile fact)
+          // still had the raise counted against them at the next coda
+          // trigger. Reconciliation is the ONLY path that reaches an
+          // answered-raise write: `recordSubjectAnswered`/`recordSubjectTouch`
+          // are called only from core/social/logEngagement.ts, whose own two
+          // entry points (`applyRaiseFeedbackForMatches`,
+          // `applyOrganicMatchSignal`) have no caller outside this file's
+          // reconciliation pass. So it must run regardless of this branch's
+          // outcome — log and fall through instead of bailing.
+          if (delta === null) logger.warn('capturePass: malformed profile capture; no facts applied', { threadTs: row.thread_ts, colleague: personRow.name });
+          else logger.info('capturePass: no new deltas', { threadTs: row.thread_ts, colleague: personRow.name });
+        } else {
+          // 5. Apply deltas to the canonical record.
+          await applyDelta(profile, colleagueId, personRow.name, delta);
+
+          logger.info('capturePass: applied deltas', {
+            threadTs: row.thread_ts,
+            colleague: personRow.name,
+            deltaKeys: Object.keys(delta),
+          });
+        }
+
       }
 
       // 6. v3.0 follow-up — subject reconciliation for THE COLLEAGUE's

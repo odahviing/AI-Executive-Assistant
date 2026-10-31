@@ -1,3 +1,26 @@
+## 5.3.0 — Flexible colleague hours and reliable scheduling context
+
+Maelle supports additional weekly availability windows without replacing a colleague’s existing daytime hours. This full MINOR checkpoint also reviews the calendar-exception, meeting-participant and Slack recovery changes shipped in 5.2.1 and 5.2.2.
+
+### Fixed
+- Keep exploratory slot searches from creating anonymous pending reschedules; retain tracking for genuine meeting changes.
+- Reconcile routine schedules at startup after timezone or workweek changes without replaying overdue work.
+- Suppress ordinary overload and lunch warnings on full-day vacation or Busy blocks.
+- Include the requester by default unless they explicitly say they will not attend, preserving interview handling and participant checks.
+- Describe normalized meeting durations naturally without unnecessary explanations.
+- Extract person interactions only from uncaptured messages, avoiding stale requests from reopened conversations.
+- Preserve separate weekly colleague availability windows, gaps, explicit off-days and existing authority boundaries; support additive and replacement updates.
+
+### Migration
+- Convert existing colleague working-hour days into canonical window arrays while preserving their meaning. Dated colleague exceptions remain unsupported.
+
+### Validation and limits
+- Seven new product corrections independently verified. Full cumulative checkpoint since 5.2.0: 270 native suites, 297 executions and 6,880 passing assertions, with typechecking passed. Golden30: all 30 paths independently reviewed, with 11 current anchors and 19 relocated anchors, zero failures.
+- Deterministic fixtures and structural prompt checks establish bounded behavior and supplied context; model interpretation and live incident outcomes remain unproven. The reverted email-timezone change is excluded. Option spacing, coda frequency, travel-location uncertainty and the separately held document-retention work remain unresolved.
+
+### Maintenance
+- Refresh two regression fixtures for the shipped artifact-exclusion policy and Slack catch-up schema dependency, and replace two stale line citations with symbol anchors. No additional product fix is counted.
+
 ## 5.2.2 — Preserve meeting participants and Slack recovery
 
 Maelle carries grounded participants into continuing private Slack scheduling requests and retains unresolved Slack catch-up intervals across restarts. Meeting guidance asks her to consult an accessible existing meeting before requesting missing details.

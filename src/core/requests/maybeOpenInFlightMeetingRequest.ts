@@ -2,9 +2,9 @@
  * maybeOpenInFlightMeetingRequest (v2.7.1 — bug 2.3 / 3.1).
  *
  * Auto-tracks owner-initiated meeting work that spills past one turn. When
- * the owner asks Maelle to move / delete / find-slots-for-a-move and the
- * tool call doesn't close cleanly in that turn (returned options for the
- * owner to pick, rule_violation, not_organizer, etc.), open a follow_up
+ * the owner attempts a create / move / delete mutation and the
+ * tool call doesn't close cleanly in that turn (rule_violation,
+ * not_organizer, etc.), open a follow_up
  * request row so the activity is visible in the brief and closeable via the
  * existing closeLoopOnOwnerHandled scanner.
  *
@@ -35,8 +35,10 @@ export interface MaybeOpenInput {
   toolResult: unknown;
 }
 
+// Availability search (including moving_event_ids) only explores alternatives.
+// It is not a commitment. Explicit future work uses the existing task/approval/
+// outreach spine; this backstop admits attempted mutations only.
 const TRACKED_TOOLS = new Set([
-  'find_available_slots',
   'create_meeting',
   'move_meeting',
   'delete_meeting',
@@ -95,23 +97,7 @@ export function maybeOpenInFlightMeetingRequest(input: MaybeOpenInput): void {
   let subject = '';
   let eventId: string | undefined;
 
-  if (input.toolName === 'find_available_slots') {
-    // Only treat this as in-flight work when it's part of an active MOVE —
-    // signaled by moving_event_ids. Pure search / hypothetical / new-booking
-    // exploration doesn't get a row (owner hasn't committed yet).
-    const movingIds = (toolInput as { moving_event_ids?: unknown }).moving_event_ids;
-    if (!Array.isArray(movingIds) || movingIds.length === 0) return;
-    spilled = true;
-    eventId = String(movingIds[0]);
-    // v3.0.2 — was `Reschedule meeting ${eventId.slice(0, 12)}` which leaked
-    // the first 12 chars of the Graph event_id (e.g. "AAMkADVmMjY1") into the
-    // brief subject line. Sonnet quoted it verbatim → owner saw raw IDs in
-    // chat. Toolinput rarely carries `subject` on find_available_slots, so this
-    // fallback fires almost every time. Generic non-leak fallback now; the real
-    // event_id stays in `details.meeting_id` for cascade matching but doesn't
-    // surface to the brief.
-    subject = (toolInput as { subject?: string }).subject ?? 'a meeting';
-  } else if (input.toolName === 'create_meeting' || input.toolName === 'move_meeting') {
+  if (input.toolName === 'create_meeting' || input.toolName === 'move_meeting') {
     // Clean success → no row needed (work closed this turn).
     if (result.success === true) return;
     spilled = true;
@@ -130,15 +116,7 @@ export function maybeOpenInFlightMeetingRequest(input: MaybeOpenInput): void {
 
   if (!spilled) return;
 
-  // gh#placeholder-id-persisted-into-artifact — find_available_slots never
-  // surfaces a Graph-side error for a moving_event_ids entry that doesn't
-  // resolve (findAvailableSlots.ts soft-skips a non-qualifying id and still
-  // returns a clean slots result), so that branch's `eventId` above is
-  // whatever the model typed, never Graph-confirmed. Persisting it anyway
-  // opens a row this same guard can never close — the success-retry cascade
-  // matches on the real event id — the exact "guaranteed orphan" this file
-  // already refuses for an errored mutation result (#124g, above). Same
-  // refusal for a garbage id riding a clean result instead.
+  // An invalid mutation identity cannot match a successful retry's cascade.
   if (eventId !== undefined && !looksLikeGraphEventId(eventId)) {
     logger.warn('maybeOpenInFlightMeetingRequest — tool-supplied id is not Graph-shaped, refusing to persist it', {
       tool: input.toolName, eventId,
@@ -178,7 +156,6 @@ export function maybeOpenInFlightMeetingRequest(input: MaybeOpenInput): void {
   // so it read as an unrelated topic. "In flight: moving Website Update"
   // makes the operation explicit.
   const verbByTool: Record<string, string> = {
-    find_available_slots: 'rescheduling',
     create_meeting: 'booking',
     move_meeting: 'moving',
     delete_meeting: 'cancelling',

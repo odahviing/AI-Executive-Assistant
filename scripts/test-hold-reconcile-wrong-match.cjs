@@ -84,7 +84,7 @@ async function runTick(calendarEvents, { sh, db }) {
     'src/connections/registry.ts': { getConnection: () => ({ sendDirect: async (to, text) => { dms.push({ to, text }); } }) },
     'src/tasks/runner.ts': { runDueTasks: async () => {} },
     'src/tasks/dispatchers/routine.ts': { stopInterruptedRoutineTasks: async () => {} },
-    'src/tasks/routineMaterializer.ts': { materializeRoutineTasks: async () => {}, backfillNullNextRunAt: noop },
+    'src/tasks/routineMaterializer.ts': { materializeRoutineTasks: async () => {}, reconcileRoutineSchedules: noop },
     'src/tasks/crons.ts': { ensureBriefingCron: noop, updateBriefingCronChannel: noop },
     'src/memory/capturePass.ts': { runCapturePass: async () => {} },
     'src/utils/categoryRules.ts': { checkCategorySlot: () => ({ allowed: true }), getProfileCategoryByName: () => null },
