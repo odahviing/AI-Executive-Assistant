@@ -27,6 +27,7 @@ import { resolveStatedInstant, resolveStatedSourceZone, statedClockPersonContext
 import { bookingLeadTimeHours, compareByRulePriority, offeredSlotCount, travelBufferMinutesFor, OWNER_OVERRIDABLE_SEARCH_LABELS } from '../../../../utils/scheduleRules';
 import { subjectViewerFor, viewerEmailFor } from '../../../../utils/displaySubject';
 import type { OpCtx } from './context';
+import { meetingScopedAttendees } from '../helpers';
 import { singleAttendeePresentationZone, attendeeTzForDay, type AttendeeAvailabilityEntry } from '../../../../utils/attendeeAvailability';
 
 /**
@@ -500,6 +501,13 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // `ignore_attendee_availability: true` for "find times I'm free,
           // I'll handle the others" scenarios.
           let attendeeEmails = (args.attendee_emails as string[]) ?? [];
+          const resolvedAttendees = context.resolvedMeetingAttendeeGroups === undefined
+            ? context.resolvedMeetingAttendees ?? []
+            : meetingScopedAttendees(context.resolvedMeetingAttendeeGroups, attendeeEmails, userEmail,
+                getPersonMemory(context.userId)?.email);
+          if (resolvedAttendees === null) {
+            return { error: 'ambiguous_meeting_roster', message: 'Identify which meeting this search is for and supply its participants. The current request contains separate or unresolved meeting rosters; their availability cannot be combined.' };
+          }
 
           // MOVE-PATH AUTO-FILL: when moving_event_ids is set, auto-read the moving
           // event's real roster so a later call that DROPPED an attendee still checks
@@ -662,7 +670,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // hold here either: he never SAW a choice to disambiguate, Maelle
                 // silently picked wrong before he was ever shown anything.
                 //
-                // Cross-check against context.resolvedMeetingAttendees UNION the
+                // Cross-check against this meeting's resolved attendees UNION the
                 // explicit attendee_emails already on hand — the SAME
                 // deterministic per-turn named-participant signal already trusted
                 // a few dozen lines below (and in createMeeting.ts), resolved by
@@ -674,7 +682,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // cross-check, so it keeps trusting the id exactly as before.
                 const expectedLower = new Set<string>([
                   ...attendeeEmails.map(e => e.toLowerCase()),
-                  ...(Array.isArray(context.resolvedMeetingAttendees) ? context.resolvedMeetingAttendees : [])
+                  ...resolvedAttendees
                     .map(e => e.toLowerCase()),
                 ]);
                 if (expectedLower.size > 0) {
@@ -830,9 +838,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             }
           }
 
-          // v3.6.4 — union the internal colleagues the orchestrator resolved
-          // from current named participants or a classified continuation
-          // grounded in an indexed human request (pre-search resolution).
+          // Recover known colleagues from this meeting's resolved roster,
+          // including provenance-checked continuation participants.
           // This is the guarantee that a KNOWN named colleague is in the search
           // even when Sonnet passed a partial attendee_emails (Lori dropped,
           // 07-08) or the wrong shape — resolution no longer depends on Sonnet
@@ -840,10 +847,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // provenance rather than unioning all historical names. Owner AND
           // colleague paths, deduped; the owner-self and
           // any ambiguous/external names were already filtered out upstream.
-          if (Array.isArray(context.resolvedMeetingAttendees) && context.resolvedMeetingAttendees.length > 0) {
+          if (resolvedAttendees.length > 0) {
             const existingLower = new Set(attendeeEmails.map(e => e.toLowerCase()));
             const added: string[] = [];
-            for (const email of context.resolvedMeetingAttendees) {
+            for (const email of resolvedAttendees) {
               const lower = (email ?? '').toLowerCase().trim();
               if (!lower.includes('@') || existingLower.has(lower)) continue;
               attendeeEmails.push(email);
@@ -1090,9 +1097,9 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           //
           // Returns a DIFFERENT shape than the default branch:
           //   { mode: 'candidate_validation', results: [{start, end,
-          //     available, broken_rule?, broken_rule_label?}, ...] }
-          // Caller (Sonnet) narrates blocked candidates by reading
-          // broken_rule_label verbatim.
+          //     available, broken_rule?, broken_rule_label?, broken_rules?,
+          //     broken_rule_labels?}, ...] }. The dispatcher scopes owner-only
+          // reasons before any colleague/email payload reaches the model.
           if (Array.isArray(args.candidate_slots) && args.candidate_slots.length > 0) {
             const ownerFirst = context.profile.user.name.split(' ')[0];
             const durationMin = args.duration_minutes as number;
@@ -1212,6 +1219,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // hours in its own tz), so an unavailable away candidate yields a
                 // real rejection reason in rejectedCounts — no WE special-casing.
                 const brokenRule = matches ? undefined : firstRejectReason(diag.rejectedCounts, diag.daySummary);
+                const brokenRules = matches ? [] : Object.keys(diag.rejectedCounts ?? {}) as SearchRejectReason[];
                 // gh#200 — an all-day OOF rejects every instant on that day
                 // before checkSlot ever runs, so the away span's real end
                 // lives on the day_summary entry for this candidate's date
@@ -1250,6 +1258,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   available: matches,
                   ...(presentLocal ? { presentation_local: presentLocal } : {}),
                   ...(brokenRule ? { broken_rule: brokenRule, broken_rule_label: labelFor(brokenRule, brokenRuleUntilDisplay) } : {}),
+                  ...(brokenRules.length ? { broken_rules: brokenRules, broken_rule_labels: brokenRules.map(reason => labelFor(reason, oofUntilDisplayFor(reason, diag.daySummary, cand.start.slice(0, 10)))) } : {}),
                   ...(attendeeHoursNote ? { attendee_hours_note: attendeeHoursNote } : {}),
                 };
               } catch (err) {
@@ -1954,6 +1963,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   const prefAvailable = prefSlots.some(s =>
                     DateTime.fromISO(s.start, { zone: timezone }).toMillis() === prefStartDt.toMillis());
                   const brokenRule = prefAvailable ? undefined : firstRejectReason(prefDiag.rejectedCounts, prefDiag.daySummary);
+                  const brokenRules = prefAvailable ? [] : Object.keys(prefDiag.rejectedCounts ?? {}) as SearchRejectReason[];
                   // Shared presentation-zone (presentTzForOutput, declared above) —
                   // this branch answers about the SAME preferred_slot instant the
                   // main `slots` list renders below, and must use the same zone, or
@@ -1971,6 +1981,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                     ...(brokenRule
                       ? { broken_rule: brokenRule, broken_rule_label: humanizeViolationLabel(brokenRule, ownerFirstPref) }
                       : {}),
+                    ...(brokenRules.length ? { broken_rules: brokenRules, broken_rule_labels: brokenRules.map(reason => humanizeViolationLabel(reason, ownerFirstPref)) } : {}),
                     _note: prefAvailable
                       // Passed the engine yet isn't in the offered set → it is
                       // genuinely bookable and simply didn't make the list (the

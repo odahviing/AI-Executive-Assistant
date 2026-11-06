@@ -93,7 +93,7 @@ export async function checkCoordinatedMoves(args: Record<string, unknown>, ctx: 
   for (const input of inputs) decisions.push(await planMeeting(input));
   const results = decisions.map((p,i) => ({ ...moves[i], subject: displaySubject(originals[i], context.profile, subjectViewerFor(context), viewerEmailFor(context)),
     available: p.action === 'book' && !p.hasConflict, action: p.action,
-    ...(p.action === 'book' ? { notice: p.overrideNotice, availability_unconfirmed: p.availabilityUnconfirmed } : { reason: 'suggestedAskText' in p ? p.suggestedAskText : 'This move needs an unresolved scheduling decision.' }) }));
+    ...(p.action === 'book' ? { notice: p.overrideNotice, availability_unconfirmed: p.availabilityUnconfirmed, attendee_conflict_disposition: p.attendeeConflictDisposition } : { reason: 'suggestedAskText' in p ? p.suggestedAskText : 'This move needs an unresolved scheduling decision.' }) }));
   if (decisions.some(p => p.action !== 'book')) return { mode: 'coordinated_move_validation' as const, available: false, results, error: 'move_plan_needs_decision' };
   // Acyclic replacement dependencies determine order without an optimizer or
   // a temporary third destination. Every step uses the existing rule validator.
@@ -2355,6 +2355,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         let movePlanAttendees: NonNullable<Awaited<ReturnType<typeof getEventForAttendeeUpdate>>>['attendees'] | undefined;
         let movePlanPreserveExisting = false;
         let movePlanOverrideNotice: string | undefined;   // #A — attendee-busy heads-up, surfaced on the move result
+        let attendeeConflictDisposition: 'accepted_override' | 'move_notice' | undefined;
         try {
           const { planMeeting: planMove } = await import('../../planMeeting');
           // #B (2026-07-19) — fetch the moving event BY ID, not via a ±1-day window
@@ -2630,6 +2631,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           if (movePlan.action === 'book') {
             movePlanPreserveExisting = movePlan.preserveExisting === true;
             movePlanOverrideNotice = movePlan.overrideNotice;   // #A — "who's busy" heads-up, surfaced on the result below
+            attendeeConflictDisposition = movePlan.attendeeConflictDisposition;
             // (v2.8.2) preserveExisting: leave location/isOnline undefined so the
             // Graph PATCH doesn't touch them. Re-stamping the BiWeekly's "Huddle"
             // with the office address on every move is exactly what we're killing.
@@ -3016,7 +3018,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           attendeeBusyNoteParts.push(`Moved over a conflict the requester confirmed — ${bookedOverAttendeesNote(bookedOverAttendees, viewerEmailFor(context))}. Say plainly what the clash is at the new time; they already said to go ahead, don't re-ask.`);
         }
         if (movePlanOverrideNotice) {
-          attendeeBusyNoteParts.push(`Heads up — ${movePlanOverrideNotice}. Moved anyway (your call is total); say plainly what the clash is at the new time and offer to check with them or pick another slot — don't re-ask permission.`);
+          attendeeBusyNoteParts.push(`Heads up — ${movePlanOverrideNotice}. State the actual conflict once; this completed move does not create a new confirmation or follow-up task.`);
         }
         const attendeeBusyNote = attendeeBusyNoteParts.length > 0 ? attendeeBusyNoteParts.join(' ') : undefined;
         // 2026-09-09 — the moved-to instant in the ATTENDEE's zone, same key and
@@ -3056,6 +3058,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           // "this books over your optional <X>" / "this double-books you over
           // <Y> with 2 people on it". Same one-time flag, never a re-ask.
           ...(attendeeBusyNote ? { _attendee_busy_note: attendeeBusyNote } : {}),
+          ...(attendeeConflictDisposition ? { attendee_conflict_disposition: attendeeConflictDisposition } : {}),
           // v1.8.3 — past-tense summary the reply quotes verbatim. Issue #26 bug 1:
           // without this, Sonnet could re-read the calendar post-move and narrate
           // the new time as a fresh discovery ("already at 12:30, nothing to change")

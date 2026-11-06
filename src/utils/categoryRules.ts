@@ -132,6 +132,8 @@ export function checkCategorySlot(opts: {
   events: CalendarEvent[]; // owner's events covering at least the slot's week
   profile: UserProfile;
   excludeEventId?: string; // for move_meeting: exclude the event being moved
+  /** Diagnostic peeling retains the same rule ladder without repeating a found failure. */
+  onlyRules?: ReadonlySet<CategoryRuleBroken>;
 }): CategoryCheckResult {
   if (!opts.categoryName) return { allowed: true };
   const cat = getProfileCategoryByName(opts.profile, opts.categoryName);
@@ -140,7 +142,7 @@ export function checkCategorySlot(opts: {
 
   // ── Rule 1: day_type ────────────────────────────────────────────────────
   const dayType = cat.day_type ?? 'any';
-  if (dayType !== 'any') {
+  if (dayType !== 'any' && (!opts.onlyRules || opts.onlyRules.has('day_type'))) {
     const dayName = opts.slotStart.toFormat('EEEE');
     // v3.7.x (#143) — the day's office/home identity comes from its EFFECTIVE
     // location, so a per-date chat override (office↔home flip, or an away day)
@@ -162,7 +164,7 @@ export function checkCategorySlot(opts: {
 
   // ── Rule 2: per_day ─────────────────────────────────────────────────────
   const perDay = cat.limits?.per_day;
-  if (perDay !== undefined && perDay >= 0) {
+  if (perDay !== undefined && perDay >= 0 && (!opts.onlyRules || opts.onlyRules.has('per_day'))) {
     const dayStart = opts.slotStart.startOf('day');
     const dayEnd = dayStart.plus({ days: 1 });
     const count = countCategoryOccurrences({
@@ -189,7 +191,7 @@ export function checkCategorySlot(opts: {
 
   // ── Rule 3: per_week ────────────────────────────────────────────────────
   const perWeek = cat.limits?.per_week;
-  if (perWeek !== undefined && perWeek >= 0) {
+  if (perWeek !== undefined && perWeek >= 0 && (!opts.onlyRules || opts.onlyRules.has('per_week'))) {
     // Luxon weeks start Monday by default. ISO week semantics.
     const weekStart = opts.slotStart.startOf('week');
     const weekEnd = weekStart.plus({ weeks: 1 });

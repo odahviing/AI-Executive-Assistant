@@ -21,7 +21,7 @@ import { closeRequest } from '../core/requests/closeRequest';
 import { resolveRequest, withRequestLock, notifyRequesterOfDecision, renderCounter, textCarriesInternalWorkItemId, type ResolveVerdict } from '../core/requests/resolver';
 import { requesterRelayLanguage, relayClosureToRequester, relayNotice } from '../core/requests/requesterRelay';
 import { logActivity } from '../core/requests/logActivity';
-import { composeOwnerAskText, extractCallbacks, boundApprovalExpiry } from '../core/approvals/approvalCallbacks';
+import { composeOwnerAskText, extractCallbacks, boundApprovalExpiry, mergeAmendIntoApprove } from '../core/approvals/approvalCallbacks';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash } from 'node:crypto';
 import type { AmendDispatch } from '../core/approvals/approvalCallbacks';
@@ -493,8 +493,8 @@ export async function createApprovalRequest(
         if (payload.origin_is_mpim === undefined) payload.origin_is_mpim = context.surface === 'room';
 
         // #142c — `honest_hard_reason` is the line that LEADS his decision surface,
-        // so it is CODE-authored or absent: only the checkSlot re-derivation below
-        // may write it. Strip whatever arrived in the payload first — the model must
+        // so it is CODE-authored or absent: the actual refusal handoff and the
+        // checkSlot re-derivation below may write it. Strip the payload first — the model must
         // never be able to author the sentence he decides on. (This is also why the
         // lead line can't just be read off `rule`/`rule_label`: those are
         // model-supplied by design and stay that way — an existing-event change
@@ -502,6 +502,15 @@ export async function createApprovalRequest(
         // put there, e.g. req_1784117442212_mo7hh's model-written
         // `rule: owner_busy_collision`.)
         delete payload.honest_hard_reason;
+        // Only the actual preceding refusal may supply an owner-facing reason.
+        // A model-authored payload cannot attest to its own action or rationale.
+        const refusal = context.approvalRefusalReason;
+        if (refusal?.action && typeof refusal.action === 'object'
+          && typeof refusal.reason === 'string' && refusal.reason.trim()
+          && isDeepStrictEqual(JSON.parse(JSON.stringify(refusal.action)),
+            JSON.parse(JSON.stringify(extractCallbacks(payload).on_approve ?? null)))) {
+          payload.honest_hard_reason = refusal.reason.trim();
+        }
 
         // ── The OPEN calendar-conflict door (Dina, 2026-08-30) ───────────
         // Owner ruling: "any calendar changes is approval for calendar, if the
@@ -756,7 +765,7 @@ export async function createApprovalRequest(
           // owner_busy_collision is surfaced verbatim to the owner (Rule 7 — the
           // hard conflict is always NAMED, never hidden behind a soft label);
           // genuine soft escalations (focus floor / work hours / category) keep
-          // their honest soft label AND their ask prose unchanged — except an unmet
+          // their canonical labels in the same owner-only reason — including an unmet
           // in-person ask (rule 1b, from the stored action's is_online=false), which
           // is named to him in code with the same time's online verdict. Skipped for
           // an existing-event change (edit / reschedule / cancel) — no slot to re-derive.
@@ -823,6 +832,9 @@ export async function createApprovalRequest(
               payload.rule_label = brokenLabels.includes(check.violation_label)
                 ? brokenLabels.join('; ')
                 : [check.violation_label, ...brokenLabels].join('; ');
+              // Store the complete code-proven reason, including soft rules.
+              // The approval renderer must not reconstruct it from ask prose.
+              payload.honest_hard_reason = payload.rule_label;
               // An unmet face-to-face ask is named to the owner in code, with what
               // the SAME time needs as an online meeting — the alternative the
               // requester was offered.
@@ -840,16 +852,17 @@ export async function createApprovalRequest(
                     : `Online at the same time would still break: ${remoteLabels.join('; ') || check.violation_label}.`,
                 ].join(' ');
               }
-              // Rule 7 — a HARD busy collision MUST be named to the owner. Persist it
-              // as its own structured field so the DM leads with the real reason (soft
-              // rules leave the ask as-is) — and so does every LATER surface that puts
+              // Rule 7 — a HARD busy collision MUST be named to the owner. The
+              // owner-only reason leads every LATER surface that puts
               // this same ask in front of him. It rides `details` (payload becomes
               // details_json below, and every downstream details write spreads the
               // existing object), NOT `description`: description is read by the brief,
               // the dedup judge, the runner and get_my_tasks, and an owner-voiced
               // sentence naming a private meeting's subject must not enter those.
               if (check.violation_kind === 'owner_busy_collision') {
-                payload.honest_hard_reason = [check.violation_label, payload.honest_hard_reason].filter(Boolean).join('\n');
+                if (brokenKinds.includes('in_person_on_home_day')) {
+                  payload.honest_hard_reason = [check.violation_label, payload.honest_hard_reason].filter(Boolean).join('\n');
+                }
 
                 // gh#194-c — the collision may be a meeting THIS SAME requester
                 // already had booked. create_meeting's own advisory steer
@@ -1021,6 +1034,10 @@ export async function createApprovalRequest(
                 terminalDmMsgTs: res.ts ?? existing.terminal_dm_msg_ts ?? undefined,
                 lastSurfacedAt: nowIso,
                 surfacedCount: (existing.surfaced_count ?? 0) + 1,
+                // Delivery succeeded: the correction itself is the nudge.
+                // Never reinterpret its short delivery retry as a midpoint nag.
+                nextCheckAt: existing.expires_at ?? null,
+                nextCheckHandler: existing.expires_at ? 'expiry' : null,
               });
               logger.info('create_approval — revived stale approval via re-ask', {
                 requestId: existing.id,
@@ -1094,9 +1111,9 @@ export async function createApprovalRequest(
               delete mergedDetails.deferred_action;
             }
             // Problem B, narrowed by bouncer overturn (2026-08-10) —
-            // `honest_hard_reason` is CODE-authored only (line 681 strips it,
-            // the checkSlot re-derivation above is the ONLY place that
-            // re-sets it). Once the ask has materially changed, the PRIOR
+            // `honest_hard_reason` is CODE-authored only (payload input is
+            // stripped; actual refusal and checkSlot supply it). Once the ask
+            // has materially changed, the PRIOR
             // sentence must not survive onto a different ask by spread order
             // alone — UNLESS this turn never actually re-checked the new
             // slot (existing-event change, or the checkSlot/getCalendarEvents
@@ -1598,7 +1615,7 @@ Open calendar conflict (no time chosen yet): when a colleague raises a conflict 
 EVERY kind must say WHY it needs him, in its own payload field (policy_exception: rule + context · duration_override: reason · unknown_person: missing_fields · freeform: question + context). No reason → refused with \`missing_reason\`, and rightly: if you can't state why this needs HIM, either the action is already allowed (do it) or you don't yet know what's blocking it (find out first).
 
 Behavior:
-- DMs the owner immediately with ask_text. LLM-judged dedup against open requests for this (owner, requester) — if the same logical ask is already open, returns the existing one.
+- DMs the owner immediately. Concrete timed meeting asks render the structured reason and action clock; other asks retain ask_text. Dedup against open requests for this (owner, requester) returns the existing logical ask.
 - Default expiry is 2 owner-workdays (Fri/Sat skipped for this profile). Owner-silent past expiry → request closes as expired + owner gets a tombstone DM.
 - When approval has a colleague-originated context, include requester_slack_id in the payload so the resolver can DM the requester back with the owner's decision.`,
         input_schema: {
@@ -1606,7 +1623,7 @@ Behavior:
           properties: {
             kind: { type: 'string', enum: [...APPROVAL_SUBKINDS] },
             payload: { type: 'object', description: 'Kind-specific payload (see tool description). Pass a real JSON object here, NOT a JSON-encoded string.' },
-            ask_text: { type: 'string', description: 'The exact text to DM the owner as the approval ask.' },
+            ask_text: { type: 'string', description: 'Approval prose for nonmeeting/open-ended asks. Concrete timed meetings render the structured payload reason and action clock instead.' },
             expires_in_workdays: { type: 'number', description: 'Owner-workdays until expiry. Default 2.' },
             expires_in_hours: { type: 'number', description: 'Sub-workday escape hatch.' },
           },
@@ -1628,7 +1645,7 @@ Verdicts:
 - amend: owner is countering, deferring, or wants to RELAY A QUESTION / MESSAGE to the requester and keep the ask alive — "no, but 13:30 would work", "tell him I'm on vacation, ask if it has to be him or someone else can cover next week", "come back to me once you check with them". Put every explicitly changed term in \`counter\` (time, \`is_online\`, \`location\`, attendees), plus any question/message; omitted terms retain the stored decision. This flips the request to awaiting_colleague, DMs the requester the counter (a question renders as "<owner> asked: …"), and keeps it OPEN + tracked so their reply reconnects. Use amend WHENEVER the instruction is relay-a-question / ask-them / defer — NOT reject.
   - OPEN calendar-conflict ask (create_approval's open_options shape — no time was chosen when raised): once the owner picks one, resolve with verdict='amend' and \`counter={"new_start":"<ISO>"}\` (add \`new_end\` only to change the duration). A bare approve has nothing to execute and is refused — the time must ride in the counter. If the owner wants the meeting left as-is, use reject instead.
 
-Binding — take the explicit id token from the owner's reply; otherwise the line marked "← THIS THREAD" in PENDING APPROVALS, which renders whenever anything is pending and carries the full disambiguation rules. No anchor and several open → call list_pending_approvals and ask which one by subject. Outside the anchor thread, a bare yes/no is refused UNLESS the owner's own message names this approval by subject or counterpart ("ANF already done", "reject the Erez sync") — that's detected automatically from what he actually typed, not from anything you pass in \`reason\`. If it's refused, tell him which open approvals exist and ask him to confirm in the approval's own thread, the daily thread, or by naming which one he means.`,
+Binding — use the explicit id token or "← THIS THREAD" in PENDING APPROVALS. The handler can also bind the owner's named subject/counterpart or an attributed contextual decision accepting the existing action. For acceptance of that action, omit \`data\` (or pass {}); its canonical terms execute. A request to amend or search is not approval of the old action. Ambiguous bare yes/no with several open remains refused. No anchor and several open → call list_pending_approvals and ask which subject, or ask for a reply in its approval thread.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -2150,6 +2167,7 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         // own DM thread (different channel entirely), so this correctly falls
         // through to the namedMatch check — an unnamed bare ack from a room
         // still refuses to bind, same protection the DM path gets.
+        let contextualDecisionDetails: string | null | undefined;
         if (context.authority === 'owner' && verdict !== 'amend') {
           const ownerRow = getRequest(requestId);
           if (ownerRow) {
@@ -2278,7 +2296,42 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
                 });
               }
             }
-            if (!anchored && !namedMatch && !chronoAnchor) {
+            // The existing classifier can interpret a contextual decision, but
+            // only against the exact pending action it saw. Discussion/changed
+            // terms are not permission to replay the old action. Tool-authored
+            // reason/data never manufacture this independent attribution.
+            let contextualAnchor = false;
+            if (!anchored && !namedMatch && !chronoAnchor
+              && ownerRow.kind === 'approval' && ownerRow.state === 'awaiting_owner'
+              && ownerRow.owner_user_id === context.userId
+              && context.userId === profile.user.slack_user_id
+              && context.surface === 'owner_dm' && context.channel === 'slack'
+              && context.interactive === true && Array.isArray(context.contextualApprovalDecisions)) {
+              const matches = context.contextualApprovalDecisions.filter(d => d?.requestId === requestId);
+              const attributed = matches.length === 1 ? matches[0] : undefined;
+              const unchangedData = verdict !== 'approve' || args.data === undefined
+                || (!!args.data && typeof args.data === 'object' && !Array.isArray(args.data)
+                  && Object.keys(args.data).length === 0);
+              if (attributed && unchangedData
+                && attributed.requestDetailsJson === ownerRow.details_json
+                && typeof attributed.instructionQuote === 'string' && attributed.instructionQuote.trim()
+                && ownerLiteralMessage.includes(attributed.instructionQuote)
+                && typeof attributed.sourceQuote === 'string' && attributed.sourceQuote.trim()
+                && Number.isInteger(attributed.sourceMessageIndex) && attributed.sourceMessageIndex >= 0
+                && attributed.disposition === (verdict === 'approve' ? 'approve_existing' : 'reject')) {
+                try {
+                  const details = parseDetails<Record<string, unknown>>(ownerRow) ?? {};
+                  let action = extractCallbacks(details).on_approve;
+                  if (action && details.counter && typeof details.counter === 'object') {
+                    action = mergeAmendIntoApprove(action, details.counter as Record<string, unknown>, profile);
+                  }
+                  contextualAnchor = !!action && isDeepStrictEqual(
+                    JSON.parse(JSON.stringify(action)), JSON.parse(JSON.stringify(attributed.action ?? null)));
+                  if (contextualAnchor) contextualDecisionDetails = ownerRow.details_json;
+                } catch { /* Malformed or unresolved action cannot authorize replay. */ }
+              }
+            }
+            if (!anchored && !namedMatch && !chronoAnchor && !contextualAnchor) {
               logger.warn('resolve_approval — bare ack not anchored to the approval thread; refusing to bind', {
                 requestId, verdict, threadTs: context.threadTs,
                 terminalDm: ownerRow.terminal_dm_msg_ts, ownerDaily: ownerRow.owner_dm_thread_ts,
@@ -2364,6 +2417,7 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
           const result = await resolveRequest(requestId, decision, {
             app: context.app,
             profile: context.profile,
+            ...(contextualDecisionDetails !== undefined ? { expectedOwnerDecisionDetails: contextualDecisionDetails } : {}),
             // v3.1.3 — the colleague-path is permitted only for amending
             // approvals; that's the one case where a reject/amend should
             // bounce back to the owner. An OWNER reject must close.

@@ -38,7 +38,7 @@ function harness(options = {}) {
   const connection = { sendDirect: async (id, body, opts) => { effects.sends.push({ id, body, opts }); if(options.relayThrows)throw Error('provider timeout'); return options.relayOutcome || { ok: true }; }, postToChannel: async (id, body, opts) => { effects.sends.push({ id, body, opts }); if(options.relayThrows)throw Error('provider timeout'); return options.relayOutcome || { ok: true }; } };
   const mocks = {
     'src/db/requests.ts': {
-      getDueRequests:()=>row.next_check_at?[row]:[],getLatestFreeformOwnerFlag:()=>null,getChildRequests:()=>[],getRequest: id => priorRow?.id === id ? priorRow : row, updateRequest: update, getAwaitingOwnerRequests: () => [row], isKnownRequestThreadAnchor: () => false,
+      getDueRequests:()=>row.next_check_at?[row]:[],getLatestFreeformOwnerFlag:()=>null,getChildRequests:()=>[],getRequest: id => priorRow?.id === id ? priorRow : row, updateRequest: update, getAwaitingOwnerRequests: () => [row,...(options.otherApprovals||[])], isKnownRequestThreadAnchor: () => false,
       getRequestByIdempotencyKey: () => options.idempotent ? row : null, getRecentOutreachOwnerThread: () => null,
       buildIdempotencyKey: args => { effects.keys.push(clone(args)); return 'isolated-key'; },
       createRequest: args => { effects.creates.push(clone(args)); if(args.parentRequestId)priorRow=clone(row); row = { ...row, id:args.parentRequestId?'req_1234567890124_repeat':row.id,parent_request_id:args.parentRequestId, state: args.state, next_check_at:args.nextCheckAt,next_check_handler:args.nextCheckHandler,expires_at:args.expiresAt, subkind: args.subkind, requester_slack_id: args.requesterSlackId ?? null, requester_name: args.requesterName ?? null, origin_channel: args.originChannel, origin_thread_ts: args.originThreadTs, origin_is_mpim: args.originIsMpim ? 1 : 0, details_json: JSON.stringify(args.details) }; return row; },
@@ -64,18 +64,19 @@ function harness(options = {}) {
       return {status:positive&&result.scheduled===true&&result.jobId?'tracked':positive&&(result.success===true||result.ok===true||result.saved===true)?'completed':'failed',result:result||{}};
     } },
     'src/utils/shadowNotify.ts': { shadowNotify: async () => {} },
-    'src/connectors/graph/calendar.ts':{verifyEventDeleted:async()=>false},
+    'src/connectors/graph/calendar.ts':{verifyEventDeleted:async()=>false,getCalendarEvents:async()=>[],getEventType:async(email,id)=>{(effects.calendarReads??=[]).push({email,id});if(options.previewUnavailable)throw Error('calendar unavailable');return options.previewEvents?.[id]??null;}},
+    'src/utils/scheduleRules.ts':{checkSlot:()=>{if(!options.checkResult)throw Error('fixture: no calendar verdict');return options.checkResult;},brokenOwnerRules:()=>options.brokenRules||[]},
     'src/connectors/graph/calendarReads.ts': { verifyApprovedCalendarAction:async()=>options.verification||{status:'unavailable',reason:'No authoritative read can establish this outcome.'} },
     'src/utils/ownerDailyThread.ts': { postOwnerDecision: async args => { effects.ownerPosts.push(args.text); return { ok: !options.ownerPostFail, channel: 'DOWNER', threadTs: 'owner.daily', ts: 'owner.1' }; } },
     'src/utils/workHours.ts': { workTimeBaseFromNow: () => '2026-09-10T00:00:00Z', addWorkdays: () => '2026-09-14T00:00:00Z' },
-    'src/utils/weTimeResolver.ts': { StatedTimeClarificationError: class extends Error {}, statedClockPersonContext: () => undefined, statedZoneFromArgs: args => args.stated_zone || args.start_timezone, resolveStatedInstant: input => ({ startIso: input.startIso, endIso: input.endIso }) },
+    'src/utils/weTimeResolver.ts': { StatedTimeClarificationError: class extends Error {}, statedClockPersonContext: () => undefined, statedZoneFromArgs: args => args.stated_zone || args.start_timezone, resolveStatedInstant: input => {if(options.timeClarification)throw new mocks['src/utils/weTimeResolver.ts'].StatedTimeClarificationError('Ambiguous clock; choose the intended instant.');return { startIso: input.startIso, endIso: input.endIso };} },
     'src/utils/attendeeAvailability.ts': { loadAttendeeAvailabilityForPerson: (person, fallback) => ({ timezone: person?.timezone || fallback }), attendeeTzForDay: entry => entry.timezone },
     'src/utils/workingElsewhere.ts': { getTravelContextForInstant: () => undefined },
     'src/utils/logger.ts': { __esModule: true, default: { info() {}, error() {}, warn: (...args) => effects.warnings.push(args) } },
     'src/utils/resolveSlackId.ts': { resolveSlackId: id => ({ slack_id: id, was_hallucinated: false }) },
     'src/llm/models.ts': { MODEL_HAIKU: 'isolated-model' },
     'src/llm/client.ts': { getAnthropicClient: () => ({ messages: { create: async () => ({ content: [{ type: 'tool_use', input: { verdict: options.classification || 'unsure' } }] }) } }) },
-    'src/utils/usageLog.ts': { logLlmUsage() {} }, 'src/tasks/briefs.ts': {}, 'src/utils/requestDedup.ts': {judgeRequestDedup:async args=>{effects.judges.push(args);return {match:'existing',existing_id:row.id,material_change:options.materialChange};}}, 'src/utils/closeLoopOnOwnerHandled.ts': {},
+    'src/utils/usageLog.ts': { logLlmUsage() {} }, 'src/tasks/briefs.ts': {}, 'src/utils/requestDedup.ts': {judgeRequestDedup:async args=>{effects.judges.push(args);return {match:'existing',existing_id:row.id,material_change:options.materialChange};}}, 'src/utils/closeLoopOnOwnerHandled.ts': {messageReferencesRequest: options.messageReferencesRequest || (()=>false)},
     'src/db.ts': { getPendingRequestCountForColleague: () => options.pendingCount || 0 },
   };
   // Execute the historical delivery helper as authored, with the same isolated
@@ -111,6 +112,9 @@ function harness(options = {}) {
   const skill = load('src/tasks/skill.ts');
   const context = extra => ({ profile, userId: 'UPAUL', authority: 'colleague', senderRole: 'colleague', surface: 'colleague_dm', channelId: 'DPAUL', threadTs: 'origin.1', ...extra });
   const h = { effects, unexpected, row: () => row, update,
+    effectiveAction:()=>{const c=load('src/core/approvals/approvalCallbacks.ts'),d=JSON.parse(row.details_json),a=c.extractCallbacks(d).on_approve;return d.counter?c.mergeAmendIntoApprove(a,d.counter,profile):a;},
+    preview: (extra={}) => load('src/core/approvals/approvalCallbacks.ts').composeOwnerAskText({requestId:row.id,profile,askText:row.description||'Review this request',details:JSON.parse(row.details_json),...extra}),
+    resolveTool: (args={},ctx={}) => new skill.TasksSkill().executeToolCall('resolve_approval',{approval_id:row.id,verdict:'approve',...args},context({userId:'UOWNER',authority:'owner',senderRole:'owner',surface:'owner_dm',channel:'slack',interactive:true,channelId:'DOWNER',threadTs:'owner.daily',currentUserMessage:'Book one before Michal and one after Lori.',...ctx})),
     bound:()=>load('src/utils/threadBoundApprovalAutoResolve.ts').tryAutoResolveThreadBoundApproval({message:'yes',threadTs:'owner.1',ownerUserId:'UOWNER',profile}),
     lock: work => resolver.withRequestLock(row.id, work),
     task: (action, args = {}) => new skill.TasksSkill().executeToolCall('update_task', { task_id: row.id, action, ...args }, context({ userId: 'UOWNER', authority: 'owner', senderRole: 'owner', surface: 'owner_dm' })),

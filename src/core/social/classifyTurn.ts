@@ -99,6 +99,16 @@ export interface ClassifyTurnResult {
    * forgot to resolve the name. Never fuzzy-matched here; this is raw extraction.
    */
   meetingPeople: string[];
+  /** Per-meeting partition of current and grounded continuing participant names.
+   * Empty means no trustworthy grouping; undefined is a legacy producer. */
+  meetingPeopleGroups?: string[][];
+  approvalDecisions?: Array<{
+    candidateIndex: number;
+    disposition: 'approve_existing' | 'reject' | 'amend_or_search';
+    instructionQuote: string;
+    sourceMessageIndex: number;
+    sourceQuote: string;
+  }>;
   /** Transient continuation evidence, grounded to caller-supplied user messages.
    * Continuation/removal semantics remain classifier judgments; callers must
    * independently enforce transport and source provenance before using names. */
@@ -136,6 +146,7 @@ export async function classifyTurn(params: {
   /** Same bounded recent context, indexed for participant provenance. Supply
    * only where the caller can authenticate historical human authorship. */
   meetingContextMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  approvalCandidates?: Array<{ subject: string; action: { tool: string; args: Record<string, unknown> } }>;
 }): Promise<ClassifyTurnResult> {
   const { anthropic, message, profile, needIntent, needScopes, recentContext } = params;
   const needMeetingPeople = params.needMeetingPeople === true;
@@ -264,6 +275,8 @@ MEETING PARTICIPANTS (meeting_people) — set this ONLY when ${senderName} is gi
 - The two can share one sentence: "you didn't check Yael — anyway find me 25 min with Levana" disputes Yael (excluded) and separately asks for Levana (included) → return only Levana, never both.
 - NOT a scheduling request, or nobody named → return an empty array.
 - Do NOT invent, translate, or normalize names — copy them as written. Do NOT guess who a vague reference means; only list explicitly named people.
+
+MEETING GROUPS (meeting_people_groups): preserve which participants belong to each distinct requested meeting. Return one array per meeting, using only names from meeting_people or context_meeting_people. A person shared by several meetings appears in each relevant array. "Separate meetings with Adam, Paul and Scott" gives [["Adam"],["Paul"],["Scott"]]; "a meeting with Adam and Paul" gives [["Adam","Paul"]]. Include every extracted participant in their own meeting group; never combine separate meetings. For a continuing request preserve its original grouping. If the grouping is uncertain, return an empty array.
 ${params.meetingContextMessages ? `
 MEETING CONTINUATION (meeting_continuation, context_meeting_people):
 - Use the indexed recent conversation only to identify the SAME still-active scheduling request. Return meeting_continuation=true only when the current message continues that request; new task, dispute without a scheduling ask, missing task anchor, or uncertainty means false and an empty context_meeting_people array.
@@ -276,15 +289,30 @@ MEETING CONTINUATION (meeting_continuation, context_meeting_people):
   const renderedContext = params.meetingContextMessages
     ? params.meetingContextMessages.map((m, i) => `[${i}] ${m.role}: ${m.content}`).join('\n')
     : recentContext;
+  const approvalSection = isOwner && params.approvalCandidates?.length ? `
+PENDING MEETING DECISIONS (approval_decisions): interpret the CURRENT owner's explicit instruction against the indexed pending actions and recent conversation. Return [] for a mere mention, question, bare acknowledgement, uncertain reference or missing relationship evidence. For each independently identified action cite a verbatim instructionQuote from the CURRENT message and a verbatim sourceQuote from one indexed recent message (sourceMessageIndex) that identifies this specific request and grounds the relationship. A shared requester alone does not identify it.
+Use approve_existing ONLY when the owner authorizes this exact stored action without changing its terms. Use reject only for an explicit rejection. Use amend_or_search when the instruction changes terms or requires finding a new time; that never authorizes the old action. An instruction to place one request before an anchor meeting and another after an anchor is a set of decisions: identify each separately. Preserve an already matching action only if the cited relationship supports it; the other request needs amendment/search, never approve both unchanged. Do not invent calendar facts, infer overrides, or treat an assistant suggestion as owner consent. Consent must come from the current instruction.
+Candidates (zero-based indices): ${JSON.stringify(params.approvalCandidates.map((candidate, candidateIndex) => ({ candidateIndex, ...candidate })))}
+` : '';
 
   const systemPrompt = `You classify a single message from ${senderName} (${isOwner ? `${ownerFirst} — the executive who owns this account` : `a colleague talking to ${assistantName}`}) to ${assistantName}.
 
 Output EXACTLY ONE call to classify_turn. No prose.
-${intentSection}${scopeSection}${meetingPeopleSection}${renderedContext ? `\nRecent conversation (classify the LAST message from ${senderName}):\n${renderedContext}\n` : ''}`;
+${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${renderedContext ? `\nRecent conversation (classify the LAST message from ${senderName}):\n${renderedContext}\n` : ''}`;
 
   // ── Build the tool schema — include only the requested fields ──
   const properties: Record<string, any> = {};
   const required: string[] = [];
+  if (approvalSection) {
+    properties.approval_decisions = {
+      type: 'array', items: { type: 'object', properties: {
+        candidateIndex: { type: 'integer' },
+        disposition: { type: 'string', enum: ['approve_existing', 'reject', 'amend_or_search'] },
+        instructionQuote: { type: 'string' }, sourceMessageIndex: { type: 'integer' }, sourceQuote: { type: 'string' },
+      }, required: ['candidateIndex', 'disposition', 'instructionQuote', 'sourceMessageIndex', 'sourceQuote'], additionalProperties: false },
+    };
+    required.push('approval_decisions');
+  }
   if (needIntent) {
     properties.kind = { type: 'string', enum: ['task', 'social', 'other'] };
     properties.conversation_state = { type: 'string', enum: ['open', 'closing'] };
@@ -328,6 +356,12 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${renderedContext ? `\nRec
       description: 'People named as participants in a scheduling request, copied as written. Empty array when this is not a scheduling request or nobody is named.',
       items: { type: 'string' },
     };
+    properties.meeting_people_groups = {
+      type: 'array',
+      description: 'One participant-name array per distinct meeting. All current/continuing participants must be covered. Empty when uncertain or none.',
+      items: { type: 'array', items: { type: 'string' } },
+    };
+    required.push('meeting_people_groups');
     if (params.meetingContextMessages) {
       properties.meeting_continuation = { type: 'boolean' };
       properties.context_meeting_people = {
@@ -340,8 +374,8 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${renderedContext ? `\nRec
         },
       };
     }
-    // Deliberately NOT in `required` — an empty array (the common non-scheduling
-    // case) must be a first-class answer, not a forced hallucination.
+    // Names remain optional. Grouping is required but an empty array is an
+    // explicit uncertain/non-scheduling answer, never forced membership.
   }
 
   try {
@@ -360,7 +394,7 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${renderedContext ? `\nRec
     logLlmUsage('classify_turn', MODEL, resp);
 
     const toolUse = resp.content.find((b: any) => b.type === 'tool_use') as any;
-    const raw = toolUse?.input as (OwnerIntentClassification & { scopes?: string[]; free_time_inquiry?: boolean; meeting_people?: unknown; meeting_action?: unknown; meeting_continuation?: unknown; context_meeting_people?: unknown }) | undefined;
+    const raw = toolUse?.input as (OwnerIntentClassification & { scopes?: string[]; free_time_inquiry?: boolean; meeting_people?: unknown; meeting_people_groups?: unknown; meeting_action?: unknown; meeting_continuation?: unknown; context_meeting_people?: unknown }) | undefined;
 
     // ── Resolve intent ──
     let intent: OwnerIntentClassification = INTENT_OTHER;
@@ -446,7 +480,33 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${renderedContext ? `\nRec
 
     const freeTimeInquiry = isOwner && needIntent && raw?.free_time_inquiry === true;
 
-    return { intent, scope, freeTimeInquiry, meetingPeople, meetingAction, meetingContinuation, contextMeetingPeople };
+    const meetingPeopleGroups = Array.isArray(raw?.meeting_people_groups)
+      && raw.meeting_people_groups.length <= 12
+      && raw.meeting_people_groups.every(group => Array.isArray(group) && group.length > 0
+        && group.length <= 12 && group.every(name => typeof name === 'string' && name.trim()))
+      ? (raw.meeting_people_groups as string[][]).map(group => group.map(name => name.trim()))
+      : raw?.meeting_people_groups === undefined ? undefined : [];
+    const decisionInput = (raw as { approval_decisions?: unknown } | undefined)?.approval_decisions;
+    const approvalDecisions: NonNullable<ClassifyTurnResult['approvalDecisions']> = [];
+    if (approvalSection && Array.isArray(decisionInput) && decisionInput.length <= params.approvalCandidates!.length) {
+      const seen = new Set<number>();
+      for (const value of decisionInput) {
+        if (!value || !Number.isInteger(value.candidateIndex) || seen.has(value.candidateIndex)
+          || !params.approvalCandidates![value.candidateIndex]
+          || !['approve_existing', 'reject', 'amend_or_search'].includes(value.disposition)
+          || typeof value.instructionQuote !== 'string' || !value.instructionQuote.trim()
+          || !message.includes(value.instructionQuote)
+          || !Number.isInteger(value.sourceMessageIndex) || typeof value.sourceQuote !== 'string' || !value.sourceQuote.trim()
+          || !params.meetingContextMessages?.[value.sourceMessageIndex]?.content.includes(value.sourceQuote)) {
+          approvalDecisions.length = 0;
+          break;
+        }
+        seen.add(value.candidateIndex);
+        approvalDecisions.push({ candidateIndex: value.candidateIndex, disposition: value.disposition,
+          instructionQuote: value.instructionQuote, sourceMessageIndex: value.sourceMessageIndex, sourceQuote: value.sourceQuote });
+      }
+    }
+    return { intent, scope, freeTimeInquiry, meetingPeople, meetingPeopleGroups, meetingAction, meetingContinuation, contextMeetingPeople, approvalDecisions };
   } catch (err) {
     logger.warn('classifyTurn threw — defaulting to other / general', { err: String(err).slice(0, 300) });
     return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false, meetingPeople: [] };

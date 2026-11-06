@@ -353,6 +353,8 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     socialClassification,
     blockedWriteTools,
     resolvedMeetingAttendees,
+    resolvedMeetingAttendeeGroups,
+    contextualApprovalDecisions,
     availabilityQuestionDetected,
     availabilityPrecheckToolSummaries,
   } = await buildTurnContext(input);
@@ -438,6 +440,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // payload.deferred_action so the resolver can replay the booking on
   // approve. The "redirect URL token" pattern in code — no Sonnet copying.
   let lastDeferredActionHint: { tool: string; args: Record<string, unknown> } | null = null;
+  let lastApprovalRefusalReason: SkillContext['approvalRefusalReason'];
   // log-move-meeting-blind-retry-loop (2026-09-07, Daniel Sharabi) —
   // checkSameSubjectCollision (moveMeeting.ts) refuses an ambiguous
   // same-subject match and tells the model in the error TEXT to ask, not
@@ -593,6 +596,8 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // participants; find_available_slots unions them so a known attendee is
       // never dropped. Per-turn (rebuilt each response round with the turn's set).
       resolvedMeetingAttendees,
+      resolvedMeetingAttendeeGroups,
+      contextualApprovalDecisions,
       // v4.4.x (GH#169 revisit) — the raw current-turn message, forwarded so
       // resolve_approval's anchor gate (tasks/skill.ts) can ground its
       // unanchored-but-named fallback on what the sender actually typed,
@@ -806,6 +811,9 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // hint so a second create_approval later in the same turn doesn't
       // inherit a stale hint from an unrelated rule_violation earlier.
       let toolInputForCall = toolUse.input as Record<string, unknown>;
+      // Per-call evidence cannot leak into a later approval in the same model
+      // batch. It comes only from an actual tool result, never input payload.
+      skillContext.approvalRefusalReason = undefined;
       if (toolUse.name === 'create_approval'
           && lastDeferredActionHint
           && (toolInputForCall as { kind?: string }).kind === 'policy_exception') {
@@ -821,8 +829,13 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           logger.info('orchestrator — auto-attached deferred_action to create_approval payload', {
             tool: lastDeferredActionHint.tool, threadTs: input.threadTs,
           });
-          lastDeferredActionHint = null;  // consumed
         }
+        const attachedAction = (toolInputForCall.payload as Record<string, unknown> | undefined)?.deferred_action;
+        if (lastApprovalRefusalReason && isDeepStrictEqual(attachedAction, lastApprovalRefusalReason.action)) {
+          skillContext.approvalRefusalReason = lastApprovalRefusalReason;
+        }
+        lastDeferredActionHint = null;
+        lastApprovalRefusalReason = undefined;
       }
 
       // Slack assistant-panel status indicator. Fires before each tool call
@@ -1197,7 +1210,12 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           | { tool?: string; args?: Record<string, unknown> }
           | undefined;
         if (hint && typeof hint.tool === 'string' && hint.args && typeof hint.args === 'object') {
-          lastDeferredActionHint = { tool: hint.tool, args: hint.args };
+          lastDeferredActionHint = { tool: hint.tool, args: structuredClone(hint.args) };
+          const refusal = result as { violation_label?: unknown; broken_rule_label?: unknown };
+          const reason = typeof refusal.violation_label === 'string' ? refusal.violation_label
+            : typeof refusal.broken_rule_label === 'string' ? refusal.broken_rule_label : '';
+          lastApprovalRefusalReason = reason.trim()
+            ? { action: lastDeferredActionHint, reason } : undefined;
           logger.info('orchestrator — captured deferred_action_hint from rule_violation', {
             tool: hint.tool, threadTs: input.threadTs,
           });

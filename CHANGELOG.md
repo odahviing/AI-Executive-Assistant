@@ -1,3 +1,21 @@
+## 5.4.0 — Reliable meeting requests and quieter calendar updates
+
+Maelle keeps separate meeting rosters and exact-time conflicts intact, and carries owner decisions through the approval lifecycle. Calendar maintenance also avoids extra success discussions for routine floating-block moves.
+
+### Fixed
+- Keep separate meeting requests from borrowing each other's attendees, while preserving authenticated requester and privacy boundaries.
+- Report all relevant blockers for an exact requested slot instead of stopping at the first conflict.
+- Snap relative meeting boundaries to the scheduling grid while preserving an explicitly accepted exact start.
+- Stop successful approval corrections from restarting the short reminder retry cadence; retain retries after delivery failure.
+- Fulfill a uniquely grounded contextual owner approval using the current stored action, close its request, and relay the outcome; keep ambiguous or changed decisions pending.
+- Render meeting approval details from canonical action times and grounded reasons instead of inherited narrative clocks.
+- Avoid promising an untracked follow-up when no durable pending work exists.
+- Name the colleague in held work-hours notifications so the owner can tell who will be contacted.
+- Keep routine floating-block moves in activity and revert records without an extra success discussion; preserve failure and no-slot notices.
+
+### Verification scope
+- Independent regression evidence covers deterministic behavior and preserved legitimate paths. Semantic interpretation, tool choice and prompt obedience remain model-dependent; this release does not claim a live model replay.
+
 ## 5.3.0 — Flexible colleague hours and reliable scheduling context
 
 Maelle supports additional weekly availability windows without replacing a colleague’s existing daytime hours. This full MINOR checkpoint also reviews the calendar-exception, meeting-participant and Slack recovery changes shipped in 5.2.1 and 5.2.2.

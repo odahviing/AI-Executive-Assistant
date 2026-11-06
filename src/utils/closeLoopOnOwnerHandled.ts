@@ -162,12 +162,11 @@ function isSubjectStopword(lower: string): boolean {
   return false;
 }
 
-export function messageReferencesRequest(message: string, row: RequestRow): boolean {
-  const msg = ` ${message.toLowerCase()} `;
+/** Literal reference needles shared by closure and contextual attribution. */
+export function getRequestReferences(row: RequestRow): string[] {
   const det = parseDetails<Record<string, unknown>>(row) ?? {};
   const counterpart = String(row.target_name || row.requester_name || (det.requester_name as string | undefined) || '');
   const first = counterpart.trim().split(/\s+/)[0]?.toLowerCase() ?? '';
-  if (first.length >= 3 && hasWholeWordMatch(msg, first)) return true;
   const rawSubject = String(row.subject ?? '');
   // hebrew-subject-token-match-dead — was ASCII-only ([^A-Za-z0-9]+), which
   // treats every character of a non-Latin subject (Hebrew, Russian, ...) as a
@@ -185,8 +184,17 @@ export function messageReferencesRequest(message: string, row: RequestRow): bool
       // purely numeric ("ANF" yes, a bare "123" no).
       return lower.length === 3 && raw === raw.toUpperCase() && /[A-Za-z]/.test(raw);
     });
-  if (tokens.some(t => hasWholeWordMatch(msg, t))) return true;
-  return false;
+  return [...new Set([...(first.length >= 3 ? [first] : []), ...tokens])];
+}
+
+/** Match complete references without splitting compound counterpart names. */
+export function getMatchingRequestReferences(message: string, row: RequestRow): string[] {
+  const msg = ` ${message.toLowerCase()} `;
+  return getRequestReferences(row).filter(reference => hasWholeWordMatch(msg, reference));
+}
+
+export function messageReferencesRequest(message: string, row: RequestRow): boolean {
+  return getMatchingRequestReferences(message, row).length > 0;
 }
 
 export async function closeLoopOnOwnerHandled(params: {

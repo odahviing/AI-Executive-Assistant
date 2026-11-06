@@ -114,6 +114,9 @@ export type ResolveVerdict =
 export interface ResolveContext {
   app?: App;
   profile: UserProfile;
+  /** Contextual attribution's exact action snapshot. Rechecked under the
+   * request lock so a queued correction cannot change the authorized action. */
+  expectedOwnerDecisionDetails?: string | null;
   /**
    * v3.1.3 — set by the CALLER: true only when the COLLEAGUE (requester) is the
    * one resolving — i.e. responding to the owner's relayed counter on an
@@ -316,6 +319,12 @@ async function resolveRequestInner(
       verdict: verdict.verdict,
     });
     return { ok: false, request_id: requestId, state: 'cancelled', reason: 'request not found' };
+  }
+  if (ctx.expectedOwnerDecisionDetails !== undefined
+    && (row.state !== 'awaiting_owner' || row.owner_user_id !== ctx.profile.user.slack_user_id
+      || row.details_json !== ctx.expectedOwnerDecisionDetails)) {
+    return { ok: false, request_id: requestId, state: row.state, effect: 'contextual_decision_changed',
+      reason: 'This request changed after the contextual decision was understood. Review the current action before resolving it.' };
   }
   // v2.9.1 — `awaiting_colleague` is the amending state (owner counter relayed
   // to requester); requester's response resolves the request. Both states are
@@ -1044,16 +1053,12 @@ async function runApproveCallback(
       err instanceof Error ? err.message : String(err).slice(0, 300));
   }
 
-  // #141 Change 5 — link the booked event id on the approval row when a
-  // colleague requested it. The replay runs as a SYNTHETIC owner
-  // (deferredActionReplay forces senderRole:'owner'), so the direct colleague
-  // requester-link at createMeeting.ts:240 (isGenuineColleague ? context.userId
-  // : undefined — moved off ops.ts when the v3.7.x handler split landed) never
-  // fires for approval-booked meetings, and no id was ever recorded — a
-  // colleague who requested a meeting via approval then couldn't move it (the
-  // "Talia" gap). Stamping the event id onto the approval row (which already
-  // carries requester_slack_id) lets getMeetingsRequestedBy reverse-resolve it.
-  // One arg on the close we already do.
+  // Link the booked event id on the approval row for its requester.
+  // deferredActionReplay runs as the owner, so createMeeting.ts's
+  // isGenuineColleague branch does not identify the original requester;
+  // that handler can instead carry an explicit requester_slack_id.
+  // Recording the event id on this approval lets getMeetingsRequestedBy
+  // include it when includeApprovals is enabled, using the row's requester.
   const bookedEventId = typeof replayResult?.meetingId === 'string'
     ? (replayResult.meetingId as string)
     : undefined;

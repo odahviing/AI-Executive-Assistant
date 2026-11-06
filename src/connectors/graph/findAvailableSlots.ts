@@ -827,11 +827,6 @@ export async function findAvailableSlots(params: {
         for (const key of coveredDays) days.set(key, untilDisplay);
       }
     }
-    const attendeeOutOfOfficeOn = (dayKey: string): string | undefined => {
-      for (const [email, days] of attendeeOofDays) if (days.has(dayKey)) return email;
-      return undefined;
-    };
-
     // v3.6.4 — SOFT / OPTIONAL tier. A TIMED workingElsewhere event (e.g. a
     // daily standup the owner joins only if free) is not a hard block: it's
     // avoided when clean slots exist, but bookable-over as a fallback, and it
@@ -1141,18 +1136,11 @@ export async function findAvailableSlots(params: {
     }
     let cursor = cursorDt0.toJSDate();
 
-    // v4.7.x — the per-cursor day/slot walk, extracted into one function
-    // returning a CursorOutcome (see its own doc, above). PURE classifier: it
-    // reads the same outer-scope state the old inline loop body did (closure,
-    // not a giant parameter list), but does NOT mutate rejectedCounts/
-    // rejectedExamples/dayReasons/dayBuckets/diagnosticsOut itself — every
-    // mutation now happens in exactly one place, the switch in the while loop
-    // below. Behavior-preserving: same accept/reject/day_skip/silent
-    // classification for every case that existed before this extraction, same
-    // labels, same conditions — only the SHAPE changed (early `return` where
-    // the old code did `cursor += step; continue`), so this is not a second
-    // copy of the walk's logic to keep in sync, it's the one copy relocated.
-    function evaluateCursor(cursor: Date): CursorOutcome {
+    // Spread search consumes the first outcome, retaining its ordered rejection
+    // policy. A single exact interval exhausts the same checks for complete
+    // diagnostics; later accepts cannot override an earlier rejection.
+    const exactInterval = !autoExpand && searchEnd.getTime() - cursor.getTime() === durationMs;
+    function* evaluateCursor(cursor: Date): Generator<CursorOutcome, undefined> {
       const cursorDt = DateTime.fromJSDate(cursor).setZone(params.timezone);
       const dayName = cursorDt.toFormat('EEEE');
       const dayKey = cursorDt.toFormat('yyyy-MM-dd');
@@ -1183,7 +1171,7 @@ export async function findAvailableSlots(params: {
       // named correctly. The propose-a-time path (checkSlot) never had this
       // gap; only "when is he free" (this walker) did.
       if (oofDayKeys.has(dayKey)) {
-        return { kind: 'reject', reason: 'owner_out_of_office', iso: cursorDt.toISO()! };
+        yield { kind: 'reject', reason: 'owner_out_of_office', iso: cursorDt.toISO()! };
       }
       // v3.7.x (#143) — the day's effective work context (yaml + per-date override).
       const effectiveDay = profile ? getEffectiveWorkDayForInstantCal(cursorDt.toISO()!, profile) : null;
@@ -1225,13 +1213,13 @@ export async function findAvailableSlots(params: {
       // (2026-08-24 KPMG/Mike incident: Idan set an off-day override on
       // 9 Sep in an unrelated thread; the resulting empty-breakdown search
       // for that day carried no true reason for Sonnet to relay). checkSlot
-      // can never actually see this day (this gate always runs first and
-      // `continue`s), so reusing its verdict NAME here — not re-deriving a
+      // does not see this day in spread search (the first outcome stops it),
+      // so reusing its verdict NAME here — not re-deriving a
       // second one — keeps search and book agreeing on what the day's real
       // story is (M1).
       const dayIsWorkday = effectiveDay ? effectiveDay.isWorkday : workDays.includes(dayName);
       if (!dayIsWorkday) {
-        return allWorkweekDays.includes(dayName)
+        yield allWorkweekDays.includes(dayName)
           ? { kind: 'day_skip', dayKey, reason: 'vacation_or_off_day' }
           : { kind: 'silent' };
       }
@@ -1256,7 +1244,7 @@ export async function findAvailableSlots(params: {
             || (span.startMin >= 0 && span.endMin <= bandToMin))
           : (span.startMin < bandFromMin || span.endMin > bandToMin);
         if (outOfBand) {
-          return { kind: 'reject', reason: 'outside_requested_window', iso: cursorDt.toISO()! };
+          yield { kind: 'reject', reason: 'outside_requested_window', iso: cursorDt.toISO()! };
         }
       }
       // ── (a) THE PAST — a universal floor on the OFFER, not a rule ──────────
@@ -1285,7 +1273,7 @@ export async function findAvailableSlots(params: {
       // `in_the_past` is not a soft prefix and already humanizes to "that time has
       // already passed" (ops/violationLabels).
       if (cursor.getTime() < Date.now()) {
-        return { kind: 'reject', reason: 'in_the_past', iso: cursorDt.toISO()! };
+        yield { kind: 'reject', reason: 'in_the_past', iso: cursorDt.toISO()! };
       }
       // ── (b) NO PROFILE — the lead-time floor with nowhere else to live ─────
       // #128 (owner 2026-07-26: "we need to have priority of reasons") — for
@@ -1308,7 +1296,7 @@ export async function findAvailableSlots(params: {
       // 8 slots on Monday") is built from those labels, and owner rules shadowing
       // them would silently empty it.
       if (!profile && isWithinBookingLeadTime(cursor.getTime(), params.minBufferHours)) {
-        return { kind: 'reject', reason: 'within_lead_time', iso: cursorDt.toISO()! };
+        yield { kind: 'reject', reason: 'within_lead_time', iso: cursorDt.toISO()! };
       }
       // Only the same start AND end fail to accomplish a move. Changing the
       // duration at the same start remains a distinct update.
@@ -1317,7 +1305,7 @@ export async function findAvailableSlots(params: {
           cursor.getTime() === zone.start && slotEnd.getTime() === zone.end
         );
         if (overlapsMovingEvent) {
-          return { kind: 'reject', reason: 'unchanged_meeting_time', iso: cursorDt.toISO()! };
+          yield { kind: 'reject', reason: 'unchanged_meeting_time', iso: cursorDt.toISO()! };
         }
       }
 
@@ -1338,8 +1326,8 @@ export async function findAvailableSlots(params: {
         // attendee on the same slot (e.g. an OOO teammate behind someone else's
         // meeting) went untagged → the owner-backstop narrated them "free" (the
         // Dan-OOO-shows-free bug) and a masked attendee flipped free↔blocked
-        // between searches (the Lori/Monday contradiction). DROP mode still stops
-        // at the first — one reason is enough to reject the slot.
+        // between searches (the Lori/Monday contradiction). Spread search stops
+        // at the first rejection; exact checks enumerate every conflicting attendee.
         // 2026-09-15 — a whole-day out-of-office is read BEFORE the busy pool
         // in both modes: the `oof` interval also sits in `allBusy`, so it would
         // otherwise be reported as a plain clash ("she's busy then") about a
@@ -1360,17 +1348,17 @@ export async function findAvailableSlots(params: {
             }
           }
         } else {
-          const outOfOfficeEmail = attendeeOutOfOfficeOn(dayKey);
-          if (outOfOfficeEmail) {
-            return { kind: 'reject', reason: `attendee_out_of_office:${outOfOfficeEmail}`, iso: cursorDt.toISO()! };
+          for (const [outOfOfficeEmail, days] of attendeeOofDays) {
+            if (!days.has(dayKey)) continue;
+            yield { kind: 'reject', reason: `attendee_out_of_office:${outOfOfficeEmail}`, iso: cursorDt.toISO()! };
           }
-          const overlapsAttendee = allBusy.find(busy =>
-            busy.email !== ownerEmailLower &&
+          const overlappingAttendees = allBusy.filter(busy =>
+            busy.email !== ownerEmailLower && !attendeeOofDays.get(busy.email)?.has(dayKey) &&
             cursor.getTime() < busy.end.getTime() &&
             slotEnd.getTime() > busy.start.getTime()
           );
-          if (overlapsAttendee) {
-            return { kind: 'reject', reason: `attendee_busy_collision:${overlapsAttendee.email}`, iso: cursorDt.toISO()! };
+          for (const overlapsAttendee of overlappingAttendees) {
+            yield { kind: 'reject', reason: `attendee_busy_collision:${overlapsAttendee.email}`, iso: cursorDt.toISO()! };
           }
         }
         // Travel buffer, ATTENDEE side only. v4.1.x (M1) — the OWNER side of
@@ -1402,7 +1390,7 @@ export async function findAvailableSlots(params: {
               if (overlapsBuffer(busy)) attendeeConflicts.push({ email: busy.email, reason: 'travel_buffer' });
             }
           } else if (allBusy.find(overlapsBuffer)) {
-            return { kind: 'reject', reason: 'travel_buffer_collision', iso: cursorDt.toISO()! };
+            yield { kind: 'reject', reason: 'travel_buffer_collision', iso: cursorDt.toISO()! };
           }
         }
         // #43 / #124 / Daniel — per-attendee work-window clip, own TZ with
@@ -1418,7 +1406,8 @@ export async function findAvailableSlots(params: {
             }
           };
           // v3.7.x (1.1/1.2) — TAG mode collects ALL off-hours attendees so a
-          // second one isn't masked by the first; DROP mode stops at the first.
+          // second one isn't masked by the first. Strict exact checks also
+          // enumerate each attendee; spread search stops at the first rejection.
           if (keepAttendeeConflicts && params.allowAttendeeOffHours) {
             for (const att of params.attendeeAvailability) {
               if (!attendeeOutsideHours(att)) continue;
@@ -1437,9 +1426,8 @@ export async function findAvailableSlots(params: {
               });
             }
           } else {
-            const blockingAttendee = params.attendeeAvailability.find(attendeeOutsideHours);
-            if (blockingAttendee) {
-              return { kind: 'reject', reason: `outside_attendee_work_hours:${blockingAttendee.email}`, iso: cursorDt.toISO()! };
+            for (const blockingAttendee of params.attendeeAvailability.filter(attendeeOutsideHours)) {
+              yield { kind: 'reject', reason: `outside_attendee_work_hours:${blockingAttendee.email}`, iso: cursorDt.toISO()! };
             }
           }
         }
@@ -1491,7 +1479,7 @@ export async function findAvailableSlots(params: {
           // this the field could never be populated on a strict rejection —
           // gh#165-b's add-attendees steer and any all-day-collision handling
           // downstream were both unreachable dead code.
-          return {
+          yield {
             kind: 'reject',
             reason: mapVerdictToRejectLabel(verdict.violation_kind, dayType),
             iso: cursorDt.toISO()!,
@@ -1502,6 +1490,11 @@ export async function findAvailableSlots(params: {
               ? { conflicting: verdict.overCommitment }
               : {}),
           };
+        }
+        if (exactInterval && !params.relaxed) {
+          for (const rule of brokenOwnerRules(slotCheckInput)) {
+            yield { kind: 'reject', reason: mapVerdictToRejectLabel(rule, dayType), iso: cursorDt.toISO()!, outOfWorkHours: verdict.outsideWorkHours === true };
+          }
         }
         // ── A PROPOSAL IS NEVER A TIME HE IS ALREADY COMMITTED ON (M2, #142d) ──
         // `allowRelaxed` waives checkSlot rule 8 for the WRITE path — that waiver
@@ -1527,7 +1520,7 @@ export async function findAvailableSlots(params: {
         if (verdict.overCommitment) {
           // #165b — first hit wins; a single-candidate caller has exactly one to
           // report, and a spread search never reads this field.
-          return {
+          yield {
             kind: 'reject',
             reason: 'owner_busy_collision',
             iso: cursorDt.toISO()!,
@@ -1537,7 +1530,7 @@ export async function findAvailableSlots(params: {
         }
         // Relaxing a soft block is not extending his day (see `keepWorkHours`).
         if (params.keepWorkHours && verdict.outsideWorkHours) {
-          return { kind: 'reject', reason: 'outside_owner_work_hours', iso: cursorDt.toISO()!, outOfWorkHours: true };
+          yield { kind: 'reject', reason: 'outside_owner_work_hours', iso: cursorDt.toISO()!, outOfWorkHours: true };
         }
         // A relaxed pass is the only one that returns a rule-BREAKING slot, so it
         // is the only one that owes the owner which rule. Ask the SAME validator
@@ -1558,7 +1551,7 @@ export async function findAvailableSlots(params: {
           const broken = brokenOwnerRules(slotCheckInput);
           if (params.ownerHoursExceptionRequested) {
             const otherRule = broken.find(rule => rule !== 'outside_working_hours');
-            if (otherRule) return { kind: 'reject', reason: mapVerdictToRejectLabel(otherRule, dayType), iso: cursorDt.toISO()! };
+            if (otherRule) yield { kind: 'reject', reason: mapVerdictToRejectLabel(otherRule, dayType), iso: cursorDt.toISO()! };
           }
           if (broken.length > 0) verdictBrokenRules = broken;
         }
@@ -1568,7 +1561,7 @@ export async function findAvailableSlots(params: {
         // applied by the pre-filter above, which is scoped to exactly this path.
         const inAnyWindow = dayHours.some(w => slotTotalMin >= w.startMin && slotEndMin <= w.endMin);
         if (!inAnyWindow) {
-          return { kind: 'reject', reason: 'outside_owner_work_hours', iso: cursorDt.toISO()! };
+          yield { kind: 'reject', reason: 'outside_owner_work_hours', iso: cursorDt.toISO()! };
         }
         const overlapsOwner = allBusy.find(busy =>
           busy.email === ownerEmailLower &&
@@ -1576,7 +1569,7 @@ export async function findAvailableSlots(params: {
           slotEnd.getTime() > busy.start.getTime()
         );
         if (overlapsOwner) {
-          return { kind: 'reject', reason: 'owner_busy_collision', iso: cursorDt.toISO()! };
+          yield { kind: 'reject', reason: 'owner_busy_collision', iso: cursorDt.toISO()! };
         }
       }
 
@@ -1592,7 +1585,7 @@ export async function findAvailableSlots(params: {
       // reaches here (dropped above) — real rule wins, so WE-soft is strictly
       // above the relaxed tier and strictly below clean. The subject comes from
       // the validator's M2 level (v4.1.x), already masked for this caller.
-      return {
+      yield {
         kind: 'accept',
         dayKey,
         candidate: {
@@ -1615,7 +1608,9 @@ export async function findAvailableSlots(params: {
     // assignment in `default` is what makes a new union member a compile
     // error until it is handled here (see CursorOutcome's own doc).
     while (cursor.getTime() + durationMs <= searchEnd.getTime()) {
-      const outcome = evaluateCursor(cursor);
+      const checks = evaluateCursor(cursor);
+      const outcomes = exactInterval ? [...checks] : [checks.next().value!];
+      const outcome = outcomes[0];
       switch (outcome.kind) {
         case 'accept':
           if (!dayBuckets.has(outcome.dayKey)) dayBuckets.set(outcome.dayKey, []);
@@ -1626,6 +1621,7 @@ export async function findAvailableSlots(params: {
           if (outcome.conflicting) stampConflictingEvent(outcome.conflicting);
           break;
         case 'day_skip':
+          if (exactInterval) trackReject(outcome.reason, cursorDt0.toISO()!);
           if (!dayReasons.has(outcome.dayKey)) {
             dayReasons.set(outcome.dayKey, new Map([[outcome.reason, 1]]));
           }
@@ -1636,6 +1632,16 @@ export async function findAvailableSlots(params: {
           // Exhaustiveness guard — never let a new skip path go unhandled.
           const _exhaustive: never = outcome;
           void _exhaustive;
+        }
+      }
+      if (exactInterval) {
+        const seen = new Set<SearchRejectReason>();
+        if (outcome.kind === 'reject' || outcome.kind === 'day_skip') seen.add(outcome.reason);
+        for (const extra of outcomes.slice(1)) {
+          if (extra.kind !== 'reject' || seen.has(extra.reason)) continue;
+          seen.add(extra.reason);
+          trackReject(extra.reason, extra.iso, extra.outOfWorkHours);
+          if (extra.conflicting) stampConflictingEvent(extra.conflicting);
         }
       }
       cursor = new Date(cursor.getTime() + step);

@@ -2,7 +2,7 @@
  * automove-held-notice-narration-20260920 — the active-mode auto-move tells the
  * owner the truth about each attendee notice: sent ("let X know"), held for the
  * recipient's work hours (notifyColleagueOfMove -> 'scheduled': "I'll let X know
- * when their workday starts" — the return carries no time, so none is stated),
+ * when X starts work" — the return carries no time, so none is stated),
  * or failed ("couldn't confirm").
  *
  * Reuses the isolated calendar-health harness (scripts/test-calendar-health-audit.cjs):
@@ -51,7 +51,7 @@ const ok = (c, m) => { if (!c) throw Error(m); };
     const r = await harness({ noticeResult: 'scheduled' }).move();
     ok(r.issue.fixed === true, 'move not confirmed');
     ok(!/let Peer know —/.test(r.issue.fix_detail), `held notice narrated as sent: ${r.issue.fix_detail}`);
-    ok(/I'll let Peer know when their workday starts\./.test(r.issue.fix_detail), `no scheduled wording: ${r.issue.fix_detail}`);
+    ok(/I'll let Peer know when Peer starts work\./.test(r.issue.fix_detail), `no scheduled wording: ${r.issue.fix_detail}`);
     const held = r.issue.fix_detail.slice(r.issue.fix_detail.indexOf("I'll let Peer know"));
     ok(!/\d{1,2}:\d{2}/.test(held), `invented a send time: ${held}`);
   });

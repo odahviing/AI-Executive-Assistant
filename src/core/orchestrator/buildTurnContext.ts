@@ -11,6 +11,7 @@ import { DateTime } from 'luxon';
 import logger from '../../utils/logger';
 import { trimHistory, extractActionTape, stampHistoryTime } from './turnHelpers';
 import type { OrchestratorInput } from './index';
+import type { SkillContext } from '../../skills/types';
 
 const anthropic = getAnthropicClient();
 
@@ -144,6 +145,9 @@ export async function buildTurnContext(input: OrchestratorInput) {
   let turnMeetingPeople: string[] = [];
   let currentMessageMeetingPeople: string[] = [];
   let resolvedMeetingAttendees: string[] = [];
+  let meetingPeopleGroups: string[][] | undefined;
+  let resolvedMeetingAttendeeGroups: SkillContext['resolvedMeetingAttendeeGroups'];
+  let contextualApprovalDecisions: SkillContext['contextualApprovalDecisions'];
   // gh#158 residual — `resolvedMeetingAttendees` serves two purposes that need
   // different scopes: WHO to auto-add to the search (everyone genuinely on the
   // meeting, including addresses extracted from a forwarded email header below)
@@ -215,6 +219,35 @@ export async function buildTurnContext(input: OrchestratorInput) {
       // provenance for continuation; other surfaces keep current-turn extraction.
       const canContinueMeetingRoster = input.channel === 'slack' && !isRoom
         && (input.surface === 'owner_dm' || input.surface === 'colleague_dm');
+      const ownerDecisionPath = input.interactive !== false && input.channel === 'slack' && !isRoom
+        && input.surface === 'owner_dm' && input.authority === 'owner' && input.senderRole === 'owner'
+        && input.userId === profile.user.slack_user_id;
+      const approvalCandidates: Array<{ row: import('../requests/types').RequestRow;
+        action: { tool: string; args: Record<string, unknown> } }> = [];
+      if (ownerDecisionPath) {
+        try {
+          const { getAwaitingOwnerRequests } = require('../../db/requests') as typeof import('../../db/requests');
+          const rows = getAwaitingOwnerRequests(profile.user.slack_user_id).filter(row => row.kind === 'approval'
+            && row.state === 'awaiting_owner' && row.owner_user_id === profile.user.slack_user_id);
+          // Never truncate a candidate set: omitted candidates can destroy uniqueness.
+          if (rows.length > 0 && rows.length <= 10) {
+            const { parseDetails } = require('../requests/types') as typeof import('../requests/types');
+            const { extractCallbacks, mergeAmendIntoApprove } = require('../approvals/approvalCallbacks') as typeof import('../approvals/approvalCallbacks');
+            for (const row of rows) {
+              const details = parseDetails<Record<string, unknown>>(row);
+              let action = extractCallbacks(details).on_approve;
+              if (!action || !['create_meeting', 'move_meeting', 'update_meeting'].includes(action.tool)) continue;
+              if (details?.counter && typeof details.counter === 'object') {
+                action = mergeAmendIntoApprove(action, details.counter as Record<string, unknown>, profile);
+              }
+              approvalCandidates.push({ row, action });
+            }
+            // An unsupported candidate remains a possible referent. Do not guess
+            // among the supported subset when the complete open set is unknown.
+            if (approvalCandidates.length !== rows.length) approvalCandidates.length = 0;
+          }
+        } catch { approvalCandidates.length = 0; }
+      }
       const turnResult = await classifyTurn({
         anthropic,
         message: userMessage,
@@ -226,7 +259,41 @@ export async function buildTurnContext(input: OrchestratorInput) {
         senderName: input.senderName,
         recentContext: recentContext || undefined,
         meetingContextMessages: canContinueMeetingRoster ? meetingContextMessages : undefined,
+        approvalCandidates: approvalCandidates.length ? approvalCandidates.map(({ row, action }) => ({ subject: row.subject ?? '', action })) : undefined,
       });
+      if (ownerDecisionPath && approvalCandidates.length && turnResult.approvalDecisions?.length) {
+        const { getMatchingRequestReferences } = require('../../utils/closeLoopOnOwnerHandled') as typeof import('../../utils/closeLoopOnOwnerHandled');
+        contextualApprovalDecisions = turnResult.approvalDecisions.flatMap(decision => {
+          const candidate = approvalCandidates[decision.candidateIndex];
+          const rawMessage = input.rawUserMessage ?? userMessage;
+          if (!candidate || !rawMessage.includes(decision.instructionQuote)
+            || !meetingContextMessages[decision.sourceMessageIndex]?.content.includes(decision.sourceQuote)) return [];
+          if (decision.disposition !== 'amend_or_search' && turnResult.meetingAction !== 'execute') return [];
+          // The existing matcher accepts any subject/name reference. A shared
+          // name (e.g. Idan in two subjects) cannot distinguish candidates, but
+          // must not erase a unique reference elsewhere in the same quote.
+          // Use the matcher's complete references, including compound first
+          // names. A reference shared by candidates cannot identify either;
+          // distinct references to two candidates remain ambiguous. The
+          // classifier still owns meaning and instruction/source gates.
+          const referenceOwners = new Map<string, typeof approvalCandidates>();
+          for (const current of approvalCandidates) {
+            for (const reference of getMatchingRequestReferences(decision.sourceQuote, current.row)) {
+              const owners = referenceOwners.get(reference) ?? [];
+              owners.push(current);
+              referenceOwners.set(reference, owners);
+            }
+          }
+          const referencedCandidates = new Set<typeof candidate>();
+          for (const owners of referenceOwners.values()) {
+            if (owners.length === 1) referencedCandidates.add(owners[0]);
+          }
+          if (referencedCandidates.size !== 1 || !referencedCandidates.has(candidate)) return [];
+          return [{ requestId: candidate.row.id, requestDetailsJson: candidate.row.details_json,
+            action: candidate.action, disposition: decision.disposition, instructionQuote: decision.instructionQuote,
+            sourceMessageIndex: decision.sourceMessageIndex, sourceQuote: decision.sourceQuote }];
+        });
+      }
 
       if (needScopes) toolScopes = turnResult.scope.scopes;
       if (isOwnerPath) isFreeTimeInquiry = turnResult.freeTimeInquiry === true;
@@ -271,6 +338,17 @@ export async function buildTurnContext(input: OrchestratorInput) {
             return source?.role === 'user' && normalize(source.content).includes(normalize(entry.name));
           }).map(entry => entry.name.trim());
           turnMeetingPeople = [...new Set([...turnMeetingPeople, ...contextual])];
+        }
+        // Grouping never grants membership. Reuse the current-message and
+        // private-history provenance gates above; incomplete partitions remain
+        // explicitly ambiguous rather than silently dropping a known person.
+        if (Array.isArray(turnResult.meetingPeopleGroups)) {
+          const accepted = new Set(turnMeetingPeople.map(normalize));
+          const groups = turnResult.meetingPeopleGroups.map(group => [...new Set(
+            group.filter(name => accepted.has(normalize(name))),
+          )]).filter(group => group.length > 0);
+          const covered = new Set(groups.flat().map(normalize));
+          meetingPeopleGroups = [...accepted].every(name => covered.has(name)) ? groups : [];
         }
       }
       // v3.x (Block 3 — calendar prose lazy-load). A free-time / buffer / "how
@@ -400,6 +478,19 @@ export async function buildTurnContext(input: OrchestratorInput) {
         ownerName: profile.user.name,
       });
       resolvedMeetingAttendees = resolved.map(r => r.email);
+      if (meetingPeopleGroups !== undefined) {
+        // Resolution may return a canonical display name. Resolve group names
+        // with the same deterministic resolver rather than guessing identity.
+        resolvedMeetingAttendeeGroups = meetingPeopleGroups.map(names => {
+          const group = resolveNamedInternalAttendees({ names, ownerEmail: profile.user.email, ownerName: profile.user.name });
+          // An unresolved participant still belongs to this meeting. Dropping
+          // an external-only group turns a different meeting into the sole
+          // roster and wrongly invites/checks its internal colleagues.
+          return { emails: group.resolved.map(person => person.email), unresolvedNames: [...group.unresolved] };
+        });
+        const covered = new Set(resolvedMeetingAttendeeGroups.flatMap(group => group.emails).map(email => email.toLowerCase()));
+        if (!resolvedMeetingAttendees.every(email => covered.has(email.toLowerCase()))) resolvedMeetingAttendeeGroups = [];
+      }
       // Continuation participants constrain the meeting search, but do not
       // turn an owner-calendar question into a current named-person question.
       namedInternalAttendeeEmails = turnMeetingPeople.length === currentMessageMeetingPeople.length
@@ -451,7 +542,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
         if (directoryStates.length > 0) sections.push(`Current directory lookup outcomes: ${JSON.stringify(directoryStates)}`);
         if (resolved.length > 0) {
           const list = resolved.map(r => `- ${r.name} <${r.email}>`).join('\n');
-          sections.push(`Known internal colleagues, resolved from the directory — do NOT call find_slack_user for these and do NOT ask who they are or for their email. I have ALREADY added them to this turn's find_available_slots search; search now and offer times that work for everyone, never propose without them:\n${list}`);
+          sections.push(`Known internal colleagues, resolved from the directory — do NOT call find_slack_user for these and do NOT ask who they are or for their email. Use each requested meeting's own participants when searching or booking; these identities are not a combined roster for separate meetings:\n${list}`);
         }
         if (unresolved.length > 0) {
           // The external-vs-unknown JUDGMENT stays with the model (owner rule);
@@ -497,11 +588,18 @@ export async function buildTurnContext(input: OrchestratorInput) {
       resolvedMeetingAttendees = [...resolvedMeetingAttendees, ...added];
       resolvedAttendeesBlock = [
         resolvedAttendeesBlock,
-        `Participant address(es) extracted from the forwarded email header — do NOT ask for these again, I have ALREADY added them to this turn's find_available_slots search: ${added.join(', ')}`,
+        `Participant address(es) extracted from the forwarded email header — do NOT ask for these again; preserve their participation in the relevant meeting: ${added.join(', ')}`,
       ].filter(Boolean).join('\n\n');
       logger.info('orchestrator — email header attendee extraction merged into resolvedMeetingAttendees', {
         added, finalResolved: resolvedMeetingAttendees, senderRole: turnSenderRole,
       });
+    }
+    // Headers do not identify which of several meetings an address belongs to.
+    // Keep their protection for a single group; leave multi-group input
+    // ambiguous until a caller supplies a complete meeting-specific roster.
+    if (resolvedMeetingAttendeeGroups !== undefined) {
+      resolvedMeetingAttendeeGroups = resolvedMeetingAttendeeGroups.length === 1
+        ? [{ ...resolvedMeetingAttendeeGroups[0], emails: [...new Set([...resolvedMeetingAttendeeGroups[0].emails, ...extractedExternalAttendees])] }] : [];
     }
   }
 
@@ -1424,6 +1522,8 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     socialActive,
     socialClassification,
     resolvedMeetingAttendees,
+    resolvedMeetingAttendeeGroups,
+    contextualApprovalDecisions,
     availabilityQuestionDetected,
     availabilityPrecheckToolSummaries,
   };

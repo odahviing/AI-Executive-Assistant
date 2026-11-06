@@ -1,11 +1,11 @@
 {
   "lastSeenIso": "2026-09-07T23:05:31.811Z",
   "lastRun": {
-    "id": "wrap-2026-10-31T13:37:57.7899620Z",
-    "status": "complete",
-    "note": "5.3.0 wrapped"
+    "id": "wrap-2026-11-06T01:56:28.8867901Z",
+    "status": "running",
+    "note": "manual wrap in progress:5.4.0 final package/full checkpoint after proven fixture-only repair"
   },
-  "lastWrapIso": "2026-10-31T16:06:06+02:00",
+  "lastWrapIso": "2026-10-31T10:06:06-04:00",
   "lastCleanSha": "6bc8f4027fce0d5e078fb9b4a04c3ba7b844cb46",
   "nextReportId": 315,
   "verifiedClean": [

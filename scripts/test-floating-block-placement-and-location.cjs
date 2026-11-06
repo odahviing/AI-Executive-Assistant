@@ -183,15 +183,15 @@ const createFile = 'src/skills/meetings/ops/handlers/createMeeting.ts';
 function runAttendeeUnion(attendees, resolved) {
   const unionIf = one(collect(source(createFile), n => ts.isIfStatement(n)
     && n.getText().includes('recovered resolved internal attendees into booking')
-    && n.expression.getText().includes('Array.isArray(context.resolvedMeetingAttendees)')), 'attendee-union if');
+    && (n.expression.getText().includes('Array.isArray(context.resolvedMeetingAttendees)')
+      || n.expression.getText().includes('resolvedAttendees.length'))), 'attendee-union if');
   const block = unionIf.parent;
   assert.equal(ts.isBlock(block) || ts.isSourceFile(block), true, 'attendee-union: unexpected parent');
   const index = block.statements.indexOf(unionIf);
-  const before = block.statements[index - 1];
-  const prelude = before && ts.isVariableStatement(before) && before.getText().includes('callerNamedAnAttendee')
-    ? `${before.getText()}\n` : '';
-  const mod = compile(`${prelude}${unionIf.getText()}
-module.exports = { attendees };`, {
+  const begin = block.statements.findIndex(n => ts.isVariableStatement(n) && n.getText().startsWith('const callerNamedAnAttendee ='));
+  const prelude = begin >= 0 ? block.statements.slice(begin,index).map(n=>n.getText()).join('\n') : '';
+  const mod = compile(`function run() { ${prelude}${unionIf.getText()}
+return { attendees }; } module.exports = run();`, {
     attendees,
     context: { resolvedMeetingAttendees: resolved, senderRole: 'owner' },
     args: { subject: 'Drive home' },

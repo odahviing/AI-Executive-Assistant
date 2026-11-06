@@ -11,7 +11,7 @@
  * (process-lifetime dedup). With `consolidateDense` (the calendar-health
  * sweep only) a non-overlapped block sitting in a dead sliver on a dense
  * calendar is slid to abut a neighbour. Every move writes a `move_meeting`
- * activity row (revertible via the existing revert path) and a shadow DM, and
+ * activity row (revertible via the existing revert path), without a separate DM, and
  * is returned in `moves` for the caller's confirmation.
  *
  * Never throws — a failure here must never undo the calendar mutation that
@@ -413,7 +413,6 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
 
     // Lazy imports to keep helper light + avoid circular dep risk
     const { getCalendarEvents, updateMeeting } = await import('../connectors/graph/calendar');
-    const { shadowNotify } = await import('./shadowNotify');
 
     const startIso = slotDt.startOf('day').toUTC().toISO();
     const endIso = slotDt.endOf('day').toUTC().toISO();
@@ -527,7 +526,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
         // #133b — DENSE consolidation. No meeting overlaps the block, but on a
         // dense calendar it may still leave a DEAD sliver (6–29 min) beside it.
         // Slide it within its window to abut a neighbour so the free time
-        // coalesces into one real break — using the SAME move+notify this
+        // coalesces into one real break — using the SAME move+audit this
         // function already runs for overlaps (ONE mover, two reasons).
         // findConsolidatingSlotForBlock returns null unless the slide STRICTLY
         // reduces the day's dead minutes (already-optimal / unfixable → no move
@@ -558,16 +557,10 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
               result.movedBlockEventIds.push(blockEvent.id);
               result.moves.push(`moved ${block.name.replace(/_/g, ' ')} ${fromHHMM}→${newStart.toFormat('HH:mm')}`);
               logRebalanceMoveActivity(params.ownerSlackId, block.name, blockEvent, tz, newStart, newEnd);
-              // Graph accepted this move; reserve it even if notification fails.
+              // Graph accepted this move; reserve its destination for later blocks.
               blockEvent.start = { dateTime: newStart.toISO()!, timeZone: tz };
               blockEvent.end = { dateTime: newEnd.toISO()!, timeZone: tz };
-              await shadowNotify(profile, {
-                channel: '',
-                icon: '🔧',
-                action: 'Dense calendar — floating block consolidated',
-                detail: `Slid your ${block.name.replace(/_/g, ' ')} to ${newStart.toFormat('HH:mm')}–${newEnd.toFormat('HH:mm')} on ${slotDt.toFormat('EEE d MMM')} so the free time around it lands as one clean break instead of split minutes. Tell me if you'd rather it stayed at ${fromHHMM}.`,
-              });
-              logger.info('rebalanceFloatingBlocks: consolidated block (dense) — owner shadow-notified', {
+              logger.info('rebalanceFloatingBlocks: consolidated block (dense)', {
                 block: block.name, date: dateStr,
                 from: fromHHMM,
                 to: newStart.toFormat('HH:mm'),
@@ -620,19 +613,10 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
           result.movedBlockEventIds.push(blockEvent.id);
           result.moves.push(`moved ${block.name.replace(/_/g, ' ')} ${fromHHMM}→${newStart.toFormat('HH:mm')}`);
           logRebalanceMoveActivity(params.ownerSlackId, block.name, blockEvent, tz, newStart, newEnd);
-          // Graph accepted this move; reserve it even if notification fails.
+          // Graph accepted this move; reserve its destination for later blocks.
           blockEvent.start = { dateTime: newStart.toISO()!, timeZone: tz };
           blockEvent.end = { dateTime: newEnd.toISO()!, timeZone: tz };
-          const weNote = relocation.usedWorkingElsewhereFallback
-            ? ' (no fully clear gap in the window — this one sits against a Working-Elsewhere block.)'
-            : '';
-          await shadowNotify(profile, {
-            channel: '',  // no conversation context → owner's daily thread (shadowNotify route 3)
-            icon: '🔧',
-            action: 'Floating block rebalanced',
-            detail: `Moved ${block.name} to ${newStart.toFormat('HH:mm')}–${newEnd.toFormat('HH:mm')} on ${slotDt.toFormat('EEE d MMM')}.${weNote}`,
-          });
-          logger.info('rebalanceFloatingBlocks: block relocated — owner shadow-notified', {
+          logger.info('rebalanceFloatingBlocks: block relocated', {
             block: block.name, date: dateStr, from: fromHHMM, to: newStart.toFormat('HH:mm'),
             usedWorkingElsewhereFallback: relocation.usedWorkingElsewhereFallback,
           });
@@ -640,7 +624,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
           logger.warn('rebalanceFloatingBlocks: updateMeeting failed', {
             blockId: blockEvent.id, err: String(err).slice(0, 200),
           });
-          // Stop only for an unacknowledged write, not a failed shadow notice.
+          // Stop for an unacknowledged write; do not reuse stale occupancy.
           if (result.moved === movedBefore) break;
         }
       } else if (relocation.currentPlacementAcceptable) {

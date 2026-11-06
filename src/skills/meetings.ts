@@ -424,7 +424,7 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
             add_room_email: { type: 'boolean' },
             start_is_explicit: {
               type: 'boolean',
-              description: 'OPTIONAL (default false). Set TRUE only when the owner directly named an EXACT off-grid time ("book at 14:40", "9:05"). For an exact slot returned earlier in this conversation by find_available_slots, pass its start/end verbatim and leave this unset — the handler recognizes and preserves that offered instant. Other off-grid starts snap to the :00/:15/:30/:45 grid.',
+              description: 'OPTIONAL (default false). Set TRUE for an exact owner-named clock or an independently accepted/approved exact instant. Generic "after X" alone uses the grid. For a slot returned by find_available_slots in this conversation, pass start/end verbatim and leave this unset — the handler preserves the offer. Other off-grid starts snap to :00/:15/:30/:45.',
             },
             must_be_after_event_id: {
               type: 'string',
@@ -432,7 +432,7 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
             },
             start_at_event_end_id: {
               type: 'string',
-              description: 'OPTIONAL. Anchor this block to START at the END of an existing event — for "X after my flight", "a block right after my last meeting", etc. Pass that event\'s id (from get_calendar) PLUS `duration_minutes`, and OMIT `start`/`end`: the handler reads the event\'s end INSTANT, snaps it FORWARD (never earlier — never overlapping the anchor) to the next :00/:15/:30/:45 tick, and sets start there — end = snapped start + duration_minutes. The block lands at the correct moment in the correct timezone, up to ~14 min after the anchor\'s literal end — NEVER compute the time yourself and NEVER ask the owner what time the event ends/lands when it is already on the calendar.',
+              description: 'OPTIONAL. Anchor a block after an existing event. Pass its id from get_calendar with duration_minutes; omit start/end. The handler reads the end instant and snaps FORWARD to :00/:15/:30/:45, then adds the duration. With start_is_explicit=true for an independently accepted exact boundary, it preserves the end instant instead. Generic "after X" alone keeps the default grid. Read the calendar rather than asking the owner for its event times.',
             },
             duration_minutes: {
               type: 'number',
@@ -515,7 +515,7 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
             },
             start_is_explicit: {
               type: 'boolean',
-              description: 'OPTIONAL (default false). Set TRUE only when the owner named an EXACT off-grid new time ("move it to 14:40"). Otherwise the handler snaps new_start to the :00/:15/:30/:45 grid.',
+              description: 'OPTIONAL (default false). Set TRUE for an exact owner-named clock or an independently accepted/approved exact instant. Generic "after X" alone uses the grid. Otherwise new_start snaps to :00/:15/:30/:45.',
             },
             relaxed: {
               type: 'boolean',
@@ -1253,7 +1253,7 @@ ${ships('move_meeting') ? `- IN-WINDOW move ("right after X" / "shift to 14:00" 
   Never fall back to create_meeting for an out-of-window floating block; that path loses the floating-block-ness and the event becomes a regular meeting.
 ` : ''}- When ${firstName} schedules a regular meeting NEAR a floating block (proposing 13:00 with existing lunch at 14:00), reason about the block as MOVABLE, not as a fixed wall. The slot finder already treats it that way; trust the tool. Don't say "tight, only 20 min before lunch" — lunch will move.
 
-SLOT START TIMES — propose times on the :00/:15/:30/:45 grid. The booking tools snap an off-grid start to the grid automatically; only if ${firstName} names an EXACT off-grid time ("book it at 14:40") pass start_is_explicit=true to create_meeting / move_meeting so it's kept verbatim.
+SLOT START TIMES — propose on :00/:15/:30/:45. Use start_is_explicit=true for an exact owner-named clock or independently accepted/approved exact instant. Generic "after X" alone keeps the grid. Accept an existing pending action through resolve_approval so its canonical instant and request identity are retained.
 - Allowed durations: ${profile.meetings.allowed_durations.join(' / ')} min.
 - NEVER BOOK WITHOUT KNOWING THE LENGTH. If the requester didn't say and it isn't clearly obvious, ASK. No silent defaults.
 - Physical meetings require an office day: ${profile.meetings.physical_meetings_require_office_day ? 'YES (tool-checked, soft for him)' : 'no, flexible'}.

@@ -139,6 +139,37 @@ export function buildConsequenceText(
   if (!callbacks.on_approve) return null;
   const lang = requesterRelayLanguage(profile.user.slack_user_id);
   const { tool, args } = callbacks.on_approve;
+  // These are literal fields of the executable decision, not a second prose
+  // account of its schedule. Omitted move/update fields remain unknown here;
+  // do not invent the existing roster, venue, or meeting mode.
+  const withTerms = (summary: string): string => {
+    const terms: string[] = [];
+    const add = (key: Parameters<typeof relayNotice>[1], value: unknown): void => {
+      if (typeof value === 'string' && value.trim()) terms.push(relayNotice(lang, key, { value: value.trim() }));
+    };
+    const people = (value: unknown): string => Array.isArray(value) ? value.flatMap(person => {
+      if (typeof person === 'string') return person.trim() ? [person.trim()] : [];
+      if (!person || typeof person !== 'object') return [];
+      const p = person as { name?: unknown; email?: unknown; optional?: unknown };
+      const name = typeof p.name === 'string' ? p.name.trim() : '';
+      const email = typeof p.email === 'string' ? p.email.trim() : '';
+      const identity = name && email && name !== email ? `${name} <${email}>` : name || email;
+      return identity ? [p.optional === true ? relayNotice(lang, 'approval_optional_person', { value: identity }) : identity] : [];
+    }).join(', ') : '';
+    if (tool === 'create_meeting') {
+      add('approval_attendees', people(args.attendees));
+      add('approval_invite_body', args.body);
+    }
+    if (tool === 'update_meeting') {
+      add('approval_add_attendees', people(args.add_attendees));
+      add('approval_remove_attendees', people(args.remove_attendees));
+      add('approval_new_subject', args.new_subject);
+    }
+    add('approval_location', args.location);
+    if (typeof args.is_online === 'boolean') terms.push(relayNotice(lang, args.is_online ? 'approval_online' : 'approval_in_person'));
+    add('approval_category', args.category);
+    return [summary, ...terms].join('\n');
+  };
   const fmtTime = (iso: string | undefined): string => {
     if (!iso) return '';
     try {
@@ -159,19 +190,20 @@ export function buildConsequenceText(
   const fmtStart = (iso: string | undefined, endIso?: string): string => {
     if (!iso) return '';
     const normalized = resolveStatedInstant({ startIso: iso, endIso, statedZone: statedZoneFromArgs(args), personTimezone: statedClockPersonContext(args, profile, iso), homeTz: profile.user.timezone, profile });
-    return travel ? renderWeDualClock(normalized.startIso, travel, profile.user.timezone, { endIso: normalized.endIso }) : fmtTime(normalized.startIso);
+    return travel ? renderWeDualClock(normalized.startIso, travel, profile.user.timezone, { endIso: normalized.endIso })
+      : [fmtTime(normalized.startIso), normalized.endIso ? fmtTime(normalized.endIso) : ''].filter(Boolean).join(' – ');
   };
   switch (tool) {
     case 'create_meeting': {
       const subj = (args.subject as string) ?? relayNotice(lang, 'meeting');
       const start = fmtStart(args.start as string | undefined, args.end as string | undefined);
-      return relayNotice(lang, 'consequence_book', { subject: subj, time: start ? relayNotice(lang, 'at_time', { time: start }) : '' });
+      return withTerms(relayNotice(lang, 'consequence_book', { subject: subj, time: start ? relayNotice(lang, 'at_time', { time: start }) : '' }));
     }
     case 'move_meeting': {
       if (Array.isArray(args.coordinated_moves)) {
-        return args.coordinated_moves.map((move: { meeting_id: string; new_start: string; new_end: string }, index: number) =>
-          relayNotice(lang, 'consequence_move', { subject: `${relayNotice(lang, 'meeting')} ${index + 1}`,
-            time: `${fmtStart(move.new_start)} – ${fmtTime(move.new_end)}` })).join('\n');
+        return args.coordinated_moves.map((move: { meeting_id: string; meeting_subject?: string; new_start: string; new_end: string }, index: number) =>
+          relayNotice(lang, 'consequence_move', { subject: move.meeting_subject || `${relayNotice(lang, 'meeting')} ${index + 1}`,
+            time: fmtStart(move.new_start, move.new_end) })).join('\n');
       }
       const subj = (args.meeting_subject as string) ?? relayNotice(lang, 'meeting');
       const newStart = fmtStart(args.new_start as string | undefined, args.new_end as string | undefined);
@@ -180,9 +212,9 @@ export function buildConsequenceText(
       // ✅ has nothing to execute there (the resolver refuses it with a
       // pick-a-time recovery), so the consequence line must ask for the pick,
       // not promise a move a yes can't perform.
-      return newStart
+      return withTerms(newStart
         ? relayNotice(lang, 'consequence_move', { subject: subj, time: newStart })
-        : relayNotice(lang, 'consequence_pick', { subject: subj });
+        : relayNotice(lang, 'consequence_pick', { subject: subj }));
     }
     case 'delete_meeting': {
       const subj = (args.meeting_subject as string) ?? relayNotice(lang, 'meeting');
@@ -195,7 +227,8 @@ export function buildConsequenceText(
     }
     case 'update_meeting': {
       const subj = (args.meeting_subject as string) ?? relayNotice(lang, 'meeting');
-      return relayNotice(lang, 'consequence_update', { subject: subj });
+      const start = fmtStart(args.new_start as string | undefined, args.new_end as string | undefined);
+      return withTerms(relayNotice(lang, 'consequence_update', { subject: subj, time: start ? relayNotice(lang, 'at_time', { time: start }) : '' }));
     }
     // pre-existing-clobbered-tz-now-locked-wrong-forever (2026-09-02) — the
     // TZ-persistence ask's on_approve (core/requests/runner.ts's
@@ -282,7 +315,9 @@ function slotSignature(cb: ToolCallback | undefined): string | null {
  *      online verdict (create_approval's re-derivation, tasks/skill.ts), written
  *      ONLY by the code path that PROVED it (never by the model). It LEADS the
  *      ask, above whatever soft framing the prose chose.
- *   2. `askText` — the ask itself.
+ *   2. `askText` — nonmeeting/open-ended context only. Concrete timed meeting
+ *      asks use their stored action and proven reason, never duplicate clocks
+ *      from model-authored prose.
  *   3. the consequence (v2.9.1) — "If yes → I'll X", verbalized from the stored
  *      on_approve with any stored counter merged in exactly as the resolver
  *      merges it, so it always describes the action a ✅ actually replays. Last,
@@ -296,7 +331,8 @@ function slotSignature(cb: ToolCallback | undefined): string | null {
  * transient read. `reSurface` marks any re-post of an ask already raised: replay
  * can go stale (the collision may have cleared since), so it is not asserted in
  * the present tense — it says when the check was made and lets him read it as of
- * then. Honest either way, and no Graph call on a tool path.
+ * then. Composition never rechecks that restriction against a different slot;
+ * an absent existing-event title may be read solely as display context below.
  *
  * WHEN A COUNTER SUPPRESSES THE REASON — and when it must not. The reason was
  * proven against one slot; a counter that MOVES the slot makes it describe an
@@ -354,6 +390,12 @@ export async function composeOwnerAskText(input: {
   const countered = !!counter && Object.keys(counter).length > 0;
 
   let consequence: string | null = null;
+  let concreteMeeting = false;
+  const hasMeetingClock = (action: ToolCallback | undefined): boolean => !!action && (
+    (action.tool === 'create_meeting' && typeof action.args.start === 'string' && !!action.args.start.trim())
+    || ((action.tool === 'move_meeting' || action.tool === 'update_meeting')
+      && typeof action.args.new_start === 'string' && !!action.args.new_start.trim())
+    || (action.tool === 'move_meeting' && Array.isArray(action.args.coordinated_moves) && action.args.coordinated_moves.length > 0));
   // Does the action a ✅ now fires still occupy the slot the hard reason was
   // proven against? No counter → nothing moved it. Initialised so that a throw
   // below can only ever withhold a reason that a counter had already put in
@@ -361,6 +403,11 @@ export async function composeOwnerAskText(input: {
   let slotHeld = !countered;
   try {
     const callbacks = extractCallbacks(details);
+    // Decide whether prose clocks are admissible before normalization: a time
+    // needing clarification must not fall back to an unvalidated prose clock.
+    concreteMeeting = hasMeetingClock(callbacks.on_approve && counter
+      ? { ...callbacks.on_approve, args: { ...callbacks.on_approve.args, ...counter } }
+      : callbacks.on_approve);
     const mergedApprove = (countered && counter && callbacks.on_approve)
       ? mergeAmendIntoApprove(callbacks.on_approve, counter, profile)
       : callbacks.on_approve;
@@ -368,7 +415,31 @@ export async function composeOwnerAskText(input: {
       const before = slotSignature(callbacks.on_approve);
       slotHeld = before !== null && before === slotSignature(mergedApprove);
     }
-    const effective = mergedApprove ? { ...callbacks, on_approve: mergedApprove } : callbacks;
+    let effective = mergedApprove ? { ...callbacks, on_approve: mergedApprove } : callbacks;
+    concreteMeeting = concreteMeeting || hasMeetingClock(effective.on_approve);
+    // Existing-event labels are display context, never a re-derived decision.
+    // Reuse a stored title; read the exact event only when the title is absent.
+    // Keep current event facts separate from the approved new clock, and do not
+    // persist this hydration or fabricate context if the calendar is unavailable.
+    const previewAction = effective.on_approve;
+    if (previewAction && ['move_meeting', 'update_meeting'].includes(previewAction.tool)) {
+      const titleFor = async (a: Record<string, unknown>): Promise<string> => {
+        if (typeof a.meeting_subject === 'string' && a.meeting_subject.trim()) return a.meeting_subject.trim();
+        if (typeof a.meeting_id === 'string' && a.meeting_id && profile.user.email) {
+          try {
+            const { getEventType } = await import('../../connectors/graph/calendar');
+            const event = await getEventType(profile.user.email, a.meeting_id);
+            if (typeof event?.subject === 'string' && event.subject.trim()) return event.subject.trim();
+          } catch { /* The decision still has its exact ID; its title is unknown. */ }
+        }
+        return relayNotice(lang, 'approval_title_unavailable');
+      };
+      const previewArgs = { ...previewAction.args };
+      if (Array.isArray(previewArgs.coordinated_moves)) {
+        previewArgs.coordinated_moves = await Promise.all(previewArgs.coordinated_moves.map(async move => ({ ...move, meeting_subject: await titleFor(move) })));
+      } else previewArgs.meeting_subject = await titleFor(previewArgs);
+      effective = { ...effective, on_approve: { ...previewAction, args: previewArgs } };
+    }
     // v3.5.x (WE preview) — resolve trip context so the preview clock matches
     // the booked-confirmation on a trip day.
     const travel = await resolveConsequenceTravel(effective, profile);
@@ -396,7 +467,11 @@ export async function composeOwnerAskText(input: {
     hardReason = relayNotice(lang, 'checked_reason', { time: when, quote: honest });
   }
 
-  return [repeatHistory, lead, hardReason, askText, consequence].filter(Boolean).join('\n\n');
+  // Old rows may have no independently captured reason. Do not certify their
+  // prose clocks (or invent a reason) while presenting the exact stored action.
+  // The request remains pending; this is a preview, never execution authority.
+  const reason = hardReason || (concreteMeeting ? relayNotice(lang, 'approval_reason_unavailable') : '');
+  return [repeatHistory, lead, reason, concreteMeeting ? undefined : askText, consequence].filter(Boolean).join('\n\n');
 }
 
 /**

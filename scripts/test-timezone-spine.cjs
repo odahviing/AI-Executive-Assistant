@@ -332,10 +332,10 @@ function searchBand(params,start,end) {
   const list=decl.parent.statements; const i=list.indexOf(decl);
   const guard=only(collect(tree,n=>ts.isIfStatement(n)&&n.expression.getText()==='bandFromMin >= 0'),'band guard');
   const cursorDt=instant(start).setZone(params.timezone),slotEndLocal=instant(end).setZone(params.timezone);
-  const fn=compile(`export function run(){${list.slice(i,i+4).map(n=>n.getText()).join('\n')} ${guard.getText()} return {kind:'accept'};}`,
+  const fn=compile(`export function* run(){${list.slice(i,i+4).map(n=>n.getText()).join('\n')} ${guard.getText()} return {kind:'accept'};}`,
     {params,DateTime,cursorDt,slotEndLocal,slotTotalMin:cursorDt.hour*60+cursorDt.minute,
       slotEndMin:cursorDt.hour*60+cursorDt.minute+params.durationMinutes,slotDayMinutes:harness().wh.slotDayMinutes}).run;
-  return fn().kind;
+  return fn().next().value.kind;
 }
 
 test('hard foreign daily band stays 09-10 across noncoincident DST transitions with attendees',()=>{
@@ -366,9 +366,9 @@ function attendeeHoursVerdict(params,start) {
   const tree=ast('src/connectors/graph/findAvailableSlots.ts');
   const branch=only(collect(tree,n=>ts.isIfStatement(n)&&n.expression.getText()==='params.attendeeAvailability && params.attendeeAvailability.length > 0'),'attendee hours branch');
   const {entries}=personHarness(); const cursorDt=instant(start).setZone(zone);
-  return compile(`export function run(){const keepAttendeeConflicts=params.relaxed||params.tagAttendeeConflicts; const attendeeConflicts=[]; ${branch.getText()} return {kind:'accept',attendeeConflicts};}`,
+  return compile(`export function* run(){const keepAttendeeConflicts=params.relaxed||params.tagAttendeeConflicts; const attendeeConflicts=[]; ${branch.getText()} return {kind:'accept',attendeeConflicts};}`,
     {params,DateTime,cursorDt,cursor:cursorDt.toJSDate(),slotEnd:cursorDt.plus({minutes:30}).toJSDate(),slotDayMinutes:harness().wh.slotDayMinutes,
-      attendeeWorkSegmentsBetween:entries.attendeeWorkSegmentsBetween,attendeeTzForDay:entries.attendeeTzForDay,tzTempDifferingForDay:entries.tzTempDifferingForDay}).run();
+      attendeeWorkSegmentsBetween:entries.attendeeWorkSegmentsBetween,attendeeTzForDay:entries.attendeeTzForDay,tzTempDifferingForDay:entries.tzTempDifferingForDay}).run().next().value;
 }
 
 test('M17 general relaxed and busy-tag offers keep hours; exact named requested slot can annotate',()=>{

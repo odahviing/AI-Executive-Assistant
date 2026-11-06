@@ -234,6 +234,8 @@ export type PlanAction =
       overrideNotice?: string;   // #127 — owner booked through a soft own-day rule; surface this heads-up, never re-ask
       hasConflict?: boolean;
       availabilityUnconfirmed?: boolean;
+      /** Existing execution authority accepted the conflict, or a move only flagged it. */
+      attendeeConflictDisposition?: 'accepted_override' | 'move_notice';
       /**
        * M2 — the booking LEVEL this write lands on. 'free' is the preferred
        * place to book; 'optional' means it sits over a skippable
@@ -684,6 +686,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   // attendee is busy — booked anyway (rule 6: availability never blocks), but
   // surfaced so the owner is TOLD who's busy (rule 7), never silently.
   let attendeeBusyNotice: string | undefined;
+  let attendeeConflictDisposition: 'accepted_override' | 'move_notice' | undefined;
   let knownAttendeeConflict = false;
   let availabilityUnconfirmed = false;
   // Set when the owner overrides onto a slot where the big meeting room is taken
@@ -1154,7 +1157,8 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
               // move can re-land on a time that attendee is busy ("Intro with Maya");
               // surface it as a heads-up, don't cost a confirm. Fresh BOOKS still confirm
               // once below.
-              attendeeBusyNotice = label;
+              attendeeConflictDisposition = input.allowRelaxed ? 'accepted_override' : 'move_notice';
+              attendeeBusyNotice = input.allowRelaxed ? `Accepted conflict override: ${label}` : label;
             } else {
               // First-pass BOOK — flag ONCE; owner's "book anyway" comes back relaxed.
               // M3 — recorded as a gate, so if the location question is also open
@@ -1380,6 +1384,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       .filter(Boolean).join('; ') || undefined,
     hasConflict: !!ownerOverrideNotice || !!unfilteredLevelNotice || knownAttendeeConflict || !!roomBusyNotice,
     availabilityUnconfirmed,
+    attendeeConflictDisposition,
   };
 }
 

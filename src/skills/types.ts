@@ -86,6 +86,20 @@ export type SkillId =
 
 /** Runtime context passed to tool execution */
 export interface SkillContext {
+  /** Independently classified owner decision, bound to the exact pending row
+   * and effective action. Consumers must revalidate both before resolving. */
+  contextualApprovalDecisions?: Array<{
+    requestId: string;
+    requestDetailsJson: string | null;
+    action: { tool: string; args: Record<string, unknown> };
+    disposition: 'approve_existing' | 'reject' | 'amend_or_search';
+    instructionQuote: string;
+    sourceMessageIndex: number;
+    sourceQuote: string;
+  }>;
+  /** Actual preceding tool refusal, scoped to its exact action; never supplied
+   * by model arguments. Registrar rederives private owner diagnostics itself. */
+  approvalRefusalReason?: { action: { tool: string; args: Record<string, unknown> }; reason: string };
   profile: UserProfile;
   threadTs: string;
   channelId: string;
@@ -136,13 +150,22 @@ export interface SkillContext {
   /**
    * v3.6.4 — internal colleagues the orchestrator resolved from the participant
    * names in THIS turn's scheduling request (deterministic pre-pass, single
-   * unambiguous people_memory match only). find_available_slots UNIONS these
-   * into attendee_emails so a known named colleague is never dropped because
+   * unambiguous people_memory match only). This is the full identity inventory;
+   * resolvedMeetingAttendeeGroups supplies meeting scope when available. The
+   * single-meeting fallback protects known named colleagues from being dropped because
    * Sonnet forgot to resolve the name (Lori 07-08, Simon 07-09). Per-turn (no
    * thread accumulation → no stale bleed). Empty/undefined on non-scheduling
    * turns and when nothing resolved.
    */
   resolvedMeetingAttendees?: string[];
+  /** Meeting-scoped partition of the resolved roster. Undefined: legacy flat
+   * input. Empty: ambiguous/incomplete grouping, never use the flat union as
+   * one meeting. One group retains omitted-attendee protection; multiple groups
+   * require a unique per-call match before adding known attendees. Preserve
+   * groups with zero resolved emails: external/unknown people still define a
+   * separate meeting. unresolvedNames have existing provenance, not a guessed
+   * email identity or permission to include another group's participants. */
+  resolvedMeetingAttendeeGroups?: Array<{ emails: string[]; unresolvedNames: string[] }>;
   /**
    * v4.4.x (GH#169 revisit) — the CURRENT turn's driving message, verbatim,
    * before any tool call runs. Unlike conversationHistory (which holds only

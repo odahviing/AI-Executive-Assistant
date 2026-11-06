@@ -261,7 +261,7 @@ export function mapVerdictToRejectLabel(
     case 'category_day_type': return 'category_day_type';
     case 'category_per_day': return 'category_per_day';
     case 'category_per_week': return 'category_per_week';
-    case 'vacation_or_off_day': return 'wrong_day_type';
+    case 'vacation_or_off_day': return 'vacation_or_off_day';
     // The in-person/home-day mismatch was a search-only whole-day skip until
     // 2026-09-14 (rule 1b below); same label the walker always narrated it under.
     case 'in_person_on_home_day': return 'wrong_day_type';
@@ -1205,6 +1205,11 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
       events: input.events,
       profile,
       excludeEventId: input.excludeEventIds?.[0],  // checkCategorySlot supports single exclude
+      onlyRules: new Set([
+        ...(reports('category_day_type') ? ['day_type' as const] : []),
+        ...(reports('category_per_day') ? ['per_day' as const] : []),
+        ...(reports('category_per_week') ? ['per_week' as const] : []),
+      ]),
     });
     if (!catCheck.allowed) {
       const map: Record<string, RuleViolationKind> = {

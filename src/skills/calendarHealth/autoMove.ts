@@ -414,12 +414,13 @@ export async function executeInternalAutoMove(params: {
   issue.fix_detail = notified.length > 0
     ? `Moved "${subj}" (was ${mStart.toFormat('HH:mm')}–${mEnd.toFormat('HH:mm')}) to ${newLocal} ${moveVerb}, and let ${notified.join(' and ')} know — I'll loop you in if they push back.`
     : `Moved "${subj}" to ${newLocal} ${moveVerb}.`;
-  if (heldNotices.length) issue.fix_detail += ` I'll let ${heldNotices.join(' and ')} know when ${heldNotices.length === 1 ? 'their' : 'each of their'} workday starts.`;
+  const heldNoticeStatus = heldNotices.map(name => `I'll let ${name} know when ${name} starts work.`).join(' ');
+  if (heldNoticeStatus) issue.fix_detail += ` ${heldNoticeStatus}`;
   if (followUpFailures.length) issue.fix_detail += ` ${followUpFailures.join(' ')}`;
 
   const noticeStatus = [
     ...(notified.length ? [`Let ${notified.join(' and ')} know — I'll loop you in if they push back.`] : []),
-    ...(heldNotices.length ? [`I'll let ${heldNotices.join(' and ')} know when their workday starts.`] : []),
+    ...(heldNoticeStatus ? [heldNoticeStatus] : []),
     ...followUpFailures,
   ].join(' ');
   if (!noticeStatus) return;

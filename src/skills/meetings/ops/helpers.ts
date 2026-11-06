@@ -1,12 +1,41 @@
 /**
- * Pure module-level helpers extracted (v3.7.x) verbatim from ops.ts. No logic
- * changes — only relative import paths deepened by one level for the new
- * ops/ subdirectory. `buildOutOfHoursBusy` is live (used by the switch cases in
- * ops.ts); the other two feed action_summary / vacated-slot formatting.
+ * Shared scheduling handler helpers: meeting-scoped roster selection,
+ * formatting, outcome summaries and deterministic input checks.
  */
 import { DateTime } from 'luxon';
 import logger from '../../../utils/logger';
 import { PRIVATE_MASK } from '../../../utils/displaySubject';
+
+/** Select the known roster for one meeting, never the union of a multi-meeting turn.
+ * null means the call does not identify a unique meeting; no calendar disclosure
+ * or invite may proceed by guessing. Grouping conveys participation, not authority.
+ */
+export function meetingScopedAttendees(
+  groups: Array<{ emails: string[]; unresolvedNames: string[] }>,
+  explicitEmails: string[],
+  ownerEmail: string,
+  requesterEmail?: string,
+): string[] | null {
+  const normalize = (email: string) => email.trim().toLowerCase();
+  const rosters = groups.map(group => [...new Set(group.emails.map(normalize))]);
+  if (rosters.length === 0) return null;
+  if (rosters.length === 1) return rosters[0];
+  const known = new Set(rosters.flat());
+  const explicit = explicitEmails.map(normalize).filter(email => email
+    && email !== normalize(ownerEmail) && email !== (requesterEmail ? normalize(requesterEmail) : undefined));
+  if (explicit.length === 0) return null;
+  const knownExplicit = explicit.filter(email => known.has(email));
+  const hasUnknown = explicit.some(email => !known.has(email));
+  const unresolved = groups.map((group, index) => group.unresolvedNames.length > 0 ? index : -1).filter(index => index >= 0);
+  // Unresolved names preserve external meeting scope; they do not establish an
+  // email identity. More than one possible group therefore requires clarification.
+  if (knownExplicit.length === 0) return unresolved.length === 1 ? rosters[unresolved[0]] : null;
+  const matches = rosters.map((group, index) => knownExplicit.every(email => group.includes(email)) ? index : -1).filter(index => index >= 0);
+  if (matches.length !== 1) return null;
+  const selected = matches[0];
+  if (hasUnknown && unresolved.some(index => index !== selected)) return null;
+  return rosters[selected];
+}
 
 // Local alias for the profile type without adding another import — re-use the
 // one imported below. Ts hoists type-only imports so this works.

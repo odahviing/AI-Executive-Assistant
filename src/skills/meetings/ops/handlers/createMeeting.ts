@@ -1,14 +1,11 @@
 /**
- * createMeeting — extracted VERBATIM (v3.7.x, pass B) from the 'create_meeting' case body of
- * SchedulingSkill.executeToolCall in ../../ops.ts. No logic changes: the case
- * body is byte-for-byte identical; only relative import/require paths were
- * deepened by two levels for the ops/handlers/ location, and the free
- * variables (context, userEmail, timezone) are threaded via OpCtx.
+ * Direct meeting creation: scoped roster recovery, normalization, scheduling
+ * decisions and guarded calendar writes. The dispatcher supplies OpCtx.
  */
 import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
 
-import { formatIsoTime, openQuestionsField, alternativesNote, recordProposedAlternatives, isDescriptiveSubject, resolveActivityTargetIdentity, HANDLER_ERROR_CODE } from '../../ops/helpers';
+import { formatIsoTime, openQuestionsField, alternativesNote, recordProposedAlternatives, isDescriptiveSubject, resolveActivityTargetIdentity, HANDLER_ERROR_CODE, meetingScopedAttendees } from '../../ops/helpers';
 import { humanizeViolationLabel, attendeeConflictRefusal, attendeeConflictLine, bookedOverAttendeesNote } from '../../ops/violationLabels';
 import { enrichUnresolvedInternal } from '../../ops/analysis';
 import {
@@ -84,13 +81,15 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // calendar. Done HERE, at the top, so the whole pipeline — travel context,
         // planMeeting, rules, confirm — sees the real start.
         //
-        // Owner ruling (2026-08-04, verbatim): "you have to start meeting at
-        // 00:15:30:45 its from day one" — no exception for an anchored "right
-        // after X" booking. The anchor event's own end is very often 5 min
+        // Owner ruling (2026-08-04): ordinary anchored "right after X"
+        // requests still use the quarter-hour grid. A separately accepted
+        // exact instant, represented by the incoming start_is_explicit=true,
+        // keeps that existing exception on this input path too. Merely naming
+        // an anchor does not supply exact-time consent. The event often ends 5 min
         // short of the quarter (the 10/25/40/55 duration presets are built that
         // way ON PURPOSE, to leave a trailing buffer) — anchoring literally onto
         // that end (13:10) both breaks the quarter-hour rule AND defeats the
-        // buffer the anchor event's own duration was chosen to leave. Snap the
+        // buffer the anchor event's own duration was chosen to leave. By default snap the
         // anchor's end forward (never backward — never earlier than the anchor
         // event's real end, which would silently overlap it) to the next
         // :00/:15/:30/:45 tick, then compute end = snapped-start + duration.
@@ -113,14 +112,15 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 message: `I couldn't load the event to anchor this block to (id ${anchorId}). Re-fetch it from the calendar and pass its current id, or give me an explicit start time.`,
               };
             }
-            const snappedStartMs = alignUpQuarter(anchor.end.toMillis(), timezone);
+            const exactAnchor = args.start_is_explicit === true;
+            const snappedStartMs = exactAnchor ? anchor.end.toMillis() : alignUpQuarter(anchor.end.toMillis(), timezone);
             const snappedStart = DateTime.fromMillis(snappedStartMs, { zone: timezone });
             args.start = snappedStart.toISO();
             args.end = snappedStart.plus({ minutes: dur }).toISO();
-            args.start_is_explicit = true;  // already grid-aligned above — skip the later off-grid-only snap
+            args.start_is_explicit = true;  // exact accepted instant or already grid-aligned — skip the later snap
             delete args.start_timezone;   // start/end are now owner-tz instants — skip the reinterpret
-            logger.info('create_meeting — anchored to event end, snapped forward to quarter grid', {
-              anchorId, anchorSubject: anchor.subject, anchorEnd: anchor.end.toISO(), start: args.start, end: args.end, durationMinutes: dur,
+            logger.info('create_meeting — resolved event-end anchor', {
+              anchorId, anchorSubject: anchor.subject, anchorEnd: anchor.end.toISO(), exactAnchor, start: args.start, end: args.end, durationMinutes: dur,
             });
           }
         }
@@ -201,9 +201,8 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         //
         // 2026-09-14 — ONLY when this booking already names at least one
         // attendee. `context.resolvedMeetingAttendees` is the orchestrator's
-        // per-turn participant resolution, including a provenance-checked
-        // continuing roster. It does not identify which individual calendar
-        // write each person belongs to — so on "add me 1 hour drive
+        // legacy per-turn participant resolution. Meeting groups now identify
+        // the individual roster, but solo blocks must still stay solo: on "add me 1 hour drive
         // before my onsite with einav" / "add a drive home and move Michal's
         // meeting" it unioned a colleague into the owner's SOLO drive block.
         // Both went to Graph with a real invite and were stripped seconds later
@@ -213,13 +212,22 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // work coordination"). An empty attendee list is the model saying this
         // event has no participants; it is never a missing email. The original
         // fix's case is untouched: a booking that DOES name someone (even as a
-        // bare {name} with no email) still gets every resolved address unioned.
+        // bare {name} with no email) recovers the single known meeting roster;
+        // multiple or incomplete groups require a unique explicit match.
         const callerNamedAnAttendee = attendees.length > 0;
+        const resolvedAttendees = !callerNamedAnAttendee ? []
+          : context.resolvedMeetingAttendeeGroups === undefined
+            ? context.resolvedMeetingAttendees ?? []
+            : meetingScopedAttendees(context.resolvedMeetingAttendeeGroups,
+                attendees.map(a => a.email ?? '').filter(Boolean), userEmail, getPersonMemory(context.userId)?.email);
+        if (resolvedAttendees === null) {
+          return { success: false, error: 'ambiguous_meeting_roster', message: 'Identify which meeting this booking is for and supply its participants; separate meeting rosters must not be combined into one invite.' };
+        }
         if (callerNamedAnAttendee
-            && Array.isArray(context.resolvedMeetingAttendees) && context.resolvedMeetingAttendees.length > 0) {
+            && resolvedAttendees.length > 0) {
           const present = new Set(attendees.map(a => (a.email ?? '').toLowerCase().trim()).filter(Boolean));
           const added: string[] = [];
-          for (const email of context.resolvedMeetingAttendees) {
+          for (const email of resolvedAttendees) {
             const lower = (email ?? '').toLowerCase().trim();
             if (!lower.includes('@') || present.has(lower)) continue;
             attendees.push({ email });
@@ -2373,6 +2381,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             // heads-up so Maelle mentions it ONCE ("Booked — note this dips your focus floor
             // to 1h55"), never a blocking re-ask. Undefined on clean bookings.
             ...(planOverrideNotice ? { override_notice: planOverrideNotice } : {}),
+            ...(plan.attendeeConflictDisposition ? { attendee_conflict_disposition: plan.attendeeConflictDisposition } : {}),
             // confirm-success-return-does-not-name-who-was-booked-over
             // (2026-09-09) — `bookedOverAttendees` (Guard B above) used to
             // reach only the per-attendee post-booking DMs; the SUCCESS

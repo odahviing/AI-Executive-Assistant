@@ -90,11 +90,20 @@ export class SchedulingSkill {
         r._colleague_soft_block_hint = 'No matching confirmed option was found for some requested times. If the requester insists on a specific time, ask the owner through create_approval(kind=policy_exception); do not book directly.';
       }
       const scopeCandidate = (slot: Record<string, unknown>) => {
+        const isOwnerProtection = (reason: unknown) => typeof reason === 'string'
+          && (OWNER_OVERRIDABLE_SEARCH_LABELS.has(reason as SearchRejectLabel)
+            || OWNER_OVERRIDABLE_KINDS.has(reason as RuleViolationKind));
         const privateReason = typeof slot.broken_rule === 'string'
           && OWNER_OVERRIDABLE_SEARCH_LABELS.has(slot.broken_rule as SearchRejectLabel);
         const needsApproval = privateReason
-          || (Array.isArray(slot.broken_rules) && slot.broken_rules.length > 0);
-        if (needsApproval) { delete slot.broken_rule; delete slot.broken_rule_label; }
+          || (Array.isArray(slot.broken_rules) && slot.broken_rules.some(isOwnerProtection));
+        if (Array.isArray(slot.broken_rule_labels)) {
+          const reasons = Array.isArray(slot.broken_rules) ? slot.broken_rules : [];
+          slot.broken_rule_labels = slot.broken_rule_labels.filter((_label, i) => reasons[i] && !isOwnerProtection(reasons[i]));
+        }
+        if (privateReason || (needsApproval && typeof slot.broken_rule !== 'string')) {
+          delete slot.broken_rule; delete slot.broken_rule_label;
+        }
         for (const key of ['broken_rules', 'disturbs_floating_block', 'density', 'day_type']) delete slot[key];
         if (needsApproval) slot.less_preferred_label = 'requires owner approval';
       };
@@ -266,6 +275,7 @@ export class SchedulingSkill {
         if (absence) { slot.broken_rule = absenceReason; slot.broken_rule_label = absence; }
         else { delete slot.broken_rule; delete slot.broken_rule_label; }
         delete slot.broken_rules;
+        delete slot.broken_rule_labels;
         delete slot.attendee_hours_note;
         delete slot.disturbs_floating_block;
         delete slot.density;

@@ -236,9 +236,10 @@ const at = (slots, hhmm) => slots.find(s => DateTime.fromISO(s.start).setZone(zo
     eq([g.matched, g.brokenRule, g.remoteSameTime], [false, 'wrong_day_type', undefined], 'refused without the remote fact');
   });
   await check('preserved', 'guardB-off-day-refusal-never-claims-in-person-was-the-reason', async () => {
-    // Thu 23:45 runs into Friday (not a workday): rule 1 refuses under wrong_day_type.
+    // Thu 23:45 runs into Friday: rule 1 preserves the actual off-day reason,
+    // distinct from an in-person category/day-type mismatch.
     const g = await guardB('2026-09-24T23:45', false);
-    eq([g.matched, g.brokenRule, g.remoteSameTime], [false, 'wrong_day_type', undefined], 'off-day refusal');
+    eq([g.matched, g.brokenRule, g.remoteSameTime], [false, 'vacation_or_off_day', undefined], 'off-day refusal');
   });
   const recoveryCall = collect(sf(HANDLER), n => ts.isVariableDeclaration(n) === false && ts.isBinaryExpression(n)
     && n.left.getText() === 'relaxedRecoverySlots' && n.right.getText().startsWith('await findAvailableSlots('));
