@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
 **2 product decisions await you** — 4 open items; 1 captured, 0 ready for an authorized lane batch, 1 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (9):** chris-meeting-roster-scope · chris-exact-slot-complete-blockers · chris-relative-boundary-grid-snap · chris-correction-reminder-cadence · chris-contextual-approval-fulfillment · chris-owner-approval-clock-authority · chris-untracked-followup-promises · autofix-person-followup-wording · autofix-floating-block-notification-duplication
+**Independently verified, awaiting wrap (0):** none
 
 ### Captured — pending batch assessment (1)
 
