@@ -652,7 +652,8 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 idempotent: true,
                 // Same attendee-local field as the booked return at the bottom of
                 // this handler — this `OK` line is read by the same output checker.
-                ...presentationLocalFieldFor(attendees.map(a => a.email), args.start as string, userEmail, timezone),
+                ...presentationLocalFieldFor(attendees.map(a => a.email), args.start as string, userEmail, timezone,
+              subjectViewerFor(context) === 'owner' ? context.profile : undefined, args.end as string),
                 action_summary: `'${requestedSubject}' is already on ${ownerFirst}'s calendar for ${formatIsoTime(args.start as string, timezone)}. Already booked, no action needed.`,
                 _note: 'A meeting with this exact subject and start was already booked earlier in this thread. Do NOT call create_meeting again. Do NOT escalate to create_approval. Tell the colleague briefly that it is booked and move on.',
               };
@@ -1265,7 +1266,8 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               idempotent: true,
               // Same attendee-local field as the booked return below — this `OK`
               // line is read by the same output checker.
-              ...presentationLocalFieldFor(attendees.map(a => a.email), args.start as string, userEmail, timezone),
+              ...presentationLocalFieldFor(attendees.map(a => a.email), args.start as string, userEmail, timezone,
+              subjectViewerFor(context) === 'owner' ? context.profile : undefined, args.end as string),
               action_summary: `'${requestedSubject}' is already on the calendar for ${renderWeDualClock(args.start as string, { isAway: !!tripDisplay, effectiveTz: tripDisplay?.tz ?? timezone, location: tripDisplay?.location ?? '' }, timezone, { endIso: args.end as string })}. Did not create a duplicate.`,
               _note: 'A meeting with this exact subject and start time was already on the calendar. Returning the existing event id instead of creating a duplicate. Do NOT call create_meeting again for this slot.',
             };
@@ -2353,7 +2355,8 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           return {
             success: true,
             meetingId,
-            ...presentationLocalFieldFor(attendees.map(a => a.email), args.start as string, userEmail, timezone),
+            ...presentationLocalFieldFor(attendees.map(a => a.email), args.start as string, userEmail, timezone,
+              subjectViewerFor(context) === 'owner' ? context.profile : undefined, args.end as string),
             // #1.5 — surface the ACTUAL booked start/end (after the grid-snap at
             // :2274 + any TZ convert), so narration, dateVerifier, and the #135
             // honesty backstop (via the orchestrator's mutationActions) see where

@@ -72,3 +72,23 @@ test('single group retains forwarded header attendee protection',async t=>{
 });
 
 
+
+for (const [name, message, raw, isolated, calls] of [
+  ['greeting', 'hello', {}, true, 0],
+  ['closing', 'thans', { kind: 'other', conversation_state: 'closing', standalone_courtesy: true, meeting_action: 'none' }, true, 1],
+  ['decision', 'yes', {}, false, 0],
+  ['mixed task', 'thanks, book time with Einav', { standalone_courtesy: true, meeting_action: 'execute' }, false, 1],
+  ['absent signal', 'please check that', {}, false, 1],
+]) test('classified private DM: ' + name, async t => {
+  const f = setup(t, raw);
+  const r = await f.run({ userMessage: message, rawUserMessage: message, conversationHistory: history,
+    senderRole: 'colleague', authority: 'colleague', surface: 'colleague_dm' });
+  assert.equal(f.requests.length, calls);
+  assert.equal(r.messages.some(m => m.content === history[1].content), !isolated);
+  if (isolated) {
+    assert.equal(r.messages.length, 1);
+    assert.equal(r.messages[0].content, message);
+    assert.equal(r.tools.length, 0);
+    assert.equal(f.prechecks.length, 0);
+  }
+});

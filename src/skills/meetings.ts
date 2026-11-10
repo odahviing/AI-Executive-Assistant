@@ -257,7 +257,7 @@ Omit \`search_from\` / \`search_to\` in candidate mode; the candidate range is u
               return {
                 type: 'number' as const,
                 enum: allowed,
-                description: `OPTIONAL. Omit when duration is unstated; the handler applies the configured default (${defaultDur} minutes). For a stated or negotiated length, use the nearest allowed preset; exact allowed lengths stay exact. Present the resulting times naturally; explain normalization only if asked.`,
+                description: `OPTIONAL. Omit when duration is unstated; the handler applies the configured default (${defaultDur} minutes). For a stated or negotiated length, use the nearest allowed preset; exact allowed lengths stay exact.`,
               };
             })(),
             attendee_emails: { type: 'array', items: { type: 'string' }, description: 'Emails of attendees whose calendars should constrain the search (intersected with the owner\'s). Known internal colleagues named in the request are resolved from the directory and added for you automatically — you do NOT need to resolve names or call find_slack_user first. Pass any emails you already have. You do NOT need an EXTERNAL attendee\'s email to search (candidate / other company / personal domain): their calendar isn\'t visible, so the tool searches the owner\'s side and you collect their email only at BOOKING. Never demand an email — or withhold times — just to run the search.' },
@@ -1421,7 +1421,7 @@ check_join_availability checks the owner's calendar at the requested time and re
 
 Thread context: "see the thread above / about what we discussed" → derive subject yourself, don't ask.
 
-` : ''}When mentioning times to colleagues, use ACTUAL duration (55 min from 14:00 = 14:00–14:55, never 14:00–15:00).
+` : ''}In offers and recaps, give the start and end using the ACTUAL duration (14:00–14:55 for 55 min); explain the preset only when asked.
 
 DIRECT BOOKING PATH — find the slot, then book it. One flow:
 1. find_available_slots with the relevant duration + attendee_emails
@@ -1441,7 +1441,7 @@ A slot genuinely open when you offered it can go stale by the time it's accepted
 
 ${ships('get_calendar') ? `State asks need a fresh tool call. "Did we book…?", "when's my meeting with…?", "what's on [day]?", "is he free at [time]?" — call get_calendar / get_free_busy every time. Chat memory and prior-turn summaries are lossy; don't assert specifics. If you mentioned something earlier without an artifact: "I mentioned it from memory but I don't see a confirmed record — let me check."
 
-` : ''}Don't compute availability from a stale calendar dump. The calendar changed between turns; an event you didn't see five minutes ago may now be there. Always re-call find_available_slots (or fresh get_calendar) for a new "what about X?" question. EXCEPTION — picking a slot you just offered is NOT a "what about X?" question: when you offered specific slots this thread (to ${firstName} OR a colleague) and they pick one ("13:00", "the second one", "13 works", "yes the first"), those slots were ALREADY rule-checked when you offered them — call create_meeting with that exact slot, do NOT re-run find_available_slots to "re-validate." Re-searching with a window that ends at the picked time silently drops the very slot you offered (a 25-min meeting at 13:00 ends 13:25, past a search_to of 13:00) — that's how you end up retracting a time you just gave them.
+` : ''}For new availability questions, refresh the search. When someone picks one slot already offered for that meeting, call create_meeting with that exact slot. When combining slots from separate searches, including in a recap, present a tentative combination until the meetings have been checked together. Carry forward any conflicts and outstanding approvals. Errors or missing checks leave the plan tentative.
 
 Don't summarize unresolved as resolved. Use "booked / on the calendar" for confirmed, "pending — waiting on X" for tracked open requests, "we talked but nothing's finalized" for conversations without an artifact. Never "landed on / agreed on / worked out" without a real artifact.
 

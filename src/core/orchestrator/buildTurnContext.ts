@@ -182,6 +182,8 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // below — the email leg's attendee resolution rides needMeetingPeople and
   // must keep running (see classifyTurn.ts: the three flags gate independent
   // halves of the same classifier call).
+  const model = MODEL_SONNET;
+  const maxTokens = input.senderRole === 'colleague' ? 12000 : 16000;
   const needIntent = socialActive && input.interactive !== false && !!userMessage && userMessage.trim().length > 1
     && input.channel === 'slack';
   const needScopes = profile.behavior?.intent_aware_tools === true
@@ -217,7 +219,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
       // Shared-surface history can contain transport roster framing rather
       // than authored participant names. Only private Slack history supplies
       // provenance for continuation; other surfaces keep current-turn extraction.
-      const canContinueMeetingRoster = input.channel === 'slack' && !isRoom
+      const isPrivateSlackDm = input.channel === 'slack' && !isRoom
         && (input.surface === 'owner_dm' || input.surface === 'colleague_dm');
       const ownerDecisionPath = input.interactive !== false && input.channel === 'slack' && !isRoom
         && input.surface === 'owner_dm' && input.authority === 'owner' && input.senderRole === 'owner'
@@ -258,9 +260,23 @@ export async function buildTurnContext(input: OrchestratorInput) {
         senderRole: turnSenderRole,
         senderName: input.senderName,
         recentContext: recentContext || undefined,
-        meetingContextMessages: canContinueMeetingRoster ? meetingContextMessages : undefined,
+        meetingContextMessages: isPrivateSlackDm ? meetingContextMessages : undefined,
         approvalCandidates: approvalCandidates.length ? approvalCandidates.map(({ row, action }) => ({ subject: row.subject ?? '', action })) : undefined,
       });
+      // A positively identified standalone courtesy needs just the current human
+      // message. Keep operational history, tools and prechecks out of this draft.
+      if (turnResult.standaloneCourtesy === true && isPrivateSlackDm
+        && input.interactive !== false && !input.extraInstruction && !input.forceToolOnFirstTurn
+        && !input.images?.length && !input.extractedAttendeeEmails?.length
+        && !input.proseOnly && !turnResult.approvalDecisions?.length) {
+        const messages: Anthropic.MessageParam[] = [{ role: 'user', content: input.rawUserMessage ?? userMessage }];
+        const systemBlocks: Anthropic.TextBlockParam[] = [{ type: 'text',
+          text: `You are ${profile.assistant.name}. Respond briefly and warmly in the sender's language to this greeting or acknowledgment.` }];
+        return { messages, systemBlocks, tools: [], blockedWriteTools: new Set<string>(),
+          model, maxTokens, turnSenderRole, turnPersonSlackId, socialActive,
+          socialClassification: turnResult.intent, resolvedMeetingAttendees, resolvedMeetingAttendeeGroups,
+          contextualApprovalDecisions, availabilityQuestionDetected: false, availabilityPrecheckToolSummaries: [] };
+      }
       if (ownerDecisionPath && approvalCandidates.length && turnResult.approvalDecisions?.length) {
         const { getMatchingRequestReferences } = require('../../utils/closeLoopOnOwnerHandled') as typeof import('../../utils/closeLoopOnOwnerHandled');
         contextualApprovalDecisions = turnResult.approvalDecisions.flatMap(decision => {
@@ -331,7 +347,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
         // A separate, explicitly classified continuation may retain people
         // grounded in an indexed human request. Never relax the current-name
         // guard above or accept an assistant-invented/historical union roster.
-        if (canContinueMeetingRoster && turnResult.meetingContinuation === true) {
+        if (isPrivateSlackDm && turnResult.meetingContinuation === true) {
           const contextual = (turnResult.contextMeetingPeople ?? []).filter(entry => {
             if (!Number.isInteger(entry.sourceMessageIndex) || typeof entry.name !== 'string' || !entry.name.trim()) return false;
             const source = meetingContextMessages[entry.sourceMessageIndex];
@@ -636,21 +652,6 @@ export async function buildTurnContext(input: OrchestratorInput) {
     })),
     currentTurn,
   ]);
-
-  // Model routing — Sonnet everywhere. We used to route colleagues to Haiku
-  // to save cost, but colleague turns carry the same judgment load as owner
-  // turns (owner-must-include gate, participant construction, security
-  // signals, RULE 3 promise tracking) and Haiku produced subtler failure
-  // modes — malformed coord args, missed RULE 3 triggers, over-sensitive to
-  // conversational idioms. The stable-solution bias is "one strong model
-  // everywhere" over "two models with a cost gap and a behavior gap".
-  const MODEL_OWNER     = MODEL_SONNET;
-  const MODEL_COLLEAGUE = MODEL_SONNET;
-  const model = input.senderRole === 'colleague' ? MODEL_COLLEAGUE : MODEL_OWNER;
-
-  // Existing output ceilings include adaptive thinking, visible text and tool
-  // arguments. Preserve them on migration; effort does not impose a token cap.
-  const maxTokens = input.senderRole === 'colleague' ? 12000 : 16000;
 
   // Build system prompt in two parts for prompt caching:
   //   static  → skills rules (large, profile-driven) — cached for 5 min

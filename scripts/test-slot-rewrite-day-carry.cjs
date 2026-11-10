@@ -32,6 +32,7 @@ const clientMock = {
     messages: {
       create: async params => {
         calls.prompts.push(params.messages[0].content);
+        calls.lastVerdictTool = params.tools?.[0];
         return { stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'verdict', input: modelReply }], usage: {} };
       },
     },
@@ -277,6 +278,55 @@ test('B3 a search with no attendee annotation renders exactly as before', () => 
   assert.doesNotMatch(line, /calendars_read=/);
   assert.match(line, /^\[find_available_slots .*1 slots: /);
 });
+
+test('B4 a single returned recovery offer is an exception, not proof of exclusivity', () => {
+  const result = { ...slotsResult, _relaxed_recovery: true };
+  const line = summarizeToolCall('find_available_slots', slotsInput, result, 'Asia/Jerusalem');
+  assert.match(line, /selection=non_exhaustive/);
+  assert.match(line, /strict=0; relaxed_recovery/);
+  assert.match(line, /outside@partner\.com:unknown/);
+});
+
+test('B5 strict offer retains its owner-zone instant and optional presentation clock', () => {
+  const result = { slots: [{ start: '2026-12-01T09:45:00-05:00', presentation_local: 'Tue 1 Dec 16:45 GMT+2' }] };
+  const line = summarizeToolCall('find_available_slots', slotsInput, result, 'America/New_York');
+  assert.match(line, /09:45 America\/New_York \[local: Tue 1 Dec 16:45 GMT\+2\]/);
+  assert.doesNotMatch(line, /relaxed_recovery/);
+});
+// Capture both provider-facing contracts. Controlled responses exercise the plumbing only.
+for (const [id, draft] of [
+  ['unsupported exclusivity', 'Only 10:15 can work today. Dina is busy. Book anyway?'],
+  ['scoped only-returned control', '10:15 was the only option returned. Dina is busy. Book anyway?'],
+]) {
+  test('B6 ' + id, async () => {
+    const line = summarizeToolCall('find_available_slots', slotsInput, {
+      _relaxed_recovery: true,
+      slots: [{ start: '2026-11-09T10:15:00-05:00', attendee_conflicts: [{ email: 'dina@example.org', reason: 'busy' }] }],
+    }, 'America/New_York');
+    const context = { toolSummaries: [line], ownerFirstName: 'Idan' };
+    await load('src/utils/claimChecker.ts').checkReplyClaims({
+      ...context, reply: draft, mode: 'slot_grounding', slotGroundingContext: { groundedToolLines: [line] },
+    });
+    const detector = calls.prompts.at(-1);
+    assert.ok(detector.includes(draft) && detector.includes(line));
+    assert.match(detector.match(/"claimed_action": boolean,[^\n]*/)[0], /exclusivity/);
+    assert.match(detector.split('Output schema').pop(), /matching time with unsupported exclusivity is a positive verdict/);
+    assert.match(detector, /only option returned.{0,120}grounded/i);
+    modelReply = { verdict: 'keep' };
+    await rewriteOwningTheMiss({ ...context, draft, actionSummary: 'only 10:15', actionType: 'ungrounded_slot_claim', groundedToolLines: [line] });
+    const rewriter = calls.prompts.at(-1);
+    assert.ok(rewriter.includes(draft) && rewriter.includes(line));
+    for (const stage of ['STEP 1', 'STEP 2', 'STEP 3', 'SAFE-MISS']) {
+      const section = rewriter.split(stage)[1].split(/STEP [123]|SAFE-MISS|Draft:/)[0];
+      assert.match(section, /exclusivity/);
+    }
+    const fields = calls.lastVerdictTool.input_schema.properties;
+    for (const field of ['verdict', 'message', 'noUngroundedTimeClaim', 'minimalRedaction']) {
+      assert.match(fields[field].description, /exclusivity/);
+    }
+    assert.match(rewriter, /delete only the exclusivity wording; preserve the supported clock/);
+  });
+}
 
 (async () => {
   let failed = 0;

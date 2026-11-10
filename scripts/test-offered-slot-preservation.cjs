@@ -160,6 +160,8 @@ function harness() {
     const env = {
       args, context: ctx, timezone: zone, userEmail: 'owner@example.test', searchWindowTz: '', autoPresentTz: '', presentTzForOutput: () => '',
       candidateAttendeeBusyEmails: ['person@example.test'], attendeeAvailability: [], mode: 'online',
+      ownerClockProfile: undefined,
+      ...compile(namedFunction('src/utils/attendeeAvailability.ts', 'presentationClockFields').getText(), {}),
       relaxedGranted: false, excludeEventIdsForSearch: ['source-event'], leadHours: 1,
       viewer: ctx.senderRole, viewerEmail: 'viewer@example.test', movingEventIdMismatchWarning: undefined,
       CalendarOfflineError: class CalendarOfflineError extends Error {},

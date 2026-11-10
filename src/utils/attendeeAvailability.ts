@@ -499,6 +499,22 @@ export function singleAttendeePresentationZone(
   return zones.size === 1 ? [...zones][0] : '';
 }
 
+/** Keep checker evidence verbatim and attribute each clock for owner-facing drafts. */
+export function presentationClockFields(
+  local: string,
+  source: 'attendee' | 'requested',
+  start: string,
+  end?: string,
+  ownerProfile?: import('../config/userProfile').UserProfile,
+): { presentation_local?: string; clock_display?: string } {
+  if (!local) return {};
+  if (!ownerProfile) return { presentation_local: local };
+  const { profileDualClock } = require('./weTimeResolver') as typeof import('./weTimeResolver');
+  const ownerClock = profileDualClock(ownerProfile, 'owner')(start, end);
+  const alternateLabel = source === 'requested' ? 'Requested zone' : 'Attendee time';
+  return { presentation_local: local, clock_display: `Your time: ${ownerClock}. ${alternateLabel}: ${local}.` };
+}
+
 /**
  * The `presentation_local` field for ONE written instant — spread into EVERY
  * create_meeting / move_meeting success return the orchestrator's tool-summary
@@ -515,7 +531,9 @@ export function presentationLocalFieldFor(
   startIso: string,
   ownerEmail: string,
   ownerTz: string,
-): { presentation_local?: string } {
+  ownerProfile?: import('../config/userProfile').UserProfile,
+  endIso?: string,
+): { presentation_local?: string; clock_display?: string } {
   const emails = attendeeEmails.filter((e): e is string => typeof e === 'string' && e.length > 0);
   const tz = singleAttendeePresentationZone(
     loadAttendeeAvailabilityForEmails(emails, ownerEmail, ownerTz),
@@ -523,5 +541,5 @@ export function presentationLocalFieldFor(
     DateTime.fromISO(startIso, { zone: ownerTz }).toISO()!,
   );
   const rendered = tz ? renderClockInZone(startIso, ownerTz, tz) : '';
-  return rendered ? { presentation_local: rendered } : {};
+  return presentationClockFields(rendered, 'attendee', startIso, endIso, ownerProfile);
 }

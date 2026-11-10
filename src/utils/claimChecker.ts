@@ -183,6 +183,8 @@ export function genericHonestHedge(draft: string, isOwnerAudience?: boolean): st
  * rewrite had this carve-out hand-typed inline while the owner-fact path,
  * where it fired, had none.
  */
+const SEARCH_SCOPE = 'For a selection=non_exhaustive search, distinguish “the only option returned” from “the only possible time”. Flag a claim of exclusive feasibility based solely on that selection, even when the offered clock matches. Preserve the returned option, any conflicts and the request for permission. strict=0; relaxed_recovery means no strict slot was found and the returned options are conditional. A proposal that states those conditions and describes the only option returned is grounded.';
+
 const NO_TZ_ARITHMETIC = 'Never compute a timezone conversion yourself. Where a tool line carries a pre-rendered local string (`[local: Wed 16 Sep 10:00 EDT]`), match the draft\'s time against that TEXT; where it carries none, the conversion cannot be judged here — treat the draft\'s time as consistent with the line and do not flag it.';
 
 /**
@@ -707,7 +709,7 @@ Reminder: JSON only. Start with { end with }. No prose.`
   const slotGroundingPrompt = input.mode === 'slot_grounding' && input.slotGroundingContext
     ? `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
 
-You audit a draft reply an executive assistant is about to send. Your one job: catch a SPECIFIC date/time offered as available/clean/workable that was NOT actually confirmed by a real availability search.
+You audit a draft reply an executive assistant is about to send. Check whether the specific offered time, availability verdict and any exclusivity claim are supported by the real search.
 
 REAL AVAILABILITY RESULTS (find_available_slots / check_join_availability / availability_precheck — this turn's lines first; a line marked \`(earlier turn)\` is a real search from earlier in this thread, and a time it lists as available is STILL GROUNDED now):
 ${input.slotGroundingContext.groundedToolLines.map(l => `  ${l}`).join('\n')}
@@ -717,7 +719,9 @@ DRAFT REPLY:
 ${input.reply}
 """
 
-Flag when EITHER holds:
+Check the search scope as well as the individual time. ${SEARCH_SCOPE}
+
+For individual times, flag when either holds:
 (a) the draft states a SPECIFIC clock time on a SPECIFIC date as available, free, clean, open, workable, or bookable for the people involved, AND that exact date+time does not appear, marked available/confirmed, on any line above — neither as a line's own instant nor as its \`[local: …]\` text; OR
 (b) the draft sells as available/workable an exact date+time that a THIS-TURN line above (not an \`(earlier turn)\` one) marks with a NEGATIVE verdict for that same instant (unavailable, busy, blocked, \`available: false\`, \`can_join=false\`, or carrying a conflict/broken-rule reason) — merely appearing in the result is not the same as being confirmed available, and offering that instant anyway inverts the search's own verdict.
 
@@ -733,19 +737,19 @@ Judge by MEANING, in any language — a CONFIRMED slot rounded/truncated the sam
 Do NOT flag:
 - A vague, non-specific offer with no clock time ("let me look for time next week", "I'll check some options") — nothing to verify.
 - A time correctly reported BY THE DRAFT as UNAVAILABLE, busy, blocked, or a conflict — that is the opposite of this rule's target.
-- A time that matches one of the real times listed above — a line's own instant or its \`[local: …]\` text, on a this-turn line or an \`(earlier turn)\` line alike — WITH AN AVAILABLE/CONFIRMED verdict (a plain find_available_slots slot list with no verdict attached lists only confirmed-available slots by construction).
+- An offer within the scope of its search that matches one of the real times listed above — a line's own instant or its \`[local: …]\` text, on a this-turn line or an \`(earlier turn)\` line alike — WITH AN AVAILABLE/CONFIRMED verdict (a plain find_available_slots slot list with no verdict attached lists only confirmed-available slots by construction).
 - A time describing an EXISTING meeting already on the calendar, not a newly offered slot.
 - Zero slots listed above ("0 slots") with the draft honestly saying nothing was found, or asking a clarifying question — only flag when it nonetheless states a SPECIFIC time as available despite the empty/negative result.
 
 Output schema (REUSE the action-checker shape so callers don't branch; action_summary comes FIRST so the verdict is written after the reason and must agree with it):
 {
-  "action_summary": string | null, // the fabricated date/time, quoted/paraphrased from the draft, ≤120 chars; null when every offered time is backed
-  "claimed_action": boolean,       // true = the draft offers a specific time as available that no line above confirms
+  "action_summary": string | null, // the unsupported time, verdict or exclusivity claim from the draft, ≤120 chars; null when none
+  "claimed_action": boolean,       // true = unsupported offered time, availability verdict or exclusivity
   "action_type": "ungrounded_slot_claim" | null,
   "target_name": null
 }
 
-If every specific time the draft offers as available is backed by a line above (or the draft offers no specific time at all), set claimed_action=false and the other fields null.
+A matching time with unsupported exclusivity is a positive verdict. Set claimed_action=true and action_type="ungrounded_slot_claim" for any unsupported instant, availability verdict or exclusivity claim. Otherwise set claimed_action=false and all other fields null.
 Reminder: JSON only. Start with { end with }. No prose.`
     : null;
 
@@ -1188,24 +1192,22 @@ export async function rewriteOwningTheMiss(opts: {
     ? '\n- The results above are NOT all on the same day. Any time you take from a line whose date differs from the day the draft is already talking about MUST be written with that date beside it — numeric ("15/09 09:45", "on 15/09: 09:45, 10:15") or the same form the lines use ("Tue 23 Sep 16:45"). A day word alone ("today", "tomorrow", "היום", "מחר") does NOT satisfy this, and a time carried across days without its date causes this whole rewrite to be DISCARDED. A time from the SAME day the draft is already speaking about needs nothing extra, and if the draft names no confirmed time of its own to fix which day that is, put the date on EVERY time you offer. Never move a time from one day into a sentence that speaks about another day.'
     : '';
 
-  const slotClaimPrompt = isUngroundedSlotClaim ? `You are reviewing a message an assistant already drafted. An upstream checker flagged the draft as offering a SPECIFIC time as available that no real availability search confirms — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the real search result yourself before acting. Report your decision by calling the \`verdict\` tool exactly once — do not write any prose outside the tool call.
+  const slotClaimPrompt = isUngroundedSlotClaim ? `You are reviewing a message an assistant already drafted. An upstream checker flagged the draft for an unsupported time, availability verdict or claim of exclusivity — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the real search result yourself before acting. Report your decision by calling the \`verdict\` tool exactly once — do not write any prose outside the tool call.
 
 REAL AVAILABILITY RESULTS (this turn's, plus any \`(earlier turn)\` search from this thread — the ONLY times/verdicts actually confirmed; settled, do not re-judge):
 ${groundedSlotBlock}
 FLAGGED CLAIM: ${what}
 
-STEP 1 — Call verdict="keep" (leave message empty) if the draft does NOT actually offer that flagged time as available, or if it does and the time matches one of the real results above — a line's own instant or its \`[local: …]\` text — WITH A POSITIVE/AVAILABLE verdict attached. ${NO_TZ_ARITHMETIC} Do NOT call verdict="keep" when the matched result carries a NEGATIVE verdict (unavailable, busy, blocked, \`available: false\`, \`can_join=false\`, or a conflict/broken-rule reason) — merely appearing in the result is not the same as being confirmed available, and that is exactly the case STEP 2 must rewrite, not keep. Do not manufacture a problem that isn't one.
+${SEARCH_SCOPE}
 
-STEP 2 — Call verdict="rewrite" ONLY when the draft genuinely states a specific time as available that the real result above does not back. Put the corrected reply in \`message\`. The rewrite must:
-- Replace the fabricated time with the REAL time(s) from the list above, if any exist — never invent a substitute time of your own.${dayCarryRule}
-- If the list above found nothing usable, say plainly that no time was actually confirmed yet (never invent one) — an honest "let me get back to you with the real options" is fine.
-- Keep every OTHER fact in the message intact: names, other correctly-stated times, numbers, the rest of the answer.
-- Sound like a real person, never a disclaimer or a system message.
-- Match the language of the draft (Hebrew/English/etc).
+STEP 1 — Verify the flagged claim by meaning. Keep when time, conditions and scope are grounded, including “the only option returned”. A matching time alone does not settle exclusivity. Match the line’s clock or its pre-rendered local reading and respect its positive or negative verdict. ${NO_TZ_ARITHMETIC}
 
-STEP 3 — Also fill \`minimalRedaction\` with a SECOND, more conservative candidate: the draft with ONLY the flagged fabricated time deleted or blanked out and NOTHING else touched — no new sentences, no paraphrasing, no added hedge, every other word copied verbatim from the draft. This is the fallback used if \`message\` cannot be trusted; fill it even when you are confident in \`message\`.
+STEP 2 — Rewrite only a clearly unsupported claim. For unsupported exclusivity about a real option, qualify only the scope; retain the offered clock, all conflicts, exception terms and approval question. For an unsupported instant or inverted availability verdict, use the real confirmed options with their conditions, or say none was confirmed if appropriate. Never invent a replacement.${dayCarryRule}
+Keep every other fact, name and number intact and use the draft’s language and a natural voice.
 
-SAFE-MISS — the hard rule. If you cannot tell whether the claim is truly ungrounded, do NOT rewrite — verdict="keep". Only rewrite when the draft clearly offers a time the real result above does not confirm.
+STEP 3 — Supply a conservative minimalRedaction as fallback. For scope alone, delete only the exclusivity wording; preserve the supported clock, conflicts, exception terms and approval question verbatim. For a fabricated time, remove only the unsupported offer. Mark minimalRedactionPreservesRest false if no deletion leaves a coherent truthful reply.
+
+SAFE-MISS — Keep on uncertainty about the flagged time, verdict or exclusivity. Rewrite only when the specific assertion exceeds the evidence; a correctly scoped report of the returned option stays unchanged.
 
 Draft:
 ${opts.draft}` : null;
@@ -1309,7 +1311,7 @@ ${opts.draft}`;
         description: isDeniedCalendarRead ? 'Keep on any uncertainty; rewrite only a categorical denial contradicted by the exact historical receipt. Supply minimalRedaction only; message is unused.' : isInventedOwnerFact
           ? 'Report whether the draft falsely states an unverified personal fact about the owner, and if so the corrected reply.'
           : isUngroundedSlotClaim
-            ? 'Report whether the draft offers a specific time as available that no real availability search confirms, and if so the corrected reply.'
+            ? 'Report unsupported time, availability verdict or exclusivity and correct only that claim.'
             : isInventedThirdPartyFact
                 ? 'Report whether the draft falsely self-attributes a named third party\'s working-hours/availability finding to a check it ran, and if so the corrected reply.'
                 : 'Report whether the draft falsely claims a completed action, and if so the corrected reply.',
@@ -1322,7 +1324,7 @@ ${opts.draft}`;
               description: isDeniedCalendarRead ? 'Keep on any uncertainty; rewrite only a categorical denial contradicted by the exact historical receipt. Supply minimalRedaction only; message is unused.' : isInventedOwnerFact
                 ? '"keep" = the draft is fine (already hedged, or the claim is grounded by tool activity). "rewrite" = the draft states an unverified personal fact about the owner as settled fact.'
                 : isUngroundedSlotClaim
-                  ? '"keep" = the draft is fine (the time genuinely matches the real result WITH A POSITIVE/AVAILABLE verdict, or nothing specific was offered). "rewrite" = the draft offers a specific time as available that the real result does not confirm — including when the matched result is itself marked unavailable/negative.'
+                  ? 'Keep when time, verdict and scope are supported, or uncertain. Rewrite a clearly unsupported time, inverted verdict or unsupported exclusivity even if the clock matches.'
                   : isInventedThirdPartyFact
                       ? '"keep" = the draft is fine (hedged / not attributed to a check, a timezone conversion, or a line carrying attendee_check= states the same finding — a name-free line counts). "rewrite" = the draft attributes a named third party\'s working-hours/availability finding to a check, and the tool activity either carries no attendee_check= line at all or carries one whose finding the draft misreports.'
                       : '"keep" = the draft is fine (proposal/offer/future-commit, or the action actually happened). "rewrite" = the draft falsely states a completed action no tool performed.',
@@ -1332,7 +1334,7 @@ ${opts.draft}`;
               description: isDeniedCalendarRead ? 'Keep on any uncertainty; rewrite only a categorical denial contradicted by the exact historical receipt. Supply minimalRedaction only; message is unused.' : isInventedOwnerFact
                 ? 'Only when verdict="rewrite": the corrected reply text, with the flagged personal claim removed or hedged. Omit for "keep".'
                 : isUngroundedSlotClaim
-                  ? 'Only when verdict="rewrite": the corrected reply text, using the REAL confirmed time(s) in place of the fabricated one (or honestly saying none was confirmed). Omit for "keep".'
+                  ? 'Only when verdict="rewrite": the corrected reply. For unsupported exclusivity preserve the real clock, conditions and approval question and qualify only scope. For unsupported times use real confirmed options or say none were confirmed. Omit for "keep".'
                   : isInventedThirdPartyFact
                       ? 'Only when verdict="rewrite": the corrected reply text — the finding restated exactly as the attendee_check= line has it when one exists and was misreported, otherwise with the flagged claim removed (never restated as a softer-worded hedge that still asserts the same fact). Omit for "keep".'
                       : 'Only when verdict="rewrite": the corrected reply text, honest that the action has not happened yet. Omit for "keep".',
@@ -1347,7 +1349,7 @@ ${opts.draft}`;
             },
             noUngroundedTimeClaim: {
               type: 'boolean',
-              description: 'Only for an ungrounded-slot-claim rewrite (verdict="rewrite", flagged claim was a specific time offered as available with no backing in the real search results you were given): self-check `message` before returning it. Set true ONLY if `message` no longer states any specific time as available unless that time is one of the REAL confirmed times you were given. Set false whenever unsure; a false value here causes the caller to discard this rewrite.',
+              description: 'For a slot rewrite, set true only if times, availability verdicts and exclusivity are grounded, including conflicts and permission requirements. Set false whenever unsure; a false value here causes the caller to discard this rewrite.',
             },
             noUnfoundedThirdPartyClaim: {
               type: 'boolean',
@@ -1355,7 +1357,7 @@ ${opts.draft}`;
             },
             minimalRedaction: {
               type: 'string',
-              description: 'For denied_calendar_read this is the ONLY candidate: delete the complete false denial clause and preserve every other character. For invented-owner-fact, ungrounded-slot-claim, or invented-third-party-fact rewrite: a conservative fallback with ONLY the flagged claim deleted, nothing else changed. Omit for a phantom-action rewrite or verdict="keep".',
+              description: 'For denied_calendar_read this is the ONLY candidate: delete the complete false denial clause and preserve every other character. For unsupported exclusivity delete only the exclusivity wording and retain the real clock, conflicts and approval question. For other invented-owner-fact, ungrounded-slot-claim, or invented-third-party-fact rewrites: a conservative fallback with ONLY the flagged claim deleted, nothing else changed. Omit for a phantom-action rewrite or verdict="keep".',
             },
             minimalRedactionPreservesRest: {
               type: 'boolean',

@@ -28,7 +28,7 @@ import { bookingLeadTimeHours, compareByRulePriority, offeredSlotCount, travelBu
 import { subjectViewerFor, viewerEmailFor } from '../../../../utils/displaySubject';
 import type { OpCtx } from './context';
 import { meetingScopedAttendees } from '../helpers';
-import { singleAttendeePresentationZone, attendeeTzForDay, type AttendeeAvailabilityEntry } from '../../../../utils/attendeeAvailability';
+import { presentationClockFields, singleAttendeePresentationZone, attendeeTzForDay, type AttendeeAvailabilityEntry } from '../../../../utils/attendeeAvailability';
 
 /**
  * Shared attendee-availability-warning construction for find_available_slots —
@@ -254,6 +254,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
     && (ctx.relaxedGrant?.relaxed ?? grantRelaxed(args, context).relaxed);
   const leadHours = bookingLeadTimeHours(context.profile, isOwnerPath ? 'owner' : 'colleague');
   const viewer = subjectViewerFor(context);
+  const ownerClockProfile = viewer === 'owner' ? context.profile : undefined;
   // v4.4.9 (#154) — the attendee-aware half of that same mask, threaded
   // alongside `viewer` into every findAvailableSlots call below.
   // gh#154-W5/gh#154-R4 (2026-08-06) — room-tightening lives inside viewerEmailFor now
@@ -1256,7 +1257,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   start: cand.start,
                   end: cand.end,
                   available: matches,
-                  ...(presentLocal ? { presentation_local: presentLocal } : {}),
+                  ...(presentLocal ? presentationClockFields(presentLocal, groundTzStated ? 'requested' : 'attendee', cand.start, cand.end, ownerClockProfile) : {}),
                   ...(brokenRule ? { broken_rule: brokenRule, broken_rule_label: labelFor(brokenRule, brokenRuleUntilDisplay) } : {}),
                   ...(brokenRules.length ? { broken_rules: brokenRules, broken_rule_labels: brokenRules.map(reason => labelFor(reason, oofUntilDisplayFor(reason, diag.daySummary, cand.start.slice(0, 10)))) } : {}),
                   ...(attendeeHoursNote ? { attendee_hours_note: attendeeHoursNote } : {}),
@@ -1977,7 +1978,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                     start: preferredSlot,
                     end: prefEndIso,
                     available: prefAvailable,
-                    ...(preferredPresentationLocal ? { presentation_local: preferredPresentationLocal } : {}),
+                    ...(preferredPresentationLocal ? presentationClockFields(preferredPresentationLocal, explicitPresentTz ? 'requested' : 'attendee', preferredSlot, prefEndIso, ownerClockProfile) : {}),
                     ...(brokenRule
                       ? { broken_rule: brokenRule, broken_rule_label: humanizeViolationLabel(brokenRule, ownerFirstPref) }
                       : {}),
@@ -2142,7 +2143,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               annotatedSlots = annotatedSlots.map((s: any) => {
                 const presentationZone = presentTzForOutput(s.start);
                 const display = presentationZone ? renderClockInZone(s.start, timezone, presentationZone) : '';
-                return display ? { ...s, presentation_local: display } : s;
+                return display ? { ...s, ...presentationClockFields(display, explicitPresentTz ? 'requested' : 'attendee', s.start, s.end, ownerClockProfile) } : s;
               });
             }
             // Remember every slot the tool offered in this conversation. The

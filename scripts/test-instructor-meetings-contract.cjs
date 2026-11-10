@@ -41,6 +41,26 @@ const colleague = skill.getSystemPromptSection(profile, undefined, false, 'slack
 const email = skill.getSystemPromptSection(profile, undefined, true, 'email');
 let passed = 0, failed = 0;
 function check(id, fn) { try { fn(); passed++; console.log(`ok ${id}`); } catch (e) { failed++; console.log(`not ok ${id}: ${e.message}`); } }
+console.log('capture lengths', JSON.stringify({ owner: owner.length, colleague: colleague.length, email: email.length, tools: JSON.stringify(tools).length }));
+check('DURATION-R01 offers and recaps share the duration rendering rule', () => {
+  for (const prompt of [owner, colleague, email]) {
+    assert.ok(prompt.includes('offers and recaps') && prompt.includes('explain the preset only when asked'));
+  }
+});
+check('DURATION-P01 exact and unstated duration inputs remain supported', () => {
+  const schema = tool('find_available_slots').input_schema;
+  assert.deepEqual(Array.from(schema.properties.duration_minutes.enum), [25,55]);
+  assert.ok(!schema.required.includes('duration_minutes'));
+  assert.match(schema.properties.duration_minutes.description, /exact allowed lengths stay exact/);
+});
+check('PAIR-R01 recaps distinguish tentative pairs from jointly checked plans', () => {
+  for (const prompt of [owner, colleague, email]) {
+    assert.ok(prompt.includes('separate searches') && prompt.includes('tentative combination') && prompt.includes('checked together'));
+  }
+});
+check('PAIR-P01 direct booking of a picked individual offer remains supported', () => {
+  for (const prompt of [owner, colleague, email]) assert.ok(prompt.includes('call create_meeting with that exact slot'));
+});
 check('CANCEL-R01 explicit owner cancellation is authorization', () => {
   assert.match(tool('delete_meeting').description, /unambiguous owner instruction.*confirmation/i);
   assert.doesNotMatch(owner, /always confirm with the owner first for destructive ops/);

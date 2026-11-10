@@ -75,6 +75,8 @@ const ALL_TOOLS: ToolScopeResult = { scopes: ['general'], source: 'fallback' };
 const INTENT_OTHER: OwnerIntentClassification = { kind: 'other', conversation_state: 'closing' };
 
 export interface ClassifyTurnResult {
+  /** Positive evidence of a standalone greeting, thanks or goodbye. */
+  standaloneCourtesy?: boolean;
   intent: OwnerIntentClassification;
   scope: ToolScopeResult;
   /** Current scheduling intent, including recent proposal/commitment context.
@@ -119,14 +121,13 @@ export interface ClassifyTurnResult {
 /** Pure-ack short-circuit — shared by both halves. Bare ack/greeting/close-out
  *  has no actionable intent (→ 'other') and needs no specific tool scope
  *  (→ 'general'). No LLM call. (Mirrors classifyToolScope.looksLikePureAck.) */
-function looksLikePureAck(msg: string): boolean {
+function bareAckKind(msg: string): 'courtesy' | 'other' | undefined {
   const trimmed = msg.trim().toLowerCase();
-  if (trimmed.length === 0) return true;
-  if (trimmed.length > 20) return false;
-  const acks = ['ok', 'okay', 'thanks', 'thank you', 'thx', 'ty', 'cool', 'got it',
-    'sure', 'yes', 'no', 'yep', 'nope', 'k', 'kk', 'morning', 'hi', 'hey', 'hello',
-    'later', 'bye', 'תודה', 'אוקיי', 'כן', 'לא', 'בוקר טוב', 'ערב טוב'];
-  return acks.includes(trimmed) || acks.some(a => trimmed === a + '!' || trimmed === a + '.');
+  const word = trimmed.endsWith('!') || trimmed.endsWith('.') ? trimmed.slice(0, -1) : trimmed;
+  if (['thanks', 'thank you', 'thx', 'ty', 'hi', 'hey', 'hello', 'bye', 'תודה'].includes(word)) return 'courtesy';
+  if (['ok', 'okay', 'cool', 'got it', 'sure', 'yes', 'no', 'yep', 'nope', 'k', 'kk',
+    'morning', 'later', 'אוקיי', 'כן', 'לא', 'בוקר טוב', 'ערב טוב'].includes(word)) return 'other';
+  return undefined;
 }
 
 export async function classifyTurn(params: {
@@ -165,8 +166,9 @@ export async function classifyTurn(params: {
   // matches what the intent classifier would return for a bare ack (its
   // RULE 3: cut the ack word, nothing substantive left → other), and scope
   // widens to general. Saves the whole roundtrip on "ok" / "thanks" / etc.
-  if (looksLikePureAck(message)) {
-    return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false, meetingPeople: [] };
+  const ackKind = bareAckKind(message);
+  if (ackKind) {
+    return { standaloneCourtesy: ackKind === 'courtesy', intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false, meetingPeople: [] };
   }
 
   // v3.1.6 — low-signal short reply (1-3 words): "meeting", "book it",
@@ -303,6 +305,13 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${render
   // ── Build the tool schema — include only the requested fields ──
   const properties: Record<string, any> = {};
   const required: string[] = [];
+  if (needIntent || needMeetingPeople) {
+    properties.standalone_courtesy = {
+      type: 'boolean',
+      description: 'True only when the entire current message is a greeting, thanks or goodbye in any language, including clear typos. Use recent context to exclude answers, approvals, rejections, decisions, tasks and questions. If ambiguous, false.',
+    };
+    required.push('standalone_courtesy');
+  }
   if (approvalSection) {
     properties.approval_decisions = {
       type: 'array', items: { type: 'object', properties: {
@@ -394,7 +403,7 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${render
     logLlmUsage('classify_turn', MODEL, resp);
 
     const toolUse = resp.content.find((b: any) => b.type === 'tool_use') as any;
-    const raw = toolUse?.input as (OwnerIntentClassification & { scopes?: string[]; free_time_inquiry?: boolean; meeting_people?: unknown; meeting_people_groups?: unknown; meeting_action?: unknown; meeting_continuation?: unknown; context_meeting_people?: unknown }) | undefined;
+    const raw = toolUse?.input as (OwnerIntentClassification & { standalone_courtesy?: unknown; scopes?: string[]; free_time_inquiry?: boolean; meeting_people?: unknown; meeting_people_groups?: unknown; meeting_action?: unknown; meeting_continuation?: unknown; context_meeting_people?: unknown }) | undefined;
 
     // ── Resolve intent ──
     let intent: OwnerIntentClassification = INTENT_OTHER;
@@ -506,7 +515,11 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${render
           instructionQuote: value.instructionQuote, sourceMessageIndex: value.sourceMessageIndex, sourceQuote: value.sourceQuote });
       }
     }
-    return { intent, scope, freeTimeInquiry, meetingPeople, meetingPeopleGroups, meetingAction, meetingContinuation, contextMeetingPeople, approvalDecisions };
+    const standaloneCourtesy = (needIntent || needMeetingPeople) && raw?.standalone_courtesy === true
+      && (!needIntent || raw.kind === 'other')
+      && (!needMeetingPeople || meetingAction === 'none')
+      && !meetingContinuation && !meetingPeople.length && !approvalDecisions.length && !freeTimeInquiry;
+    return { standaloneCourtesy, intent, scope, freeTimeInquiry, meetingPeople, meetingPeopleGroups, meetingAction, meetingContinuation, contextMeetingPeople, approvalDecisions };
   } catch (err) {
     logger.warn('classifyTurn threw — defaulting to other / general', { err: String(err).slice(0, 300) });
     return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false, meetingPeople: [] };

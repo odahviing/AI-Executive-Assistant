@@ -831,7 +831,9 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           }
           return `[find_available_slots${window} dur=${dur}m: 0 slots${reasonPart}${offDaysPart}${preferredPart}]`;
         }
-        return `[find_available_slots${window} dur=${dur}m → ${slots.length} slots: ${slotList}${offDaysPart}${attendeePartialPart}${attendeeBlockedPart}${attendeesReadPart}${preferredPart}]`;
+        const recovery = (result as { _relaxed_recovery?: unknown } | null)?._relaxed_recovery === true
+          ? '; strict=0; relaxed_recovery' : '';
+        return `[find_available_slots${window} dur=${dur}m → ${slots.length} slots: ${slotList}; selection=non_exhaustive${recovery}${offDaysPart}${attendeePartialPart}${attendeeBlockedPart}${attendeesReadPart}${preferredPart}]`;
       }
       case 'check_join_availability': {
         // proposed-slot-not-grounded-in-search-result (2026-08-24) — this tool

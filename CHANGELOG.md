@@ -1,3 +1,14 @@
+## 5.4.1 — Meeting follow-ups and clearer scheduling replies
+
+Maelle gives meeting replies more precise clock, date and availability context. Standalone greetings and thanks in private Slack conversations can close the exchange without reviving an old booking.
+
+### Fixed
+- Label owner and attendee clocks separately in meeting options and booking confirmations.
+- Carry the requested weekday into meeting follow-ups and keep explicit slot selections intact.
+- Distinguish the options returned by a limited search from every possible time, and describe alternatives that still need approval as conditional.
+- Keep routine duration rounding out of the scheduling explanation.
+- Handle standalone greetings and thanks without reopening scheduling context or sending the uncertainty fallback.
+
 ## 5.4.0 — Reliable meeting requests and quieter calendar updates
 
 Maelle keeps separate meeting rosters and exact-time conflicts intact, and carries owner decisions through the approval lifecycle. Calendar maintenance also avoids extra success discussions for routine floating-block moves.

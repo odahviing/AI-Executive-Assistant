@@ -29,7 +29,7 @@ function fixture(t) {
     'src/utils/logger.ts': { __esModule: true, default: logger },
     'src/llm/client.ts': { getAnthropicClient: () => ({}) },
     'src/llm/models.ts': { MODEL_SONNET: 'fixture' },
-    'src/core/social/classifyTurn.ts': { classifyTurn: async input => { state.classified.push(input); return { scope: { scopes: state.scopes }, meetingPeople: state.meetingPeople, freeTimeInquiry: false }; } },
+    'src/core/social/classifyTurn.ts': { classifyTurn: async input => { state.classified.push(input); return { scope: { scopes: state.scopes }, meetingPeople: state.meetingPeople, freeTimeInquiry: false, standaloneCourtesy: state.standaloneCourtesy }; } },
     'src/core/social/stateMachine.ts': { noDirective: () => ({ mode: 'none' }), formatDirectiveForPromptBlock: () => '' },
     'src/skills/registry.ts': {
       getActiveSkills: () => [{ id: 'summary', name: 'summary', getSystemPromptSection: () => '' }],
@@ -176,4 +176,30 @@ test('real turn builder recalculates preference scope each turn', async t => {
   f.state.scopes = ['meetings']; const second = await f.run({ userMessage: 'Find a meeting time.' });
   assert.ok(!second.prompt.includes('OWNER-SUMMARY-PREFERENCE'));
   assert.ok(second.prompt.includes('OWNER-GENERAL-PREFERENCE'));
+});
+
+for (const [name, message, positive, overrides, isolated] of [
+  ['greeting', 'hello', true, {}, true],
+  ['closing thanks', 'thans', true, { senderRole: 'colleague', authority: 'colleague', surface: 'colleague_dm' }, true],
+  ['classifier unavailable', 'hello', undefined, {}, false],
+  ['decision', 'yes', false, {}, false],
+  ['mixed request', 'thanks, book it', false, {}, false],
+  ['status question', 'is it booked?', false, {}, false],
+  ['forced workflow', 'hello', true, { forceToolOnFirstTurn: { name: 'summary' } }, false],
+  ['retry', 'thanks', true, { extraInstruction: 'Retry a failed read' }, false],
+  ['attachment', 'hello', true, { images: [{ type: 'image' }] }, false],
+  ['room', 'hello', true, { isChannel: true, surface: 'room' }, false],
+]) test('courtesy context: ' + name, async t => {
+  const f = fixture(t);
+  f.state.standaloneCourtesy = positive;
+  const r = await f.run({ userMessage: message, rawUserMessage: message,
+    conversationHistory: [{ role: 'assistant', content: 'Historical booking detail', ts: '1' }], ...overrides });
+  assert.equal(r.messages.some(m => m.content === 'Historical booking detail'), !isolated);
+  if (isolated) {
+    assert.equal(r.messages.length, 1);
+    assert.equal(r.messages[0].content, message);
+    assert.equal(r.tools.length, 0);
+    assert.equal(f.state.toolCalls.length, 0);
+    assert.doesNotMatch(r.prompt, /OWNER-DB-SECRET|Historical booking detail/);
+  }
 });

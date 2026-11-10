@@ -27,7 +27,7 @@ async function run(options={}){
   'src/config/userProfile.ts':{getTenantWorkdaysForTimezone:()=>['Sunday','Monday','Tuesday','Wednesday','Thursday']},
   'src/config.ts':{config:{}},'src/db/client.ts':{getDb:()=>{throw Error('Unexpected DB query');}},
   'src/utils/logger.ts':{__esModule:true,default:{info:noop,warn:(...a)=>calls.warnings.push(a),error:noop,debug:noop}},
-  'src/llm/client.ts':{getAnthropicClient:()=>({messages:{create:async()=>{calls.model++;if(options.modelError)throw Error('fixture model unavailable');return {content:[{type:'tool_use',name:'normalize_slots',input:{slots}}]};}}})},
+  'src/llm/client.ts':{getAnthropicClient:()=>({messages:{create:async request=>{calls.normalizationPrompt=request.system;calls.model++;if(options.modelError)throw Error('fixture model unavailable');return {content:[{type:'tool_use',name:'normalize_slots',input:{slots}}]};}}})},
   'src/llm/models.ts':require('./load-test-models.cjs'),'src/utils/usageLog.ts':{logLlmUsage:noop},
   'src/connectors/graph/calendar.ts':{getOwnerEventsForDecision:async(...a)=>{calls.calendar.push(a);if(options.calendarError)throw Error('calendar offline');return [{subject:'PRIVATE_CALENDAR_SUBJECT'}];}},
   'src/utils/scheduleRules.ts':{OWNER_OVERRIDABLE_KINDS:new Set(['outside_work_hours']),bookingLeadTimeHours:()=>4,checkSlot:a=>{calls.checks.push(a);if(options.secondReadError&&calls.checks.length===2)throw Error('second read offline');const kind=options.check?.(a,calls.checks.length);return kind?{passes:false,violation_kind:kind,subject:'PRIVATE_CALENDAR_SUBJECT'}:{passes:true};}},
@@ -42,7 +42,7 @@ async function run(options={}){
  }
  const input={authority:'colleague',userId:'UCOLLEAGUE',channelId:'DCOLLEAGUE',threadTs:'123.45',...options.input};
  const consumer=load('src/utils/availabilityPreCheck.ts').precheckAvailability;
- const output=await vm.runInNewContext(producer,{DateTime,profile,input,userMessage:options.message??'2026-09-15 10:00?',namedInternalAttendeeEmails:options.named||[],conversationHistory:[],logger:mocks['src/utils/logger.ts'].default,require:s=>{
+ const output=await vm.runInNewContext(producer,{DateTime,profile,input,userMessage:options.message??'2026-09-15 10:00?',namedInternalAttendeeEmails:options.named||[],conversationHistory:options.history||[],logger:mocks['src/utils/logger.ts'].default,require:s=>{
   if(s==='../../utils/availabilityPreCheck')return {precheckAvailability:async a=>{calls.precheck.push(a);const result=await consumer(a);calls.result=result;return result;}};
   if(s==='../../utils/attendeeAvailability'&&options.noEntry)return {loadAttendeeAvailabilityForPerson:()=>undefined};
   return load(path.posix.normalize('src/core/orchestrator/'+s)+'.ts');
@@ -52,6 +52,14 @@ async function run(options={}){
 }
 const cases=[];function test(id,fn){cases.push([id,fn]);}
 function times(h){return h.calls.checks.map(x=>DateTime.fromISO(x.slotStartIso).setZone('Asia/Jerusalem').toFormat("yyyy-MM-dd'T'HH:mm"));}
+test('competing weekdays reach the normalization prompt and both returned dates reach the checker',async()=>{
+ const h=await run({ownerZone:'America/New_York',rawZone:'America/New_York',noTravel:true,
+  history:[{role:'user',content:'Thursday morning in Boston?'},{role:'assistant',content:'Thursday afternoon or Friday 08:30.'}],
+  message:'What about 8:30?',slots:['12','13'].map(day=>({wall_clock:'2026-11-'+day+'T08:30',stated_timezone:'America/New_York'}))});
+ assert.match(h.calls.normalizationPrompt,/Thursday morning in Boston/);
+ assert.match(h.calls.normalizationPrompt,/check the clock on both plausible dates/);
+ assert.deepEqual(h.calls.checks.map(c=>DateTime.fromISO(c.slotStartIso).setZone('America/New_York').toISODate()),['2026-11-12','2026-11-13']);
+});
 test('travel creates both owner and requester readings from real producer',async()=>{const h=await run();assert.deepEqual(times(h),['2026-09-15T10:00','2026-09-15T17:00']);assert.equal(h.result.verdicts[0].other.zone,'America/New_York');assert.equal(h.calls.person,1);});
 test('per-date future travel start end and return resolve independently',async()=>{const h=await run({slots:['13','14','18','19'].map(d=>({wall_clock:`2026-09-${d}T10:00`}))});assert.deepEqual(times(h),['2026-09-13T10:00','2026-09-14T10:00','2026-09-14T17:00','2026-09-18T10:00','2026-09-18T17:00','2026-09-19T10:00']);});
 test('current travel does not poison future return home',async()=>{const h=await run({travel:{...travel,from:'2026-09-10',until:'2026-09-14'},slots:[{wall_clock:'2026-09-14T10:00'},{wall_clock:'2026-09-15T10:00'}]});assert.deepEqual(times(h),['2026-09-14T10:00','2026-09-14T17:00','2026-09-15T10:00']);});

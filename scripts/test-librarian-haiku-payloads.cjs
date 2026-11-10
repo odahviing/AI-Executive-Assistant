@@ -41,3 +41,27 @@ for(const [id,file,extra,budget,invoke,check] of cases){
  test(id+' legitimate result and unchanged budget',async()=>{const h=harness(file,extra);check(await invoke(h));assert.ok(h.calls.some(r=>r.max_tokens===budget));if(id==='classify-turn')assert.equal(h.calls[0].tool_choice.name,'classify_turn');});
  test(id+' unavailable provider remains contained',async()=>{const h=harness(file,extra);h.fail();await invoke(h);assert.ok(h.calls.some(r=>r.max_tokens===budget));});
 }
+const courtesyFixtures = [
+  ['hello', 'hello', {}, true, 0],
+  ['thanks typo', 'thans', { standalone_courtesy: true, kind: 'other', conversation_state: 'closing', meeting_action: 'none' }, true, 1],
+  ['multilingual thanks', 'muchísimas gracias', { standalone_courtesy: true, kind: 'other', conversation_state: 'closing', meeting_action: 'none' }, true, 1],
+  ['contextual yes', 'yes', {}, false, 0],
+  ['ambiguous morning', 'morning', {}, false, 0],
+  ['mixed task', 'thanks, book it', { standalone_courtesy: true, kind: 'task', meeting_action: 'execute' }, false, 1],
+  ['missing fields', 'possibly something', {}, false, 1],
+  ['provider unavailable', 'please check that', null, false, 1],
+];
+for (const [name, message, input, expected, callCount] of courtesyFixtures) {
+  test('standalone courtesy: ' + name, async () => {
+    const h = harness('src/core/social/classifyTurn.ts');
+    if (input) h.setResponse({ content: [{ type: 'tool_use', input }] });
+    else h.fail();
+    const result = await h.mod.classifyTurn({
+      message, profile, anthropic: h.client, needIntent: true, needScopes: false,
+      needMeetingPeople: true, recentContext: 'Assistant: Shall I book it?',
+    });
+    assert.equal(result.standaloneCourtesy === true, expected);
+    assert.equal(h.calls.length, callCount);
+    if (expected && callCount) assert.ok(h.calls[0].tools[0].input_schema.required.includes('standalone_courtesy'));
+  });
+}

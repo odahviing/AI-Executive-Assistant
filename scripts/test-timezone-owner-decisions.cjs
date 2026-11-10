@@ -129,6 +129,68 @@ test('full interval can cross destination return when every segment remains with
  const h=harness({travel:{from:'2026-09-14',until:'2026-09-14',location:'Asia/Tokyo'},hours:{hoursStart:'00:00',hoursEnd:'24:00'}});
  assert.equal((await h.find('2026-09-14T17:45:00+03:00','2026-09-14T18:10:00+03:00')).length,1);
 });
+test('Boston owner sees both clocks attributed on a Jerusalem attendee booking',()=>{
+ const h=harness({ownerZone:'America/New_York',travel:null});
+ const display=h.availability.presentationLocalFieldFor([h.person.email],'2026-12-01T09:45:00-05:00',h.profile.user.email,h.profile.user.timezone,h.profile,'2026-12-01T10:10:00-05:00');
+ assert.match(display.clock_display,/Your time: Tue 1 Dec 09:45–10:10/);
+ assert.match(display.clock_display,/Attendee time: Tue 1 Dec 16:45/);
+ assert.match(display.presentation_local,/16:45/);
+});
+test('explicit foreign presentation for an owner search is attributed to the request',()=>{
+ const h=harness({ownerZone:'America/New_York',travel:null});
+ const fields=h.availability.presentationClockFields('Tue 1 Dec 16:45 GMT+2','requested','2026-12-01T09:45:00-05:00','2026-12-01T10:10:00-05:00',h.profile);
+ assert.match(fields.clock_display,/Requested zone: Tue 1 Dec 16:45/);
+ assert.equal(fields.presentation_local,'Tue 1 Dec 16:45 GMT+2');
+});
+test('colleague booking keeps attendee presentation without owner second-person framing',()=>{
+ const h=harness({ownerZone:'America/New_York',travel:null});
+ const display=h.availability.presentationLocalFieldFor([h.person.email],'2026-12-01T09:45:00-05:00',h.profile.user.email,h.profile.user.timezone);
+ assert.match(display.presentation_local,/16:45/);
+ assert.equal(display.clock_display,undefined);
+});
+test('ordinary offer and each create success branch send attributed clocks to the owner DM only',()=>{
+ const h=harness({ownerZone:'America/New_York',travel:null});
+ const start='2026-12-01T09:45:00-05:00',end='2026-12-01T10:10:00-05:00';
+ const sourceOf=name=>ts.createSourceFile(name,read('src/skills/meetings/ops/handlers/'+name+'.ts'),ts.ScriptTarget.Latest,true);
+ const offered=one(nodes(sourceOf('findAvailableSlots'),n=>ts.isReturnStatement(n)&&n.getText().startsWith('return display ?')));
+ const viewerNode=one(nodes(ts.createSourceFile('viewer',read('src/utils/displaySubject.ts'),ts.ScriptTarget.Latest,true),n=>ts.isFunctionDeclaration(n)&&n.name?.text==='subjectViewerFor'));
+ const viewerFor=compile(viewerNode.getText(),{}).subjectViewerFor;
+ const interval={start,end};
+ const labels=compile('export function run(){'+offered.getText()+'}',{s:interval,display:'Tue 1 Dec 16:45 GMT+2',explicitPresentTz:'',ownerClockProfile:h.profile,...h.availability}).run();
+ assert.match(labels.clock_display,/Your time: Tue 1 Dec 09:45–10:10.*Attendee time: Tue 1 Dec 16:45/);
+ const returns=nodes(sourceOf('createMeeting'),n=>ts.isCallExpression(n)&&n.expression.getText()==='presentationLocalFieldFor');
+ assert.equal(returns.length,3);
+ for(const call of returns){
+  for(const surface of ['owner_dm','room','colleague_dm']){
+   const context={profile:h.profile,surface,senderRole:surface==='owner_dm'?'owner':'colleague'};
+   const fields=compile('export const fields='+call.getText(),{attendees:[{email:h.person.email}],args:interval,
+    userEmail:h.profile.user.email,timezone:h.profile.user.timezone,context,subjectViewerFor:viewerFor,...h.availability}).fields;
+   assert.match(fields.presentation_local,/16:45/);
+   if(surface==='owner_dm')assert.match(fields.clock_display,/Your time: Tue 1 Dec 09:45–10:10/);
+   else assert.equal(fields.clock_display,undefined);
+  }
+ }
+});
+test('candidate and preferred status projections attribute explicit and inferred clocks only in the owner DM',()=>{
+ const h=harness({ownerZone:'America/New_York',travel:null});
+ const tree=ts.createSourceFile('search',read('src/skills/meetings/ops/handlers/findAvailableSlots.ts'),ts.ScriptTarget.Latest,true);
+ const start='2026-12-01T09:45:00-05:00',end='2026-12-01T10:10:00-05:00',local='Tue 1 Dec 16:45 GMT+2';
+ for(const key of ['presentLocal','preferredPresentationLocal']){
+  const spread=one(nodes(tree,n=>ts.isSpreadAssignment(n)&&n.expression.getText().startsWith('('+key+' ?')));
+  for(const owner of [true,false]){
+   for(const requested of [true,false]){
+    const fields=compile('export const result={'+spread.getText()+'}',{...h.availability,cand:{start,end},preferredSlot:start,prefEndIso:end,
+     groundTzStated:requested,explicitPresentTz:requested?'Asia/Jerusalem':'',presentLocal:local,preferredPresentationLocal:local,
+     ownerClockProfile:owner?h.profile:undefined}).result;
+    assert.equal(fields.presentation_local,local);
+    if(owner){
+     assert.match(fields.clock_display,/Your time: Tue 1 Dec 09:45–10:10/);
+     assert.match(fields.clock_display,requested?/Requested zone: Tue 1 Dec 16:45/:/Attendee time: Tue 1 Dec 16:45/);
+    }else assert.equal(fields.clock_display,undefined);
+   }
+  }
+ }
+});
 test('written presentation uses same final-trip instant as availability',()=>{
  const h=harness();const display=h.availability.presentationLocalFieldFor([h.person.email],'2026-09-15T00:15:00+03:00',h.profile.user.email,h.profile.user.timezone);
  assert.match(display.presentation_local,/Mon 14 Sep 17:15 EDT/);
