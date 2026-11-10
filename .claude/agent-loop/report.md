@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
 **3 product decisions await you** — 5 open items; 1 captured, 0 ready for an authorized lane batch, 1 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (7):** boston-booking-confirmation-labels-israel-clock-as-owner-time · greeting-revives-old-booking-thread · closing-thanks-gets-uncertainty-fallback · meeting-followup-substitutes-different-weekday · standard-duration-rounding-explanation-reappears · joint-meeting-options-described-as-workable-before-approval · only-today-slot-claim-contradicted-on-followup
+**Independently verified, awaiting wrap (0):** none
 
 ### Captured — pending batch assessment (1)
 
