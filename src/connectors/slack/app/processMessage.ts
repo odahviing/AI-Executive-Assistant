@@ -645,10 +645,11 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
         isOneOnOneDm: !isChannel && !isMpim,
         text: framedText,
         rawText: text,
+        typedText: params.typedText,
         senderId,
         senderName: colleagueName,
         meta: { messageTs: ts },
-        runner: async ({ mergedText, mergedRawText, signal, markWrite, spansMultipleSenders, messageTimestamps, senderIds }) => {
+        runner: async ({ mergedText, mergedRawText, mergedTypedText, signal, markWrite, spansMultipleSenders, messageTimestamps, senderIds }) => {
           // Did anything from this turn actually reach the person? Set by the
           // delivery pipeline (postReply's onDelivered), read only by the
           // failure handler at the bottom of this closure.
@@ -769,6 +770,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
                 const { tryAutoResolveThreadBoundApproval } = await import('../../../utils/threadBoundApprovalAutoResolve');
                 const autoResolve = await tryAutoResolveThreadBoundApproval({
                   message: mergedText,
+                  typedUserMessage: mergedTypedText,
                   threadTs,
                   ownerUserId: senderId,
                   profile,
@@ -834,6 +836,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
             const result = await runOrchestrator({
               userMessage: mergedText,
               rawUserMessage: mergedRawText,
+              typedUserMessage: mergedTypedText,
               threadParticipantIds,
               conversationHistory: history,
               threadTs,

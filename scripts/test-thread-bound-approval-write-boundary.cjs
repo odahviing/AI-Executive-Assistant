@@ -21,7 +21,8 @@ const deferred = () => {
 
 function harness(options = {}) {
   const events = [], resolutions = [];
-  const response = { content: [{ type: 'tool_use', input: { target: 1, verdict: options.verdict || 'approve' } }] };
+  const response = { stop_reason:options.stop || 'tool_use', content: [{ type: 'tool_use', name:options.tool || 'classify_reply',
+    input: { target: 1, verdict: options.verdict || 'approve' } }] };
   const row = {
     id: 'req_fixture', kind: 'approval', subkind: 'book', subject: 'Fixture meeting',
     requester_slack_id: options.colleague ? 'UCOLLEAGUE' : 'UOWNER',
@@ -38,14 +39,15 @@ function harness(options = {}) {
       return response;
     } } }) },
     '../llm/models': require('./fixtures/registrar-models.cjs'),
-    '../db/requests': { getAwaitingOwnerRequests: () => options.noCandidate ? [] : [row] },
-    '../core/requests/types': { parseDetails: request => request.details },
-    '../core/approvals/approvalCallbacks': { extractCallbacks: details => details },
+    '../db/requests': { getAwaitingOwnerRequests: () => options.noCandidate ? [] : [options.row || row] },
+    '../core/requests/types': { parseDetails: request => request.details || JSON.parse(request.details_json) },
+    '../core/approvals/approvalCallbacks': { extractCallbacks: details => details.deferred_action ? {on_approve:details.deferred_action} : details },
     '../core/requests/resolver': { resolveRequest: async (id, decision, ctx) => {
       events.push('resolve');
       resolutions.push({ id, decision, ctx });
       options.onResolve?.();
       if (options.resolvePause) await options.resolvePause.promise;
+      if (options.resolve) return options.resolve(decision, ctx);
       if (options.resolverThrows) throw Error('resolver unavailable');
       return options.notOk ? { ok: false, reason: 'fixture_unavailable' } : { ok: true, effect: 'fixture_complete' };
     } },
@@ -141,3 +143,48 @@ for (const options of [{ verdict: 'pass_to_sonnet' }, { classifierThrows: true }
     assert.equal(h.resolutions.length, 0);
   });
 }
+
+test('a misclassified short approve passes the literal sender reply to the real booking approval before write', async () => {
+  const { harness: lifecycle } = require('./fixtures/yael-lifecycle.cjs');
+  const attendees = [{name:'Alex',email:'external@approved.test'}];
+  const booking = lifecycle({details:{deferred_action:{tool:'create_meeting',args:{
+    subject:'Booking',start:'2026-09-20T12:00:00Z',end:'2026-09-20T12:30:00Z',attendees,
+  }}}});
+  const h = harness({resolve:(decision, ctx)=>booking.resolve(decision, ctx)});
+  const result = await h.run({message:'yes [attachment summary]', typedUserMessage:'Use Alex at different@example.test instead.'});
+  assert.equal(result.resolved, false);
+  assert.match(result.reason, /Name <email>/i);
+  assert.equal(booking.row().state, 'awaiting_owner');
+  assert.deepEqual(booking.effectiveAction().args.attendees, attendees);
+  assert.equal(booking.effects.executes.length, 0);
+  assert.equal(booking.effects.sends.length, 0);
+});
+
+for (const [label, typed, message, verdict, allowed, options] of [
+  ['Spanish','Sí','Sí','standalone_yes',true],
+  ['Russian','Да','Да','standalone_yes',true],
+  ['German','Ja','Ja','standalone_yes',true],
+  ['Arabic','نعم','نعم','standalone_yes',true],
+  ['polite English','Yes, please.','Yes, please.','standalone_yes',true],
+  ['existing original literal','Yes','Yes','approve',true],
+  ['partial qualifier','Sí, pero otro Alex','Sí','standalone_yes',false],
+  ['enriched with synthetic assent','No','Sí','standalone_yes',false],
+  ['truncated answer','Sí','Sí','standalone_yes',false,{stop:'max_tokens'}],
+  ['wrong classification tool','Sí','Sí','standalone_yes',false,{tool:'other'}],
+  ['mistaken tool approve on correction','That was the wrong person.','That was the wrong person.','approve',false],
+  ['unknown decision','Tal vez','Tal vez','pass_to_sonnet',false],
+  ['rejected decision','Nein','Nein','reject',false],
+]) test('bound classified standalone assent: '+label,async()=>{
+  const {harness:lifecycle} = require('./fixtures/yael-lifecycle.cjs');
+  const attendees = [{name:'Alex',email:'approved@external.test'}];
+  const booking = lifecycle({row:{terminal_dm_msg_ts:'100.001',requester_slack_id:'UOWNER'},
+    details:{deferred_action:{tool:'create_meeting',args:{subject:'Booking',attendees,
+      start:'2026-09-20T12:00:00Z',end:'2026-09-20T12:30:00Z'}}}});
+  const shortcut = harness({row:booking.row(),verdict,...options,
+    resolve:(decision,context)=>booking.resolve(decision,context)});
+  await shortcut.run({profile:{user:{name:'Owner Fixture',slack_user_id:'UOWNER'}},message,typedUserMessage:typed});
+  assert.equal(shortcut.events.filter(event=>event==='classify').length,1);
+  assert.equal(booking.effects.executes.length,allowed ? 1 : 0);
+  if (allowed) assert.deepEqual(booking.effects.executes[0].args.attendees,attendees);
+  else assert.equal(booking.row().state,verdict==='reject' ? 'cancelled' : 'awaiting_owner');
+});

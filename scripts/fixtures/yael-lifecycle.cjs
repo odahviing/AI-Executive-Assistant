@@ -12,6 +12,8 @@ const { DateTime } = require('luxon');
 const root = path.resolve(__dirname, '../..');
 const sourceRoot = process.env.MAELLE_APPROVAL_SOURCE_ROOT || root;
 const changed = new Set(['src/tasks/skill.ts', 'src/core/requests/deferredActionReplay.ts', 'src/core/requests/resolver.ts', 'src/core/requests/types.ts', 'src/core/approvals/approvalCallbacks.ts']);
+// A historical composer must use the localized copy shipped with it.
+if (fs.existsSync(path.join(sourceRoot, 'src/core/requests/requesterRelay.ts'))) changed.add('src/core/requests/requesterRelay.ts');
 const actual = new Set([...changed, 'src/core/requests/runner.ts', 'src/core/requests/closeRequest.ts', 'src/core/requests/requesterRelay.ts', 'src/utils/threadBoundApprovalAutoResolve.ts', 'src/core/requests/types.ts', 'src/core/approvals/approvalCallbacks.ts', 'src/utils/textScrubber.ts']);
 const compiled = new Map(), harnesses = [];
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -49,7 +51,7 @@ function harness(options = {}) {
     'src/db/conversations.ts': { appendToConversation() {}, getConversationHistory: () => [] },
     'src/utils/outboundTracker.ts': {recordOutbound(){}},
     'src/utils/responseDeadline.ts':{},'src/utils/timezoneConvert.ts':{},'src/core/requests/colleagueOofReengage.ts':{},
-    'src/db/people.ts': {findPersistentUnaskedTimezoneDivergences:()=>[], resolveOutboundLanguageForPerson:()=>options.lang||null, getPersonMemory: id => options.noPerson ? undefined : { name: id === 'UPAUL' ? 'Paul' : 'Other', timezone: 'UTC', timezone_set_by: 'person' }, promoteTimezoneTempById: (...args) => { effects.promotions.push(args); return options.promotion || 'applied'; } },
+    'src/db/people.ts': {findPersonByName: options.findPersonByName || (()=>({status:'not_found',match:null,candidates:[]})),findPersistentUnaskedTimezoneDivergences:()=>[], resolveOutboundLanguageForPerson:()=>options.lang||null, getPersonMemory: id => Object.hasOwn(options.people || {}, id) ? options.people[id] : options.noPerson ? undefined : { name: id === 'UPAUL' ? 'Paul' : 'Other', timezone: 'UTC', timezone_set_by: 'person' }, promoteTimezoneTempById: (...args) => { effects.promotions.push(args); return options.promotion || 'applied'; } },
     'src/db/client.ts': { getDb: () => ({ prepare: () => ({run:()=>{}, all: (...args) => { effects.candidates.push(args); return options.semanticRepeat ? [row] : []; } }) }) },
     'src/db/jobs.ts': { createOutreachJob() {} },
     'src/connections/registry.ts': { getConnection: () => options.noConnection ? undefined : connection },
@@ -122,7 +124,7 @@ function harness(options = {}) {
     restart:()=>modules.clear(),
     sweep:()=>load('src/core/requests/runner.ts').sweepDueRequests({profilesByUserId:new Map([['UOWNER',profile]])}),
     retryRelay:()=>load('src/core/requests/requesterRelay.ts').retryRequesterRelay(row,profile),
-    resolve: (verdict = { verdict: 'approve' }, ctx = {}) => load('src/core/requests/resolver.ts').resolveRequest(row.id, verdict, { profile, ...ctx }),
+    resolve: (verdict = { verdict: 'approve' }, ctx = {}) => load('src/core/requests/resolver.ts').resolveRequest(row.id, verdict, { profile, confirmedApprovalReaction: true, resolvingUserId:'UOWNER', ...ctx }),
     create: (payload = {}, ctx = {}, args = {}) => new skill.TasksSkill().executeToolCall('create_approval', { kind: 'unknown_person', payload: typeof payload === 'string' ? payload : { missing_fields: ['email'], ...payload }, ask_text: 'Review a person request', expires_in_hours: 1, ...args }, context(ctx)),
     createDirect: ctx => skill.createApprovalRequest({ kind: 'unknown_person', payload: { missing_fields: ['email'] }, ask_text: 'Review a person request', expires_in_hours: 1 }, context(ctx)),
     accept: (userId, data) => new skill.TasksSkill().executeToolCall('resolve_approval', { approval_id: row.id, verdict: 'approve', ...(data ? { data } : {}) }, context({ userId, threadTs: 'owner.1' })),

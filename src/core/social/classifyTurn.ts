@@ -77,6 +77,8 @@ const INTENT_OTHER: OwnerIntentClassification = { kind: 'other', conversation_st
 export interface ClassifyTurnResult {
   /** Positive evidence of a standalone greeting, thanks or goodbye. */
   standaloneCourtesy?: boolean;
+  /** Whole current reply accepting a displayed booking as-is. The caller binds the request. */
+  standaloneApprovalQuote?: string;
   intent: OwnerIntentClassification;
   scope: ToolScopeResult;
   /** Current scheduling intent, including recent proposal/commitment context.
@@ -291,8 +293,11 @@ MEETING CONTINUATION (meeting_continuation, context_meeting_people):
   const renderedContext = params.meetingContextMessages
     ? params.meetingContextMessages.map((m, i) => `[${i}] ${m.role}: ${m.content}`).join('\n')
     : recentContext;
+  const classifyStandaloneApproval = isOwner && needMeetingPeople
+    && params.approvalCandidates?.some(candidate => candidate.action.tool === 'create_meeting');
   const approvalSection = isOwner && params.approvalCandidates?.length ? `
 PENDING MEETING DECISIONS (approval_decisions): interpret the CURRENT owner's explicit instruction against the indexed pending actions and recent conversation. Return [] for a mere mention, question, bare acknowledgement, uncertain reference or missing relationship evidence. For each independently identified action cite a verbatim instructionQuote from the CURRENT message and a verbatim sourceQuote from one indexed recent message (sourceMessageIndex) that identifies this specific request and grounds the relationship. A shared requester alone does not identify it.
+${classifyStandaloneApproval ? 'First distinguish a standalone affirmative reply to the offered booking, in any language. If the ENTIRE current message simply assents to the booking exactly as shown without independently identifying it, return its verbatim text in standalone_approval_quote, meeting_action="execute", standalone_courtesy=false, and approval_decisions=[]. Do not cite a candidate or history for a standalone affirmative: the caller binds its target. Otherwise omit standalone_approval_quote and classify specific decisions as usual. Corrections (including another inbox or person), conditions, rejections, questions, quoted speech, additional instructions, and answers to other questions do not qualify.' : ''}
 Use approve_existing ONLY when the owner authorizes this exact stored action without changing its terms. Use reject only for an explicit rejection. Use amend_or_search when the instruction changes terms or requires finding a new time; that never authorizes the old action. An instruction to place one request before an anchor meeting and another after an anchor is a set of decisions: identify each separately. Preserve an already matching action only if the cited relationship supports it; the other request needs amendment/search, never approve both unchanged. Do not invent calendar facts, infer overrides, or treat an assistant suggestion as owner consent. Consent must come from the current instruction.
 Candidates (zero-based indices): ${JSON.stringify(params.approvalCandidates.map((candidate, candidateIndex) => ({ candidateIndex, ...candidate })))}
 ` : '';
@@ -313,6 +318,12 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${render
     required.push('standalone_courtesy');
   }
   if (approvalSection) {
+    if (classifyStandaloneApproval) {
+      properties.standalone_approval_quote = {
+        type: 'string',
+        description: 'Entire current message verbatim for standalone acceptance of the offered booking as-is. Omit otherwise.',
+      };
+    }
     properties.approval_decisions = {
       type: 'array', items: { type: 'object', properties: {
         candidateIndex: { type: 'integer' },
@@ -403,7 +414,7 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${render
     logLlmUsage('classify_turn', MODEL, resp);
 
     const toolUse = resp.content.find((b: any) => b.type === 'tool_use') as any;
-    const raw = toolUse?.input as (OwnerIntentClassification & { standalone_courtesy?: unknown; scopes?: string[]; free_time_inquiry?: boolean; meeting_people?: unknown; meeting_people_groups?: unknown; meeting_action?: unknown; meeting_continuation?: unknown; context_meeting_people?: unknown }) | undefined;
+    const raw = toolUse?.input as (OwnerIntentClassification & { standalone_courtesy?: unknown; standalone_approval_quote?: unknown; scopes?: string[]; free_time_inquiry?: boolean; meeting_people?: unknown; meeting_people_groups?: unknown; meeting_action?: unknown; meeting_continuation?: unknown; context_meeting_people?: unknown }) | undefined;
 
     // ── Resolve intent ──
     let intent: OwnerIntentClassification = INTENT_OTHER;
@@ -519,7 +530,17 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${render
       && (!needIntent || raw.kind === 'other')
       && (!needMeetingPeople || meetingAction === 'none')
       && !meetingContinuation && !meetingPeople.length && !approvalDecisions.length && !freeTimeInquiry;
-    return { standaloneCourtesy, intent, scope, freeTimeInquiry, meetingPeople, meetingPeopleGroups, meetingAction, meetingContinuation, contextMeetingPeople, approvalDecisions };
+    // A partial tool call, conflicting decision or quote from truncated input
+    // cannot establish what the owner authorized with the complete reply.
+    const standaloneApprovalQuote = classifyStandaloneApproval && resp.stop_reason === 'tool_use'
+      && toolUse?.name === 'classify_turn' && resp.content.filter(block => block.type === 'tool_use').length === 1
+      && message.length <= 4000 && raw?.standalone_approval_quote === message
+      && raw.standalone_courtesy === false && meetingAction === 'execute'
+      && (!needIntent || (raw.kind === 'other' || raw.kind === 'task')) && !raw.social && !raw.free_time_inquiry
+      && Array.isArray(decisionInput) && decisionInput.length === 0
+      && (raw.meeting_people === undefined || (Array.isArray(raw.meeting_people) && raw.meeting_people.length === 0))
+      ? message : undefined;
+    return { standaloneCourtesy, standaloneApprovalQuote, intent, scope, freeTimeInquiry, meetingPeople, meetingPeopleGroups, meetingAction, meetingContinuation, contextMeetingPeople, approvalDecisions };
   } catch (err) {
     logger.warn('classifyTurn threw — defaulting to other / general', { err: String(err).slice(0, 300) });
     return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false, meetingPeople: [] };

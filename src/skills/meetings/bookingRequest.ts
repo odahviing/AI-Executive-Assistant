@@ -284,14 +284,14 @@ async function buildParticipants(
     // re-derives him from scratch, and with no internal-domain match possible
     // for an external, the model just typed a fresh guess each time (a
     // plausible-looking wrong domain, then an outright example.com
-    // placeholder — a real, live incident, not a hypothetical). Now the name
-    // lookup always runs when a name is present, the same whole-name-matched,
+    // placeholder — a real, live incident, not a hypothetical). A fresh
+    // model-supplied address with a name runs the same whole-name-matched,
     // ambiguity-refusing check internal colleagues already get — a confident
     // directory match wins over whatever the model typed; only when nothing
     // matches does the model-supplied (or now-resolved) email stand. A
     // genuinely new/unknown external is unaffected: no match, no override.
     //
-    // Adversarial-review follow-up (same day): ONE escape hatch, decided by
+    // On a live turn the exception is decided by
     // emailStatedByHuman above — an address a human actually typed in this
     // conversation outranks the stored row (stale-email correction; new
     // same-named external). A model-fabricated address never appears in
@@ -301,7 +301,10 @@ async function buildParticipants(
     const { resolveAttendeeEmail } = require('../../memory/resolveAttendeeEmails') as
       typeof import('../../memory/resolveAttendeeEmails');
     if (name) {
-      const resolved = resolveAttendeeEmail({ name, email: '', slack_id: slackId });
+      // Plan against the same approved address the create handler will invite.
+      const resolved = resolveAttendeeEmail({
+        name, slack_id: slackId, email: context.approvedBookingAttendeeEmails?.includes(email) ? email : '',
+      });
       if (resolved.email) {
         if (email && email.includes('@') && resolved.email !== email) {
           if (emailStatedByHuman(email, context)) {

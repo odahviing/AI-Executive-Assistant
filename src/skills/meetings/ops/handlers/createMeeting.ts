@@ -187,6 +187,25 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           };
         }
         const attendees = rawAttendees as Array<{ name?: string; email?: string; slack_id?: string }>;
+        // Compare the submitted roster with the approval before requester/room
+        // policy adjusts it. A stale or altered replay cannot introduce or drop
+        // an explicit recipient and then acquire authority via a name lookup.
+        if (context.approvedBookingAttendeeEmails) {
+          const approvedEmails = new Set(context.approvedBookingAttendeeEmails);
+          // Approval cards and saved counters can list an address alone.
+          // Use the same object shape the planner and Graph writer consume.
+          for (const [index, person] of rawAttendees.entries()) {
+            if (typeof person === 'string' && approvedEmails.has(person.trim().toLowerCase())) {
+              rawAttendees[index] = { email: person.trim().toLowerCase() };
+            }
+          }
+          const submittedEmails = new Set(attendees.flatMap(a =>
+            typeof a?.email === 'string' && a.email.trim() ? [a.email.trim().toLowerCase()] : []));
+          if (submittedEmails.size !== approvedEmails.size || [...submittedEmails].some(email => !approvedEmails.has(email))) {
+            return { success: false, error: 'approved_attendee_mismatch',
+              message: 'The submitted attendee addresses differ from the approved booking. Confirm the intended roster before sending an invite.' };
+          }
+        }
         // v3.6.4 — recover resolved internal attendees into the booking. The
         // orchestrator already resolved current named participants or a
         // classified continuation grounded in an indexed human request
@@ -492,8 +511,8 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         //      valid model-typed email — right or fabricated — shipped to Graph
         //      unchecked (the incident: a known external's correct stored email
         //      on booking #1, then a guessed domain and an example.com
-        //      placeholder on #2/#3 in the same conversation). Now, when a name
-        //      is present, the shared resolver ALWAYS runs (email:'' forces it
+        //      placeholder on #2/#3 in the same conversation). For a fresh
+        //      model-supplied address with a name, the shared resolver runs (email:'' forces it
         //      past its valid-email early return) and a confident, unambiguous
         //      whole-name directory match overrides what the model typed; no
         //      match / ambiguous → the supplied email stands (new externals
@@ -504,7 +523,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         //      resolver's `nameGenuinelyMatches` + distinct-person gate exists
         //      to prevent. Replaced with the one resolver.
         //
-        // Adversarial-review follow-up (same day): ONE escape hatch, decided by
+        // On a live turn the exception is decided by
         // emailStatedByHuman (bookingRequest.ts) — an address a human actually
         // typed in this conversation outranks a differing stored row (stale-
         // email correction: "use jim@newco.com"; new same-named external whose
@@ -531,7 +550,9 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             const resolved = resolveAttendeeEmail({
               name: a.name,
               slack_id: a.slack_id,
-              email: hasName ? '' : supplied,
+              // Replay already identifies the approved recipient. Looking their name
+              // up again can silently send the invitation to a different inbox.
+              email: !hasName || context.approvedBookingAttendeeEmails?.includes(supplied) ? supplied : '',
             });
             if (resolved.email) {
               if (supplied.includes('@') && resolved.email !== supplied) {

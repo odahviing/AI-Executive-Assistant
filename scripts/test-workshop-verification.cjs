@@ -342,6 +342,48 @@ test('saved owner answer without bookkeeping remains accepted', () => {
   setRows(authorityFixture(false))
   assert.equal(gate('--verification').status, 0)
 })
+
+function boardHistory(verdict, answer) {
+  const rows = [
+    row('telemetry', 'queued-next-run', { kind: 'invariant-backfill' }),
+    row('unrelated', 'built', { lane: 'editor', date: '2026-09-01' }),
+    row('approved', 'needs-owner-decision', { lane: 'registrar', invariant: 'ruling-test', date: '2026-09-02', intake: { status: 'awaiting-owner', question: 'Which recipients?' } }),
+  ]
+  if (answer) {
+    const token = contract.ownerStates(rows).get('approved').question.token
+    rows.push({ ref: 'approved', ownerRuling: { questionToken: token, hisRuling: 'Use the approved recipients' } })
+  }
+  const ruling = contract.ownerStates(rows).get('approved').answer?.token
+  rows.push(row('approved', verdict, verdict === 'verified'
+    ? { lifecycleVersion: 1, evidence: validEvidence(), review: { ...validReview(), ownerRulingToken: ruling }, snapshot: contract.snapshot([product], root) }
+    : {}))
+  return rows
+}
+const board = (mode, ...scope) => {
+  const result = gate(mode, '--json', ...scope)
+  assert.equal(result.status, 0, result.stderr)
+  return JSON.parse(result.stdout)
+}
+test('board retains a verified owner answer across telemetry, lane and date scopes', () => {
+  setRows(boardHistory('verified', true))
+  for (const scope of [[], ['--lane', 'registrar'], ['--since', '2026-09-10']]) {
+    assert.deepEqual(board('--open', ...scope), [])
+    assert.deepEqual(board('--queued', ...scope), [])
+  }
+  assert.match(gate('--index').stdout, /0 open \/ 1 closed/)
+})
+test('board queues an answered ref across telemetry, lane and date scopes', () => {
+  setRows(boardHistory('queued-next-run', true))
+  for (const scope of [[], ['--lane', 'registrar'], ['--since', '2026-09-10']]) {
+    assert.deepEqual(board('--queued', ...scope).map(r => r.id), ['approved'])
+    assert.deepEqual(board('--open', ...scope).map(r => r.verdict), ['queued-next-run'])
+  }
+})
+test('board keeps an unresolved owner question open and out of the queue', () => {
+  setRows(boardHistory('queued-next-run', false))
+  assert.deepEqual(board('--open').map(r => [r.ref, r.verdict]), [['approved', 'needs-owner-decision']])
+  assert.deepEqual(board('--queued'), [])
+})
 test('matching hold release retains its historical token across excluded bookkeeping', () => {
   const rows = authorityFixture()
   rows.push(row('approved', 'deferred', { note: 'Wait for explicit release' }))

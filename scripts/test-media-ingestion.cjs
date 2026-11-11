@@ -117,10 +117,10 @@ function fixture() {
   ctx.app.client.chat = { postMessage: async p => { state.posts.push(p); if (state.postError) throw Error('post failed'); } };
   ctx.scanAndPrepareImage = p => load('src/connectors/slack/app/fileIngestion.ts').scanAndPrepareImage(ctx, p);
   ctx.processImageFileShare = p => load('src/connectors/slack/app/fileIngestion.ts').processImageFileShare(ctx, p);
-  async function ingest(role = 'colleague', replay = false, channel = 'D1', postFails = false) {
+  async function ingest(role = 'colleague', replay = false, channel = 'D1', postFails = false, caption = 'מה כתוב כאן?') {
     const client = { chat: { postMessage: async p => { state.posts.push(p); if (postFails) throw Error('post failed'); } } };
     await load('src/connectors/slack/app/fileIngestion.ts').processImageFileShare(ctx, {
-      files: [{ url_private: 'image:test', mimetype: 'image/png' }], message: { user: role === 'owner' ? 'UOWNER' : 'UPEER', text: 'מה כתוב כאן?' },
+      files: [{ url_private: 'image:test', mimetype: 'image/png' }], message: { user: role === 'owner' ? 'UOWNER' : 'UPEER', text: caption },
       channelId: channel, ts: 'T1', threadTs: 'T1', client, isMpim: channel === 'G1', degradeOnDownloadFailure: replay,
     });
     await Promise.resolve(); await Promise.resolve();
@@ -134,6 +134,12 @@ function fixture() {
   return { state, load, ctx, ingest, dm, config: mocks['src/config.ts'].config };
 }
 async function main() {
+  await check('image-without-caption-keeps-model-placeholder-and-empty-literal-input', async () => {
+    const f = fixture();
+    await f.ingest('owner', false, 'D1', false, '');
+    assert.equal(f.state.turns[0].text, '(image attached, no caption)');
+    assert.equal(f.state.turns[0].typedText, '');
+  });
   for (const [id, verdict] of Object.entries({ object: '{}', missing: '{"reason":"ok"}', string: '{"suspicious":"false"}',
     number: '{"suspicious":0}', array: '[]', scalar: 'false' })) {
     await check(`malformed-${id}-refused`, async () => {

@@ -62,7 +62,7 @@ function harness(tool,counter,opts={}){
  }
  return {profile,startKey,endKey,original,executes,errors,notices,load,row:()=>row,
   preview:()=>load('src/core/approvals/approvalCallbacks.ts').composeOwnerAskText({askText:'Please review Sync.',details:JSON.parse(row.details_json),profile,requestId:row.id}),
-  resolve:(verdict)=>load('src/core/requests/resolver.ts').resolveRequest(row.id,verdict??(opts.runWith?{verdict:'amend',counter}:{verdict:'approve'}),{profile,...(opts.colleague?{resolvedByColleague:true,resolvingUserId:'UCOLLEAGUE'}:{})}),
+  resolve:(verdict)=>load('src/core/requests/resolver.ts').resolveRequest(row.id,verdict??(opts.runWith?{verdict:'amend',counter}:{verdict:'approve'}),{profile,...(opts.colleague?{resolvedByColleague:true,resolvingUserId:'UCOLLEAGUE'}:{resolvingUserId:'UOWNER',ownerDecisionMessage:'Yes'})}),
  };
 }
 const scenarios=[
@@ -119,3 +119,13 @@ test('colleague accepts ambiguous stored clock: pending owner clarification, no 
 test('owner counter relay does not offer unresolved bare end to requester',async()=>{const h=harness('create_meeting',{});const r=await h.resolve({verdict:'amend',counter:{start:'2026-03-08T01:30:00',end:'2026-03-08T02:15:00',stated_zone:'America/New_York'}});assert.equal(r.ok,false);assert.equal(r.effect,'approve_needs_time_clarification');assert.equal(h.row().state,'awaiting_owner');assert.equal(h.executes.length,0);});
 
 test('colleague ambiguous counter history stays raw while owner sees clarification',async()=>{const h=harness('create_meeting',{}, {colleague:true,noCounter:true});const r=await h.resolve({verdict:'amend',counter:{start:'2026-03-08T02:30:00',end:'2026-03-08T03:00:00',stated_zone:'America/New_York'}});assert.equal(r.ok,true);assert.equal(h.row().state,'awaiting_owner');assert.equal(h.executes.length,0);assert.match(h.notices[0],/2026-03-08T02:30:00/);assert.match(h.notices[0],/Before this can run:/);assert.doesNotMatch(h.notices[0],/If yes → I'll book/);});
+
+test('a valid participant-local interval still requires an authenticated booking approval',async()=>{
+ const original={start:'2026-09-14T10:00:00',end:'2026-09-14T10:25:00',stated_zone:'CST',attendees:[{email:'colleague@example.test'}]};
+ const h=harness('create_meeting',{}, {noCounter:true,original});
+ assert.doesNotMatch(await h.preview(),/Before this can run:/);
+ const result=await h.load('src/core/requests/resolver.ts').resolveRequest(h.row().id,{verdict:'approve'},{profile:h.profile});
+ assert.equal(result.effect,'approve_needs_attendee_identity');
+ assert.equal(h.row().state,'awaiting_owner');
+ assert.equal(h.executes.length,0);
+});

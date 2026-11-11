@@ -1452,7 +1452,7 @@ if (!fs.existsSync(LEDGER)) {
   process.exit(1);
 }
 
-const rows = [];
+const history = [];
 const bad = [];
 fs.readFileSync(LEDGER, 'utf8')
   .split(/\r?\n/)
@@ -1460,7 +1460,7 @@ fs.readFileSync(LEDGER, 'utf8')
     const t = line.trim();
     if (!t) return;
     try {
-      rows.push(JSON.parse(t));
+      history.push(JSON.parse(t));
     } catch {
       bad.push(n + 1);
     }
@@ -1497,12 +1497,8 @@ if (bad.length) console.error(`! ${bad.length} unparseable line(s): ${bad.slice(
 // and it is still fully recoverable by hand: `grep "\"kind\":\"bounce-backfill\""
 // .claude/agent-loop/ledger.jsonl`. A hardcoded second name here would silently
 // stop covering the THIRD tag-only kind someone invents next.
-const backfillTags = [];
-for (let i = rows.length - 1; i >= 0; i--) {
-  if (!rows[i]) continue;
-  if (rows[i].kind === 'invariant-backfill') backfillTags.push(...rows.splice(i, 1));
-  else if (rows[i].kind) rows.splice(i, 1);
-}
+const backfillTags = history.filter(r => r.kind === 'invariant-backfill').reverse();
+const rows = history.filter(r => !r.kind);
 
 // X166 · the invariant ALIAS map — three of the pre-backfill 43 invariants are
 // duplicates of three others, flagged independently by different agents during
@@ -1518,11 +1514,13 @@ const INVARIANT_ALIAS = {
 };
 const canonInvariant = (inv) => INVARIANT_ALIAS[inv] || inv;
 
-const scoped = rows.filter(
-  (r) => (!since || (r.date || '') >= since) && (!laneFilter || r.lane === laneFilter),
-);
+const inScope = r => (!since || (r.date || '') >= since) && (!laneFilter || r.lane === laneFilter);
+const scoped = rows.filter(inScope);
+// Owner answers and hold releases name absolute ledger positions. Resolve the
+// entire history first, then apply the requested lane/date to current rows.
+const currentBoard = () => collapseOpenRows(history, r => Boolean(r.kind));
 
-if (!scoped.length) {
+if (!scoped.length && !openOnly && !argv.includes('--queued')) {
   console.log('No entries match.');
   process.exit(0);
 }
@@ -1733,7 +1731,7 @@ function computeRunsSincePark(scopedRows) {
 // else, a ledger row for that ref carrying `state:'deferred'` — no JSON array
 // entry to hand-edit, no marker to remember to delete.
 if (argv.includes('--queued')) {
-  const { open } = collapseOpenRows(scoped);
+  const open = currentBoard().open.filter(inScope);
   const { runsSincePark } = computeRunsSincePark(scoped);
   const heldNow = (r) => deferredMark(r) && runsSincePark(r) === 0;
   const queued = open.filter((r) => verdictOf(r) === 'queued-next-run' && !heldNow(r));
@@ -1762,7 +1760,10 @@ if (argv.includes('--queued')) {
 // A row is open unless it was built or proven already-fixed. Grouped by lane so
 // he can hand one lane its whole list in a single dispatch.
 if (openOnly) {
-  const { open, refless, collapsed } = collapseOpenRows(scoped);
+  const board = currentBoard();
+  const open = board.open.filter(inScope);
+  const refless = board.refless.filter(inScope);
+  const collapsed = board.collapsed.filter(({ r }) => inScope(r));
   // X171 · JSON EXIT, before any of the human-readable prints below. `--wrap`
   // needs the exact same open set a person reads — every field ever written for
   // the ref, merged — never a re-derivation with its own bugs. Nothing else is
@@ -2125,7 +2126,7 @@ if (byRun) {
 //      as `--open` does, not a second, independently-typed copy of either.
 if (showIndex) {
   const parentRef = (ref) => String(ref || '').replace(/(>dep)+$/, '');
-  const currentOpen = new Set(collapseRows(scoped).open.map(r => normRef(parentRef(r.ref))));
+  const currentOpen = new Set(currentBoard().open.map(r => normRef(parentRef(r.ref))));
   // `CITED` matches a bare `scheduleRules.ts` and a qualified `src/utils/scheduleRules.ts`
   // as two DIFFERENT strings for the same file, depending only on how a lane happened
   // to write the citation — a plain `Set` shows both. Keyed by basename instead,

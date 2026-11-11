@@ -293,6 +293,7 @@ async function handleWhatsAppMessage(
   const threadTs = message.from;
 
   let inputText: string;
+  let typedUserMessage = '';
   let voiceInput = false;
 
   if (message.type === 'ptt' || message.type === 'audio') {
@@ -321,6 +322,11 @@ async function handleWhatsAppMessage(
     }
   } else if (message.body) {
     inputText = message.body.trim();
+    // WhatsApp also uses body for contact cards and other provider data.
+    // Only a sender's own chat text or media caption can name a replacement inbox.
+    if (!message.isForwarded && (message.type === 'chat' || message.hasMedia)) {
+      typedUserMessage = message.body;
+    }
   } else {
     return; // unknown / unsupported message type
   }
@@ -344,6 +350,7 @@ async function handleWhatsAppMessage(
   try {
     const result = await runOrchestrator({
       userMessage: inputText,
+      typedUserMessage,
       conversationHistory: history,
       threadTs,
       channelId,

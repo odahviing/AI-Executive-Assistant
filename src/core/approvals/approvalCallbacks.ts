@@ -310,15 +310,16 @@ function slotSignature(cb: ToolCallback | undefined): string | null {
  *   0. `lead` — the surface's own opening line, when it has one ("X asked again",
  *      "X countered — approve, reject, or counter again?"). Optional; a first
  *      raise has none.
- *   1. `details.honest_hard_reason` (#142c) — checkSlot's owner-viewer label for
+ *   1. A timed booking question identifies the original requester and names
+ *      the effective subject. A counter asks about the amended booking.
+ *   2. `details.honest_hard_reason` (#142c) — checkSlot's owner-viewer label for
  *      a HARD double-book, and/or an unmet in-person ask with the same time's
  *      online verdict (create_approval's re-derivation, tasks/skill.ts), written
- *      ONLY by the code path that PROVED it (never by the model). It LEADS the
- *      ask, above whatever soft framing the prose chose.
- *   2. `askText` — nonmeeting/open-ended context only. Concrete timed meeting
+ *      ONLY by the code path that PROVED it (never by the model).
+ *   3. `askText` — nonmeeting/open-ended context only. Concrete timed meeting
  *      asks use their stored action and proven reason, never duplicate clocks
  *      from model-authored prose.
- *   3. the consequence (v2.9.1) — "If yes → I'll X", verbalized from the stored
+ *   4. the consequence (v2.9.1) — "If yes → I'll X", verbalized from the stored
  *      on_approve with any stored counter merged in exactly as the resolver
  *      merges it, so it always describes the action a ✅ actually replays. Last,
  *      because it says what he is authorizing, not why it needs him.
@@ -389,6 +390,7 @@ export async function composeOwnerAskText(input: {
     : null;
   const countered = !!counter && Object.keys(counter).length > 0;
 
+  let bookingQuestion: string | undefined;
   let consequence: string | null = null;
   let concreteMeeting = false;
   const hasMeetingClock = (action: ToolCallback | undefined): boolean => !!action && (
@@ -408,6 +410,16 @@ export async function composeOwnerAskText(input: {
     concreteMeeting = hasMeetingClock(callbacks.on_approve && counter
       ? { ...callbacks.on_approve, args: { ...callbacks.on_approve.args, ...counter } }
       : callbacks.on_approve);
+    if (concreteMeeting && callbacks.on_approve?.tool === 'create_meeting') {
+      const subject = counter?.subject ?? callbacks.on_approve.args.subject;
+      const requester = current?.requester_name?.trim() || (current?.requester_slack_id ? `<@${current.requester_slack_id}>` : '');
+      const title = typeof subject === 'string' && subject.trim() ? subject.trim() : relayNotice(lang, 'meeting');
+      // A refused owner replacement persists as the effective callback on this
+      // same row. The requester identifies the origin, even after a restart;
+      // it never establishes who supplied the current booking terms.
+      const origin = requester ? relayNotice(lang, 'original_request_from', { target: requester }) : '';
+      bookingQuestion = [origin, relayNotice(lang, 'booking_question', { subject: title })].filter(Boolean).join(' ');
+    }
     const mergedApprove = (countered && counter && callbacks.on_approve)
       ? mergeAmendIntoApprove(callbacks.on_approve, counter, profile)
       : callbacks.on_approve;
@@ -471,7 +483,7 @@ export async function composeOwnerAskText(input: {
   // prose clocks (or invent a reason) while presenting the exact stored action.
   // The request remains pending; this is a preview, never execution authority.
   const reason = hardReason || (concreteMeeting ? relayNotice(lang, 'approval_reason_unavailable') : '');
-  return [repeatHistory, lead, reason, concreteMeeting ? undefined : askText, consequence].filter(Boolean).join('\n\n');
+  return [repeatHistory, lead, bookingQuestion, reason, concreteMeeting ? undefined : askText, consequence].filter(Boolean).join('\n\n');
 }
 
 /**

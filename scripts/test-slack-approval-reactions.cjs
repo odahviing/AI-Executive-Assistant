@@ -108,6 +108,8 @@ for (const reaction of ['white_check_mark', 'x']) test(`SRA-${reaction}: legitim
   const h = harness(); await h.react({ reaction }); assert.equal(h.effects.resolutions.length, 1);
   assert.equal(h.effects.resolutions[0][1].verdict, reaction === 'x' ? 'reject' : 'approve');
   assert.equal(h.effects.resolutions[0][2].resolvedByColleague, false);
+  assert.equal(h.effects.resolutions[0][2].resolvingUserId, 'UOWNER');
+  assert.equal(h.effects.resolutions[0][2].confirmedApprovalReaction === true, reaction === 'white_check_mark');
   assert.equal(h.effects.history.length, 1); assert.equal(h.effects.posts.length + h.effects.directs.length, 0);
 });
 for (const origin of ['dm', 'room']) for (const initiator of ['owner', 'colleague']) test(`SRA-${origin}-origin-${initiator}: private owner approval preserves origin context`, async () => {

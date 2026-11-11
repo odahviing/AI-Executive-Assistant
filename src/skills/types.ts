@@ -97,9 +97,14 @@ export interface SkillContext {
     sourceMessageIndex: number;
     sourceQuote: string;
   }>;
+  /** Whole sender-authored assent to the one pending create in this private
+   * owner thread. The resolver rechecks the observed row before replay. */
+  standaloneBookingApproval?: { requestId: string; requestDetailsJson: string; quote: string };
   /** Actual preceding tool refusal, scoped to its exact action; never supplied
    * by model arguments. Registrar rederives private owner diagnostics itself. */
   approvalRefusalReason?: { action: { tool: string; args: Record<string, unknown> }; reason: string };
+  /** Normalized attendee emails from the approved create_meeting action, scoped to that replay. */
+  approvedBookingAttendeeEmails?: readonly string[];
   profile: UserProfile;
   threadTs: string;
   channelId: string;
@@ -166,21 +171,10 @@ export interface SkillContext {
    * separate meeting. unresolvedNames have existing provenance, not a guessed
    * email identity or permission to include another group's participants. */
   resolvedMeetingAttendeeGroups?: Array<{ emails: string[]; unresolvedNames: string[] }>;
-  /**
-   * v4.4.x (GH#169 revisit) — the CURRENT turn's driving message, verbatim,
-   * before any tool call runs. Unlike conversationHistory (which holds only
-   * PRIOR turns), this is the live text. Exists so resolve_approval's
-   * cross-thread anchor gate (tasks/skill.ts) can ground its "does this
-   * reply actually name the approval" check on what was ACTUALLY said this
-   * turn, never on a tool argument the model authors itself (args.reason) —
-   * the model controls its own arguments, not this field. On a system-
-   * generated turn (scheduled routine/research, `interactive: false`) this
-   * is that run's synthetic prompt text, not a human's words — resolve_approval
-   * only reads it on the owner-typed path, so that distinction doesn't matter
-   * there, but don't repurpose this field as "the owner said X" elsewhere
-   * without checking `interactive` first.
-   */
+  /** Current conversational input, including transport framing or a scheduled run's prompt. */
   currentUserMessage?: string;
+  /** Literal sender text for approval replacement addresses. Orchestrated turns supply an empty string when unavailable. */
+  typedUserMessage?: string;
   /** True for live turns, false for synthetic runs. Absent in direct contexts means unknown. */
   interactive?: boolean;
 }

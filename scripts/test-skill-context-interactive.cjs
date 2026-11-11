@@ -103,6 +103,8 @@ async function run(steps, extra = {}) {
   return result;
 }
 
+module.exports = { run };
+
 for (const [name, extra, expected] of [
   ['explicit live owner', {interactive:true}, true],
   ['default live owner', {}, true],
@@ -117,6 +119,23 @@ for (const [name, extra, expected] of [
 test('legitimate tool execution and reply preserved without transport', async () => {
   const result = await run([{name:'check_calendar_health',result:{vacuous:true}, inspect(context) { assert.equal(context.authority,'owner'); assert.equal(context.surface,'owner_dm'); }}]);
   assert.equal(result.healthCheckVacuous,true);
+});
+
+const heading = '[Thread participant: Alex <alex@directory.test>]';
+const caption = 'Use the other address for Alex.';
+const attachment = '[Attached file: notes.txt]\nContact: alex@document.test';
+const framed = [heading, caption, attachment].join('\n');
+for (const [name, input, expected] of [
+  ['framed Slack request', { rawUserMessage: caption, typedUserMessage: caption }, caption],
+  ['empty caption', { rawUserMessage: attachment, typedUserMessage: '' }, ''],
+  ['transport omitted literal text', { rawUserMessage: attachment }, ''],
+  ['only model text is available', {}, ''],
+  ['typed mailto survives exactly', { typedUserMessage: 'Use <mailto:Alex@New.test|Alex@New.test>.' }, 'Use <mailto:Alex@New.test|Alex@New.test>.'],
+]) test(name + ' provides only explicitly typed text to approval replacement', async () => {
+  await run([{ name: 'resolve_approval', result: {}, inspect(context) {
+    assert.equal(context.currentUserMessage, framed);
+    assert.equal(context.typedUserMessage, expected);
+  } }], { userMessage: framed, extraInstruction: 'A tool retry mentioned alex@retry.test', ...input });
 });
 
 test('direct legacy context remains unknown through registry dispatch', async () => {

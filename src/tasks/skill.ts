@@ -2168,7 +2168,8 @@ Binding — use the explicit id token or "← THIS THREAD" in PENDING APPROVALS.
         // through to the namedMatch check — an unnamed bare ack from a room
         // still refuses to bind, same protection the DM path gets.
         let contextualDecisionDetails: string | null | undefined;
-        if (context.authority === 'owner' && verdict !== 'amend') {
+        let confirmedStandaloneApproval = false;
+        if (context.authority === 'owner' && (verdict !== 'amend' || context.standaloneBookingApproval)) {
           const ownerRow = getRequest(requestId);
           if (ownerRow) {
             // Other approvals currently awaiting the owner, excluding this
@@ -2211,6 +2212,18 @@ Binding — use the explicit id token or "← THIS THREAD" in PENDING APPROVALS.
               && otherOpenApprovals.some(r => r.owner_dm_thread_ts === ownerRow.owner_dm_thread_ts);
             const dailyThreadAnchored = inDailyThread && !ambiguousDailyThread;
             const anchored = messageAnchored || dailyThreadAnchored;
+            const assent = context.standaloneBookingApproval;
+            if (assent && context.interactive === true && context.surface === 'owner_dm'
+              && context.channel === 'slack' && context.senderRole === 'owner'
+              && context.userId === profile.user.slack_user_id && ownerRow.owner_user_id === context.userId
+              && typeof assent.quote === 'string' && assent.quote.trim() && assent.quote === context.typedUserMessage) {
+              if (!anchored || assent.requestId !== requestId || assent.requestDetailsJson !== ownerRow.details_json) {
+                return { ok: false, needs_clarification: true,
+                  reason: 'This reply accepts only the displayed booking. Resolve that exact pending approval without replacement data.' };
+              }
+              confirmedStandaloneApproval = true;
+              contextualDecisionDetails = ownerRow.details_json;
+            }
             // v4.4.x (GH#169/#176, REVISITED per owner ruling — the first cut
             // wasn't trusted and was sent back) — a reply outside the anchor
             // thread still binds when the OWNER'S OWN message this turn
@@ -2331,7 +2344,7 @@ Binding — use the explicit id token or "← THIS THREAD" in PENDING APPROVALS.
                 } catch { /* Malformed or unresolved action cannot authorize replay. */ }
               }
             }
-            if (!anchored && !namedMatch && !chronoAnchor && !contextualAnchor) {
+            if (verdict !== 'amend' && !anchored && !namedMatch && !chronoAnchor && !contextualAnchor) {
               logger.warn('resolve_approval — bare ack not anchored to the approval thread; refusing to bind', {
                 requestId, verdict, threadTs: context.threadTs,
                 terminalDm: ownerRow.terminal_dm_msg_ts, ownerDaily: ownerRow.owner_dm_thread_ts,
@@ -2417,7 +2430,13 @@ Binding — use the explicit id token or "← THIS THREAD" in PENDING APPROVALS.
           const result = await resolveRequest(requestId, decision, {
             app: context.app,
             profile: context.profile,
+            // Orchestrated turns supply an empty string when the sender's own
+            // words are unavailable. Only direct callers can omit this field.
+            ownerDecisionMessage: context.interactive === true && context.authority === 'owner'
+              && context.userId === profile.user.slack_user_id
+              ? context.typedUserMessage ?? context.currentUserMessage : undefined,
             ...(contextualDecisionDetails !== undefined ? { expectedOwnerDecisionDetails: contextualDecisionDetails } : {}),
+            confirmedStandaloneApproval,
             // v3.1.3 — the colleague-path is permitted only for amending
             // approvals; that's the one case where a reject/amend should
             // bounce back to the owner. An OWNER reject must close.

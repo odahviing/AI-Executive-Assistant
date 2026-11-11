@@ -61,7 +61,8 @@ export function registerInboundReplayHandler(ctx: SlackAppContext): void {
     // on every path that reaches the branches below.
     const files = (message.files as Array<Record<string, unknown>> | undefined) ?? [];
 
-    let text = (message.text as string) ?? '';
+    const typedText = (message.text as string) ?? '';
+    let text = typedText;
     let voiceInput = false;
 
     const audioFile = files.find(f => typeof f.mimetype === 'string'
@@ -161,7 +162,7 @@ export function registerInboundReplayHandler(ctx: SlackAppContext): void {
     // Preserve explicit mention provenance before text normalization. Other
     // MPIM candidates pass through the same live addressee/continuation gate.
     await processMessage({
-      senderId, text: resolvedText, channelId, ts, threadTs: postThreadTs,
+      senderId, text: resolvedText, typedText, channelId, ts, threadTs: postThreadTs,
       framing: groupContext ? { prefix: groupContext } : undefined,
       say: catchUpSay as unknown as Function, client: app.client,
       isChannel: isChannel ?? false, isMpim: isMpim ?? false,
@@ -240,7 +241,8 @@ export function registerDmHandler(ctx: SlackAppContext): void {
             } catch (_) {}
           };
 
-          const caption = ((message as any).text as string | undefined)?.trim() ?? '';
+          const typedText = message.text ?? '';
+          const caption = typedText.trim();
 
           // v2.2.5 (D) — route file uploads through the orchestrator. The
           // previous flow auto-classified every doc and either filed it as KB
@@ -287,14 +289,14 @@ export function registerDmHandler(ctx: SlackAppContext): void {
             const trunc = d.truncated ? `\n[…file truncated at ${FILE_TEXT_CAP} chars]` : '';
             return `\n\n[Attached file: ${d.label}]\n${d.text}${trunc}`;
           }).join('');
-          const augmentedText = caption
-            ? `${caption}${fileBlocks}`
-            : `[Owner uploaded ${parsedDocs.length === 1 ? 'a file' : `${parsedDocs.length} files`} with no caption.]${fileBlocks}`;
-
-          // Route through processMessage like any other DM turn.
           await processMessage({
             senderId: message.user as string,
-            text: augmentedText,
+            text: caption,
+            typedText,
+            framing: {
+              prefix: caption ? undefined : `[Owner uploaded ${parsedDocs.length === 1 ? 'a file' : `${parsedDocs.length} files`} with no caption.]`,
+              suffix: fileBlocks,
+            },
             channelId,
             ts,
             threadTs,
@@ -385,7 +387,7 @@ export function registerDmHandler(ctx: SlackAppContext): void {
             logger.info('Voice message transcribed', { preview: text.slice(0, 80), index: i });
             // Keep the voice marker with the transcript. processMessage persists
             // the text via appendToConversation, so no pre-append is needed.
-            await processMessage({ senderId: message.user!, text: `[Voice message]: ${text}`, channelId, ts, threadTs, say: sayFn, client, isChannel: false, isMpim: false, voiceInput: true });
+            await processMessage({ senderId: message.user!, text: `[Voice message]: ${text}`, typedText: message.text ?? '', channelId, ts, threadTs, say: sayFn, client, isChannel: false, isMpim: false, voiceInput: true });
           } catch (err) {
             logger.error('Voice message handling error', { err: String(err), index: i });
           }
@@ -495,6 +497,7 @@ export function registerDmHandler(ctx: SlackAppContext): void {
       processMessage({
         senderId: message.user!,
         text: resolvedText,
+        typedText: message.text!,
         channelId,
         ts,
         threadTs,
@@ -743,6 +746,7 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
       processMessage({
         senderId: event.user as string,
         text: resolvedText,
+        typedText: event.text as string,
         // Declared, never fused: the preamble is Maelle's own instructions to
         // herself, and the owner's shadow mirror renders `text` to him verbatim.
         framing: { prefix: groupContext },
@@ -892,6 +896,7 @@ export function registerReactionHandler(ctx: SlackAppContext): void {
           : { verdict: 'reject' as const, reason: `Owner reacted :${reaction}:` };
         const result = await resolveRequest(approval.id, decision, {
           app, profile, resolvedByColleague: false, resolvingUserId: reactor,
+          confirmedApprovalReaction: verdict === 'approve',
         }).catch(err => {
           logger.warn('reaction_added approval resolution threw', { approvalId: approval.id, err: String(err).slice(0, 200) });
           return { ok: false, reason: 'The outcome could not be confirmed.' };
@@ -1274,6 +1279,7 @@ export function registerMentionHandler(ctx: SlackAppContext): void {
       processMessage({
         senderId: event.user!,
         text: resolvedText,
+        typedText: event.text,
         // Four machine blocks ride this turn — the thread-action directive, the
         // MPIM preamble, the participant roster, and any attached file's text.
         // All declared as framing: the model needs them, a person reading a

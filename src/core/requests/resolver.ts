@@ -112,6 +112,13 @@ export type ResolveVerdict =
   | { verdict: 'cancel'; reason?: string };
 
 export interface ResolveContext {
+  /** Verbatim text of the authenticated owner's current interactive decision. */
+  ownerDecisionMessage?: string;
+  /** A whole-message affirmative from the bound owner's existing classifier.
+   * The caller supplies the classified request snapshot for the lock check. */
+  confirmedStandaloneApproval?: boolean;
+  /** Set only by the authenticated reaction handler for this bound approval. */
+  confirmedApprovalReaction?: boolean;
   app?: App;
   profile: UserProfile;
   /** Contextual attribution's exact action snapshot. Rechecked under the
@@ -326,6 +333,13 @@ async function resolveRequestInner(
     return { ok: false, request_id: requestId, state: row.state, effect: 'contextual_decision_changed',
       reason: 'This request changed after the contextual decision was understood. Review the current action before resolving it.' };
   }
+  if (ctx.confirmedStandaloneApproval && (row.kind !== 'approval' || ctx.resolvingUserId !== row.owner_user_id
+      || typeof ctx.expectedOwnerDecisionDetails !== 'string' || !ctx.ownerDecisionMessage?.trim()
+      || verdict.verdict !== 'approve' || (verdict.data !== undefined && (!verdict.data || typeof verdict.data !== 'object'
+        || Array.isArray(verdict.data) || Object.keys(verdict.data).length > 0)))) {
+    return { ok: false, request_id: requestId, state: row.state, effect: 'approve_needs_exact_plan',
+      reason: 'This reply accepts only the displayed booking. Resolve that exact pending approval without replacement data.' };
+  }
   // v2.9.1 — `awaiting_colleague` is the amending state (owner counter relayed
   // to requester); requester's response resolves the request. Both states are
   // valid entry points for resolveRequest.
@@ -459,6 +473,7 @@ async function resolveRequestInner(
       setImmediate(async () => {
         try {
           await runDeferredAction({
+            verdict: 'reject',
             ownerUserId: row.owner_user_id,
             profile: ctx.profile,
             tool,
@@ -545,7 +560,7 @@ async function resolveRequestInner(
       logger.info('resolveRequest — amend run_with_amend, firing on_approve with merged args', {
         id: requestId, tool: merged.tool, round: amendRound,
       });
-      return runApproveCallback(row, merged, ctx, { mergedFromAmend: true, amendRound });
+      return runApproveCallback(row, merged, ctx, { mergedFromAmend: true, amendRound, suppliedRoster: Object.hasOwn(verdict.counter, 'attendees') });
     }
 
     // relay_to_requester (default) → state flips to awaiting_colleague,
@@ -763,6 +778,7 @@ async function resolveRequestInner(
 
   if (effectiveApprove) {
     return runApproveCallback(row, effectiveApprove, ctx, {
+      suppliedRoster: !!approveData.args && typeof approveData.args === 'object' && Object.hasOwn(approveData.args, 'attendees'),
       mergedFromAmend: !!hasCounter,
       amendRound: (detailsAll.amend_round as number | undefined) ?? 0,
     });
@@ -803,6 +819,287 @@ async function resolveRequestInner(
   };
 }
 
+type BookingContact = Record<string, unknown>;
+
+function bookingContact(value: unknown): BookingContact {
+  if (typeof value === 'string') return value.includes('@') ? { email: value } : { name: value };
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as BookingContact : {};
+}
+
+function normalizedContactValue(value: unknown): string {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function isBookingAddress(value: string): boolean {
+  return /^[\p{L}\p{M}\p{N}!#$%&'*+/=?^_{|}~.-]+@[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?(?:\.[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?)+$/u.test(value);
+}
+
+type OwnerRecipient = { email?: string; memberId?: string; name?: string };
+
+type ParsedRecipient = { name: string; email?: string; memberId?: string };
+
+function parseRecipientLine(line: string, previous: BookingContact[]): ParsedRecipient | null {
+  line = line.trim().replace(/<mailto:([^|<>]+)(?:\|([^<>]+))?>/gi, (link, target: string, label?: string) =>
+    isBookingAddress(target) && (!label || normalizedContactValue(label) === normalizedContactValue(target)) ? '<'+target+'>' : link);
+  line = line.replace(/^(.+?) &lt;(<[^<>]+>)&gt;$/, '$1 $2');
+  const named = /^([^<>@\r\n]+?)\s+<([^<>]+)>$/u.exec(line);
+  const value = (named?.[2] ?? line.replace(/^<([^<>]+)>$/, '$1')).trim();
+  const member = /^@([UW][A-Z0-9]+)(?:\|[^<>|]+)?$/.exec(value);
+  const email = normalizedContactValue(value);
+  if (!member && !isBookingAddress(email)) return null;
+  const display = named?.[1].trim() ?? '';
+  const quoted = /^"([^"]+)"$/.exec(display);
+  const name = quoted?.[1] ?? display;
+  if (name && !quoted && !/^[\p{L}\p{M}\p{N}'’-]+$/u.test(name)
+      && !previous.some(person => normalizedContactValue(person.name) === normalizedContactValue(name))) return null;
+  return member ? { name, memberId: member[1] } : { name, email };
+}
+
+/** Accept only complete recipient answers. A mailbox embedded in prose may
+ * identify a sender, a rejected option, or quoted material. */
+function ownerRecipientSelections(message: string, proposed: BookingContact[], previous: BookingContact[]): Map<number, OwnerRecipient> | null {
+  const selections = new Map<number, OwnerRecipient>();
+  if (!message.includes('@')) return selections;
+  const lines = message.trim().split(/\r?\n/);
+  const used = new Set<string>();
+  for (const line of lines) {
+    const choice = parseRecipientLine(line, previous);
+    if (!choice) return null;
+    const { email, memberId } = choice;
+    const name = normalizedContactValue(choice.name);
+    const key = memberId ?? email!;
+    if (used.has(key)) return null;
+    used.add(key);
+    let candidates: number[];
+    if (name) {
+      candidates = proposed.flatMap((person, i) => {
+        const previousName = normalizedContactValue(person.name);
+        return (previousName === name || (!previousName && !!email && normalizedContactValue(person.email) === email)) ? [i] : [];
+      });
+    } else if (memberId) {
+      candidates = proposed.flatMap((person, i) => person.slack_id === key ? [i] : []);
+    } else {
+      // A bare mailbox can only answer for a single already-bound person.
+      if (lines.length !== 1 || previous.length !== 1 || proposed.length !== 1) return null;
+      const prior = previous[0], next = proposed[0];
+      const priorName = normalizedContactValue(prior.name);
+      const nextName = normalizedContactValue(next.name);
+      const priorEmail = normalizedContactValue(prior.email);
+      const samePerson = nextName ? !!priorName && priorName === nextName : !!priorEmail && priorEmail === normalizedContactValue(next.email);
+      if (!samePerson) return null;
+      candidates = [0];
+    }
+    if (candidates.length !== 1 || selections.has(candidates[0])) return null;
+    selections.set(candidates[0], choice);
+  }
+  return selections;
+}
+
+/** Compare the resolved identity multiset, ignoring representation and order.
+ * The prior effective roster includes any already-presented counter. */
+function unchangedBookingGroup(roster: BookingContact[], previous: unknown[]): boolean {
+  const keys = (people: unknown[]) => people.map(value => {
+    const person = bookingContact(value);
+    const email = normalizedContactValue(person.email);
+    return [normalizedContactValue(person.name), email || normalizedContactValue(person.slack_id)];
+  }).map(identity => JSON.stringify(identity)).sort();
+  return JSON.stringify(keys(roster)) === JSON.stringify(keys(previous));
+}
+
+/** Interpret a full roster only while the pending request expressly asks for
+ * one. The owner's complete answer builds the candidates even on a bare replay. */
+function fullBookingRosterAnswer(message: string, previous: BookingContact[], addressRequired: boolean): BookingContact[] | null {
+  const lines = message.trim().split(/\r?\n/);
+  const names = new Set<string>();
+  const rows: BookingContact[] = [];
+  for (const line of lines) {
+    if (message.includes('@')) {
+      const choice = parseRecipientLine(line, previous);
+      if (!choice) return null;
+      // A bare mailbox needs exactly one previously bound person. Bare member
+      // mentions with an explicit callback are verified against that callback.
+      if (!choice.name && (lines.length !== 1 || previous.length !== 1)) return null;
+      const name = choice.name || previous[0]?.name;
+      const key = normalizedContactValue(name);
+      if (key && names.has(key)) return null;
+      names.add(key);
+      rows.push({ ...(name ? {name} : {}), ...(choice.memberId ? { slack_id: choice.memberId } : {email: choice.email}) });
+    } else {
+      if (addressRequired) return null;
+      const match = /^[-•]\s+([^<>@\r\n]+)$/u.exec(line.trim());
+      if (!match) return null;
+      const quoted = /^"([^"]+)"$/.exec(match[1].trim());
+      const name = quoted?.[1] ?? match[1].trim();
+      const key = normalizedContactValue(name);
+      const prior = previous.filter(person => normalizedContactValue(person.name) === key);
+      if (names.has(key) || prior.length > 1 || (!prior.length && !quoted && !/^[\p{L}\p{M}\p{N}'’-]+$/u.test(name))) return null;
+      names.add(key);
+      rows.push(prior[0] ?? { name });
+    }
+  }
+  return rows;
+}
+
+/** An inbox question keeps the displayed group. A fully named answer can
+ * identify one replacement by elimination once every other slot is unchanged.
+ * A supplied callback must describe those same slots, in any order. */
+function bindBookingIdentityAnswer(
+  previous: BookingContact[], answer: BookingContact[], proposed: BookingContact[],
+): BookingContact[] | null {
+  const norm = normalizedContactValue;
+  if (!previous.length || answer.length !== previous.length || proposed.length !== previous.length) return null;
+  const bySlot = new Map<BookingContact, BookingContact>();
+  let replacement: BookingContact | undefined;
+  for (const choice of answer) {
+    const matches = previous.filter(person => norm(person.name) ? norm(person.name) === norm(choice.name)
+      : norm(person.email) === norm(choice.email));
+    if (matches.length > 1 || (matches[0] && bySlot.has(matches[0]))) return null;
+    if (matches.length) bySlot.set(matches[0], choice);
+    else {
+      if (replacement) return null;
+      replacement = choice;
+    }
+  }
+  if (replacement) {
+    const remaining = previous.filter(person => !bySlot.has(person));
+    if (remaining.length !== 1 || [...bySlot].some(([person, choice]) => norm(person.email) !== norm(choice.email))) return null;
+    bySlot.set(remaining[0], replacement);
+  }
+  const result: BookingContact[] = [];
+  for (const row of proposed) {
+    const name = norm(row.name), email = norm(row.email);
+    const matches = [...bySlot].filter(([old, choice]) => name ? name === norm(old.name) || name === norm(choice.name)
+      : !!email && (email === norm(old.email) || email === norm(choice.email)));
+    if (matches.length !== 1) return null;
+    const [old, choice] = matches[0];
+    if ((email && email !== norm(old.email) && email !== norm(choice.email)) || (row.slack_id && row.slack_id !== old.slack_id)) return null;
+    if (previous.some(other => other !== old && norm(other.email) === norm(choice.email))) return null;
+    bySlot.delete(old);
+    const bound: BookingContact = { ...old, name: choice.name, email: choice.email };
+    if (norm(old.email) !== norm(choice.email)) delete bound.slack_id;
+    result.push(bound);
+  }
+  return result;
+}
+
+/** A name-only confirmation cannot select between the saved external inbox
+ * and another genuine directory identity. A directory miss is distinct from
+ * competing matches; a newly named person still needs normal lookup later. */
+function ambiguousBookingNames(roster: BookingContact[]): boolean {
+  const { findPersonByName } = require('../../db/people') as typeof import('../../db/people');
+  return roster.some(person => {
+    const name = normalizedContactValue(person.name);
+    if (!name) return true;
+    let lookup: ReturnType<typeof findPersonByName>;
+    try { lookup = findPersonByName(name); }
+    catch { return true; }
+    const saved = normalizedContactValue(person.email);
+    return lookup.status === 'ambiguous' || (lookup.status === 'matched' && !!saved
+      && normalizedContactValue(lookup.match?.email) !== saved);
+  });
+}
+
+// Textual assent is bound to the owner's exact pending action. Keep the
+// pre-existing literal shortcut for callers that bypass classification.
+function confirmedShownBooking(ctx: ResolveContext, row: RequestRow): boolean {
+  if (ctx.ownerDecisionMessage === undefined) {
+    return (ctx.confirmedApprovalReaction === true && ctx.resolvingUserId === row.owner_user_id)
+      || (ctx.resolvedByColleague === true && row.state === 'awaiting_colleague'
+        && !!ctx.resolvingUserId && ctx.resolvingUserId === row.requester_slack_id);
+  }
+  if (ctx.confirmedStandaloneApproval === true) return true;
+  const answer = ctx.ownerDecisionMessage.trim().toLowerCase().replace(/[.!]+$/u, '');
+  return answer === 'yes' || answer === 'כן';
+}
+
+/** Restore a uniquely approved recipient on partial changes. New name-only
+ * invitees use normal directory resolution; new addresses need a bound answer. */
+function replacementBookingRoster(entries: unknown[], previous: unknown[], ownerMessage: string, requireFullAnswer: boolean): BookingContact[] | null {
+  const norm = normalizedContactValue;
+  const proposed = entries.map(bookingContact);
+  const shown = previous.map(bookingContact);
+  const selected = ownerRecipientSelections(ownerMessage, proposed, shown);
+  if (!selected || (requireFullAnswer && (!selected.size || selected.size !== proposed.length))) return null;
+  const roster: BookingContact[] = [];
+  const scopedCorrection = selected.size > 0 && !requireFullAnswer;
+  const accountedFor = new Set<BookingContact>();
+  let addsNamedRecipient = false;
+  for (const [index, entry] of proposed.entries()) {
+    const next = { ...entry };
+    const name = norm(next.name);
+    const email = norm(next.email);
+    const slackId = typeof next.slack_id === 'string' ? next.slack_id.trim() : '';
+    const prior = shown.filter(person => name ? norm(person.name) === name : !!email && norm(person.email) === email);
+    const choice = selected.get(index);
+    if (scopedCorrection) {
+      if (prior.length > 1 || (prior.length && accountedFor.has(prior[0]))) return null;
+      if (prior.length) {
+        // A bare new Slack member identifies a destination, but cannot say
+        // which member of a group the owner means to replace.
+        if (choice?.memberId && !choice.name && shown.length > 1 && prior[0].slack_id !== choice.memberId) return null;
+        accountedFor.add(prior[0]);
+      } else {
+        if (!choice) return null;
+        addsNamedRecipient = true;
+      }
+    }
+    delete next.slack_id;
+    delete next.email;
+    if (choice) {
+      let chosenEmail = choice.email;
+      if (choice.memberId) {
+        if (slackId && slackId !== choice.memberId && !prior.some(person => person.slack_id === slackId)) return null;
+        const { getPersonMemory } = require('../../db/people') as typeof import('../../db/people');
+        const member = getPersonMemory(choice.memberId);
+        chosenEmail = norm(member?.email);
+        if (!isBookingAddress(chosenEmail)) return null;
+        next.name = member?.name || chosenEmail;
+      } else if (slackId && !prior.some(person => person.slack_id === slackId)) return null;
+      if (email && email !== chosenEmail && !prior.some(person => norm(person.email) === email)) return null;
+      next.email = chosenEmail;
+    } else if (!name) {
+      const names = new Set(prior.map(person => norm(person.name)).filter(Boolean));
+      const memberIds = new Set(prior.map(person => person.slack_id).filter(Boolean));
+      if (!isBookingAddress(email) || !prior.length || names.size > 1 || memberIds.size > 1
+          || (slackId && !memberIds.has(slackId))) return null;
+      const carried = prior.find(person => norm(person.name)) ?? prior[0];
+      next.email = carried.email;
+      if (norm(carried.name)) next.name = carried.name;
+    } else {
+      const addresses = new Set(prior.map(person => norm(person.email)));
+      const ids = new Set(prior.map(person => person.slack_id).filter(Boolean));
+      if (addresses.size > 1 || ids.size > 1 || (slackId && !ids.has(slackId))) return null;
+      const carried = prior.find(person => isBookingAddress(norm(person.email)));
+      if (carried) {
+        if (email && email !== norm(carried.email)) return null;
+        next.email = carried.email;
+      } else if (email || name.includes('@') || (selected.size && !prior.length)) return null;
+    }
+    if (scopedCorrection && prior.length) {
+      // Preserve the approved row's role and other fields. Only the owner's
+      // selected address (and the verified name for a new member) can change.
+      const saved = { ...prior[0] };
+      if (choice) {
+        saved.email = next.email;
+        if (choice.memberId) saved.name = next.name;
+        const retainsMember = choice.memberId ? choice.memberId === saved.slack_id : norm(saved.email) === norm(prior[0].email);
+        if (!retainsMember) delete saved.slack_id;
+      }
+      roster.push(saved);
+    } else roster.push(next);
+  }
+  if (scopedCorrection) {
+    const omitted = shown.filter(person => !accountedFor.has(person));
+    if (addsNamedRecipient && omitted.length) return null;
+    roster.push(...omitted);
+  }
+  if (selected.size) {
+    const addresses = roster.map(person => norm(person.email)).filter(Boolean);
+    if (new Set(addresses).size !== addresses.length) return null;
+  }
+  return roster;
+}
+
 /**
  * Shared "fire on_approve + close + notify" helper. Used by direct approve
  * verdicts AND by amend's run_with_amend mode (which routes through this
@@ -812,7 +1109,7 @@ async function runApproveCallback(
   row: RequestRow,
   approveCallback: ToolCallback,
   ctx: ResolveContext,
-  meta: { mergedFromAmend: boolean; amendRound: number },
+  meta: { mergedFromAmend: boolean; amendRound: number; suppliedRoster: boolean },
 ): Promise<ResolveResult> {
   const { tool } = approveCallback;
   let args = approveCallback.args;
@@ -831,6 +1128,70 @@ async function runApproveCallback(
   try { priorOutcome = JSON.parse(row.outcome_json ?? '{}'); } catch { /* no recorded result */ }
   if (priorOutcome.verified === false && priorOutcome.replayed) {
     return closeUnconfirmedExecution(row, ctx, String(priorOutcome.replayed));
+  }
+
+  const decidedDetails = parseDetails<Record<string, unknown>>(row) ?? {};
+  let storedAction = extractCallbacks(decidedDetails).on_approve;
+  if (storedAction && decidedDetails.counter && typeof decidedDetails.counter === 'object') {
+    storedAction = mergeAmendIntoApprove(storedAction, decidedDetails.counter as Record<string, unknown>, ctx.profile);
+  }
+  const previousRoster = storedAction?.tool === 'create_meeting' ? storedAction.args.attendees : undefined;
+  const recipientField = 'booking_attendee_identity';
+  const missing = Array.isArray(decidedDetails.missing_fields) ? decidedDetails.missing_fields : [];
+  const groupField = 'booking_attendee_roster';
+  const needsRecipients = missing.includes(recipientField);
+  const needsGroup = missing.includes(groupField);
+  const held = needsRecipients || needsGroup;
+  const ownerMessage = ctx.ownerDecisionMessage ?? '';
+  const previous = Array.isArray(previousRoster) ? previousRoster.map(bookingContact) : [];
+  const addressing = ownerMessage.includes('@');
+  const shownAssent = confirmedShownBooking(ctx, row);
+  if (held || (tool === 'create_meeting' && (addressing || (previous.length && !shownAssent)
+      || JSON.stringify(args.attendees) !== JSON.stringify(previousRoster)))) {
+    const fullAnswer = held ? fullBookingRosterAnswer(ownerMessage, previous, needsRecipients) : null;
+    let entries = needsGroup && fullAnswer && !meta.suppliedRoster ? fullAnswer : args.attendees;
+    if (needsRecipients && !needsGroup && Array.isArray(entries)) {
+      if (entries.length !== previous.length) entries = null;
+      else if (fullAnswer?.every(person => person.name && person.email)) {
+        entries = bindBookingIdentityAnswer(previous, fullAnswer, entries.map(bookingContact));
+      }
+    }
+    const roster = tool === 'create_meeting' && Array.isArray(entries)
+      ? replacementBookingRoster(entries, previous, ownerMessage, needsRecipients || (needsGroup && addressing)) : null;
+    const sameGroup = roster && unchangedBookingGroup(roster, previous);
+    const confirmedNames = !!fullAnswer && !!roster && !addressing && !needsRecipients &&
+      unchangedBookingGroup(fullAnswer.map(person => ({name:person.name})), roster.map(person => ({name:person.name})));
+    const competingNames = confirmedNames && ambiguousBookingNames(roster!);
+    const groupUnconfirmed = roster && !addressing && (needsGroup || !sameGroup) && !confirmedNames;
+    // A model's approve verdict is insufficient to interpret a substantive
+    // owner reply as assent to the original addressee. This also covers an
+    // unnamed reference ("that person") and a callback that repeats old terms.
+    const unconfirmedIdentity = !held && !addressing && !shownAssent && previous.length > 0 && sameGroup;
+    if (!roster || groupUnconfirmed || competingNames || unconfirmedIdentity) {
+      // Leave the executable terms untouched. Recording the missing answer on
+      // the request prevents a later Yes or reaction from releasing an old inbox.
+      const field = !competingNames && (groupUnconfirmed || (needsGroup && !addressing && !needsRecipients)) ? groupField : recipientField;
+      const fields = new Set(missing);
+      fields.add(field);
+      // A new unverified invitee can require both the complete group and its
+      // exact inboxes. Persist only the questions, never model-proposed terms.
+      if (!held && !roster && Array.isArray(args.attendees) && (args.attendees.length !== previous.length || args.attendees.some(value => {
+        const name = normalizedContactValue(bookingContact(value).name);
+        return name && !previous.some(prior => normalizedContactValue(prior.name) === name);
+      }))) fields.add(groupField);
+      if (fields.size !== missing.length) updateRequest(row.id, { details: { ...decidedDetails, missing_fields: [...fields] } });
+      if (field === groupField) return { ok: false, request_id: row.id, state: row.state, effect: 'approve_needs_attendee_identity',
+        reason: 'Who should I invite? Confirm the complete list with one bulleted name per line, for example “- Alex”. For exact addresses, send one Name <email> per line.' };
+      if (fields.has(groupField)) return { ok: false, request_id: row.id, state: row.state, effect: 'approve_needs_attendee_identity',
+        reason: 'Who should I invite? List everyone for the changed booking, one Name <email> per line. Put a new full name in double quotes if it contains spaces. I will invite only the people you list.' };
+      const participants = previous.length ? previous : args.attendees;
+      const names = Array.isArray(participants) ? participants.map(value => bookingContact(value).name)
+        .filter((name): name is string => typeof name === 'string' && !!name.trim() && name.length <= 80 && !/[\r\n<>@]/.test(name)) : [];
+      const who = names.length > 0 && names.length <= 4 ? [...new Set(names)].join(', ') : 'each attendee in question';
+      return { ok: false, request_id: row.id, state: row.state, effect: 'approve_needs_attendee_identity',
+        reason: `Which inbox should I use for ${who}? Reply with one Name <email> per person on the displayed booking, including the unchanged invitees. Put a new full name in double quotes if it contains spaces.` };
+    }
+    args = { ...args, attendees: roster };
   }
 
   const proposalExpiry = boundApprovalExpiry('9999-12-31T00:00:00Z', { callbacks: { on_approve: approveCallback } }, ctx.profile);
@@ -898,13 +1259,13 @@ async function runApproveCallback(
   // amendments must survive an unavailable executor and a later bare retry.
   // Reuse the row's existing callback shape; counter_history retains the audit
   // trail while the accepted counter is absorbed into the frozen action.
-  const decidedDetails = parseDetails<Record<string, unknown>>(row) ?? {};
   const decidedAction = { tool, args: { ...args } };
-  let storedAction = extractCallbacks(decidedDetails).on_approve;
-  if (storedAction && decidedDetails.counter && typeof decidedDetails.counter === 'object') {
-    storedAction = mergeAmendIntoApprove(storedAction, decidedDetails.counter as Record<string, unknown>, ctx.profile);
-  }
-  if (JSON.stringify(storedAction) !== JSON.stringify(decidedAction)) {
+  if (held || JSON.stringify(storedAction) !== JSON.stringify(decidedAction)) {
+    if (held) {
+      const remaining = missing.filter(field => field !== recipientField && field !== groupField);
+      if (remaining.length) decidedDetails.missing_fields = remaining;
+      else delete decidedDetails.missing_fields;
+    }
     const storedCallbacks = decidedDetails.callbacks as Record<string, unknown> | undefined;
     if (storedCallbacks?.on_approve) {
       decidedDetails.callbacks = { ...storedCallbacks, on_approve: decidedAction };
@@ -941,6 +1302,7 @@ async function runApproveCallback(
   let replayResult: Record<string, unknown> | undefined;
   try {
     replayResult = await runDeferredAction({
+      verdict: 'approve',
       ownerUserId: row.owner_user_id,
       profile: ctx.profile,
       tool,

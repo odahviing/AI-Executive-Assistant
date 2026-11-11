@@ -1,3 +1,19 @@
+## 5.4.2 — Meeting approvals keep the selected recipients
+
+A booking approval now carries the selected attendee addresses through to the calendar request. When a colleague asks for a booking, the owner's approval card shows who made the request and which meeting the owner is deciding on.
+
+### Fixed
+- Preserve an explicitly selected inbox through approval, a retry and calendar request construction. Keep an ambiguous recipient decision open for clarification.
+- Use the owner's typed reply and the pending request to recognize a standalone booking approval. Keep corrections, questions and competing requests separate from assent.
+- Group shared availability conflicts while retaining the details of each offered slot. Distinguish a confirmed booking from a calendar search or an unfinished booking when generating a fallback reply.
+
+### Changed
+- Scheduling instructions distinguish separately searched meetings from a jointly validated plan, keep confirmed work separate from outstanding decisions, and reserve booking details for the stage that needs them. Final phrasing still depends on the model.
+
+### Framework
+- Refresh the approval and rejection source references in the release checklist's Golden paths.
+- Preserve recorded owner decisions when generating the open and queued Workshop reports.
+
 ## 5.4.1 — Meeting follow-ups and clearer scheduling replies
 
 Maelle gives meeting replies more precise clock, date and availability context. Standalone greetings and thanks in private Slack conversations can close the exchange without reviving an old booking.

@@ -43,7 +43,7 @@ async function run(steps, options = {}) {
   });
   const deps = {
     'node:util': require('node:util'), 'luxon': { DateTime }, '../../utils/logger': logger,
-    '../../utils/detectMessageLanguage': { detectMessageLanguage: () => 'English' },
+    '../../utils/detectMessageLanguage': { detectMessageLanguage: load('src/utils/detectMessageLanguage.ts', {}).detectMessageLanguage },
     '../../skills/registry': { WRITE_TOOLS: new Set(), executeSkillTool: async name => {
       const next = steps[modelCalls - 1]; executions++; assert.equal(name, next.name);
       return next.execute ? await next.execute() : structuredClone(next.result);
@@ -61,6 +61,7 @@ async function run(steps, options = {}) {
       turnSenderRole: 'owner', turnPersonSlackId: 'U_OWNER', socialActive: false,
       socialClassification: { kind: 'task', conversation_state: 'closing' }, resolvedMeetingAttendees: [],
       availabilityPrecheckToolSummaries: [] }) },
+    '../../utils/offeredSlotsStash': { clearOfferedSlots() {} },
     '../../utils/turnCache': { withTurnCache: fn => fn() },
     '../../utils/rateLimit': { checkAndRecord: () => ({ allowed: true }) },
     '../../utils/toolCallCache': { lookupRecentToolCall: () => null, recordToolCall() {} },
@@ -70,7 +71,7 @@ async function run(steps, options = {}) {
     '../../utils/closeLoopOnOwnerHandled': { closeLoopOnOwnerHandled: async () => ({ scanned: false }) },
   };
   const orchestrator = load('src/core/orchestrator/index.ts', deps);
-  const result = await orchestrator.runOrchestrator({ userMessage: 'Give Chris a heads-up', conversationHistory: [],
+  const result = await orchestrator.runOrchestrator({ userMessage: options.text ?? 'Give Chris a heads-up', conversationHistory: [],
     threadTs: 'T1', channelId: 'D1', userId: 'U_OWNER', senderRole: 'owner', channel: 'slack',
     authority: 'owner', surface: 'owner_dm', profile });
   await new Promise(r => setImmediate(r));
@@ -100,7 +101,8 @@ const cases = [
   }],
 ];
 
-(async () => {
+module.exports = { run, msg, held };
+if (require.main === module) (async () => {
   let passed = 0, failedCount = 0;
   for (const [name, steps, check] of cases) {
     try {

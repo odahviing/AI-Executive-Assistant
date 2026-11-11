@@ -148,6 +148,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   let meetingPeopleGroups: string[][] | undefined;
   let resolvedMeetingAttendeeGroups: SkillContext['resolvedMeetingAttendeeGroups'];
   let contextualApprovalDecisions: SkillContext['contextualApprovalDecisions'];
+  let standaloneBookingApproval: SkillContext['standaloneBookingApproval'];
   // gh#158 residual — `resolvedMeetingAttendees` serves two purposes that need
   // different scopes: WHO to auto-add to the search (everyone genuinely on the
   // meeting, including addresses extracted from a forwarded email header below)
@@ -226,30 +227,47 @@ export async function buildTurnContext(input: OrchestratorInput) {
         && input.userId === profile.user.slack_user_id;
       const approvalCandidates: Array<{ row: import('../requests/types').RequestRow;
         action: { tool: string; args: Record<string, unknown> } }> = [];
+      let boundBooking: typeof approvalCandidates[number] | undefined;
       if (ownerDecisionPath) {
         try {
           const { getAwaitingOwnerRequests } = require('../../db/requests') as typeof import('../../db/requests');
-          const rows = getAwaitingOwnerRequests(profile.user.slack_user_id).filter(row => row.kind === 'approval'
-            && row.state === 'awaiting_owner' && row.owner_user_id === profile.user.slack_user_id);
-          // Never truncate a candidate set: omitted candidates can destroy uniqueness.
-          if (rows.length > 0 && rows.length <= 10) {
+          const pending = getAwaitingOwnerRequests(profile.user.slack_user_id).filter(row =>
+            row.state === 'awaiting_owner' && row.owner_user_id === profile.user.slack_user_id);
+          const rows = pending.filter(row => row.kind === 'approval');
+          // Count every outstanding decision in the same private thread, including
+          // other request kinds. The model never selects the referent of a bare assent.
+          const bound = input.threadTs && input.channelId && input.typedUserMessage === userMessage
+            && userMessage.trim() && !input.images?.length && !input.extractedAttendeeEmails?.length
+            && !input.proseOnly && !input.forceToolOnFirstTurn
+            && (!input.inboundConnectionId || input.inboundConnectionId === 'slack')
+            ? pending.filter(row => row.owner_dm_channel === input.channelId
+              && (row.terminal_dm_msg_ts === input.threadTs || row.owner_dm_thread_ts === input.threadTs))
+            : [];
+          const sole = bound.length === 1 && bound[0].kind === 'approval' ? bound[0] : undefined;
+          // Contextual comparisons need the complete set. The exact thread can
+          // still identify a standalone booking when the global queue is larger.
+          const inspect = rows.length <= 10 ? rows : sole ? [sole] : [];
+          if (inspect.length) {
             const { parseDetails } = require('../requests/types') as typeof import('../requests/types');
             const { extractCallbacks, mergeAmendIntoApprove } = require('../approvals/approvalCallbacks') as typeof import('../approvals/approvalCallbacks');
-            for (const row of rows) {
+            for (const row of inspect) {
               const details = parseDetails<Record<string, unknown>>(row);
               let action = extractCallbacks(details).on_approve;
               if (!action || !['create_meeting', 'move_meeting', 'update_meeting'].includes(action.tool)) continue;
               if (details?.counter && typeof details.counter === 'object') {
                 action = mergeAmendIntoApprove(action, details.counter as Record<string, unknown>, profile);
               }
-              approvalCandidates.push({ row, action });
+              const candidate = { row, action };
+              approvalCandidates.push(candidate);
+              if (row === sole && action.tool === 'create_meeting' && row.details_json) boundBooking = candidate;
             }
             // An unsupported candidate remains a possible referent. Do not guess
             // among the supported subset when the complete open set is unknown.
             if (approvalCandidates.length !== rows.length) approvalCandidates.length = 0;
           }
-        } catch { approvalCandidates.length = 0; }
+        } catch { approvalCandidates.length = 0; boundBooking = undefined; }
       }
+      const classifierCandidates = approvalCandidates.length ? approvalCandidates : boundBooking ? [boundBooking] : [];
       const turnResult = await classifyTurn({
         anthropic,
         message: userMessage,
@@ -261,8 +279,13 @@ export async function buildTurnContext(input: OrchestratorInput) {
         senderName: input.senderName,
         recentContext: recentContext || undefined,
         meetingContextMessages: isPrivateSlackDm ? meetingContextMessages : undefined,
-        approvalCandidates: approvalCandidates.length ? approvalCandidates.map(({ row, action }) => ({ subject: row.subject ?? '', action })) : undefined,
+        approvalCandidates: classifierCandidates.length ? classifierCandidates.map(({ row, action }) => ({ subject: row.subject ?? '', action })) : undefined,
       });
+      if (boundBooking?.row.details_json && turnResult.standaloneApprovalQuote === input.typedUserMessage
+        && turnResult.standaloneApprovalQuote === userMessage) {
+        standaloneBookingApproval = { requestId: boundBooking.row.id,
+          requestDetailsJson: boundBooking.row.details_json, quote: userMessage };
+      }
       // A positively identified standalone courtesy needs just the current human
       // message. Keep operational history, tools and prechecks out of this draft.
       if (turnResult.standaloneCourtesy === true && isPrivateSlackDm
@@ -1525,6 +1548,7 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     resolvedMeetingAttendees,
     resolvedMeetingAttendeeGroups,
     contextualApprovalDecisions,
+    standaloneBookingApproval,
     availabilityQuestionDetected,
     availabilityPrecheckToolSummaries,
   };

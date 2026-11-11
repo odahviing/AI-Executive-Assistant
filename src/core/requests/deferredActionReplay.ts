@@ -125,6 +125,8 @@ export class ReplayToolError extends Error {
 }
 
 export interface RunDeferredActionInput {
+  /** The resolver's selected callback, independent of the tool's own arguments. */
+  verdict: 'approve' | 'reject';
   /** Internal recursion marker; never persisted or accepted from tool args. */
   coordinatedReconciled?: boolean;
   ownerUserId: string;
@@ -274,6 +276,14 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
     app: input.app,
     isOwnerInGroup: false,
   };
+  if (input.verdict === 'approve' && tool === 'create_meeting' && Array.isArray(decidedArgs.attendees)) {
+    context.approvedBookingAttendeeEmails = Object.freeze(decidedArgs.attendees.flatMap(attendee => {
+      const address = typeof attendee === 'string' ? attendee : attendee?.email;
+      if (typeof address !== 'string') return [];
+      const email = address.trim().toLowerCase();
+      return /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(email) ? [email] : [];
+    }));
+  }
 
   try {
     const { executeApprovedSkillTool } = await import('../../skills/registry');

@@ -17,6 +17,8 @@ export interface OrchestratorInput {
   userMessage: string;
   /** Human text before transport framing; includes every human text in a merged turn. */
   rawUserMessage?: string;
+  /** Sender's literal text or caption before mention expansion, transcription, and attachment extraction. */
+  typedUserMessage?: string;
   conversationHistory: ConversationMessage[];
   threadTs: string;
   channelId: string;
@@ -355,6 +357,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     resolvedMeetingAttendees,
     resolvedMeetingAttendeeGroups,
     contextualApprovalDecisions,
+    standaloneBookingApproval,
     availabilityQuestionDetected,
     availabilityPrecheckToolSummaries,
   } = await buildTurnContext(input);
@@ -598,14 +601,12 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       resolvedMeetingAttendees,
       resolvedMeetingAttendeeGroups,
       contextualApprovalDecisions,
-      // v4.4.x (GH#169 revisit) — the raw current-turn message, forwarded so
-      // resolve_approval's anchor gate (tasks/skill.ts) can ground its
-      // unanchored-but-named fallback on what the sender actually typed,
-      // never on the model's own `reason` tool argument. Deliberately the
-      // unaugmented `userMessage`, not `effectiveUserMessage` — a claim-
-      // checker retry's appended [SYSTEM NOTE …] is not something the owner
-      // said and must never satisfy a "did the owner name this" check.
+      standaloneBookingApproval,
+      // The transport can enrich userMessage with names, transcripts, and file
+      // content. Keep it for conversational checks that use that context.
       currentUserMessage: userMessage,
+      // A missing literal source cannot establish a new recipient address.
+      typedUserMessage: input.typedUserMessage ?? '',
       interactive: input.interactive !== false,
     };
 
@@ -1616,12 +1617,76 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           .filter(t => t.rank >= 0)
           .sort((a, b) => a.rank - b.rank);
         const topVerbs = ranked.slice(0, 2).map(t => verbMap[t.name]);
-        const verbsText = topVerbs.length === 0
-          ? 'handled a few things'
-          : topVerbs.length === 1
-            ? topVerbs[0]
-            : `${topVerbs[0]} and ${topVerbs[1]}`;
-        finalReply = `Done — ${verbsText}. Let me know if anything's off.`;
+        // Only producer-owned headers establish calendar outcomes. A slot search
+        // does not confirm a booking, and a batch can finish only in part.
+        const calendarRead = attempted.some(name => [
+          'get_calendar', 'get_free_busy', 'find_available_slots', 'analyze_calendar', 'check_join_availability',
+          'get_work_schedule_overrides', 'check_calendar_health',
+        ].includes(name));
+        const writeStates = toolCallSummaries.flatMap(line => {
+          const state = line.match(/^\[(?:create_meeting|move_meeting|update_meeting|delete_meeting|book_floating_block) (OK|FAILED|UNCHANGED|OBSERVED|UNCONFIRMED|COMPLETE|INCOMPLETE)\b/)
+            ?? line.match(/^\[resolve_approval (COMPLETE|INCOMPLETE)\b/);
+          return state ? [state[1]] : [];
+        });
+        const say = (en: string, he: string, ru: string, ar: string): string =>
+          localizedFallback(input.userMessage, { en, he, ru, ar });
+        const statuses: string[] = [];
+        const confirmed = writeStates.includes('OK') || toolCallSummaries.some(line =>
+          /^\[(?:move_meeting|resolve_approval) (?:INCOMPLETE|COMPLETE)\b/.test(line)
+          && line.slice(line.lastIndexOf(']') + 1).trim().split(' ').includes('mutated=book'));
+        const unfinished = writeStates.some(state => ['FAILED', 'INCOMPLETE', 'UNCONFIRMED'].includes(state));
+        if (writeStates.includes('COMPLETE')) {
+          statuses.push(unfinished
+            ? say('Some requested meeting times are confirmed.', 'חלק ממועדי הפגישות המבוקשים מאושרים ביומן.',
+              'Часть запрошенных встреч подтверждена на указанное время.', 'تم تأكيد بعض المواعيد المطلوبة للاجتماعات.')
+            : say('The requested meeting times are confirmed.', 'מועדי הפגישות המבוקשים מאושרים ביומן.',
+              'Запрошенное время встреч подтверждено.', 'تم تأكيد المواعيد المطلوبة للاجتماعات.'));
+        }
+        if (confirmed && writeStates.some(s => s !== 'OK' && s !== 'COMPLETE')) {
+          statuses.push(say('A calendar change went through.', 'שינוי ביומן בוצע.', 'Изменение в календаре внесено.', 'تم تنفيذ تغيير في التقويم.'));
+        }
+        if (writeStates.includes('FAILED')) statuses.push(confirmed
+          ? say('Another calendar change failed.', 'שינוי אחר ביומן נכשל.', 'Другое изменение в календаре не удалось.', 'تعذّر تنفيذ تغيير آخر في التقويم.')
+          : say('The calendar change failed.', 'השינוי ביומן נכשל.', 'Не удалось внести изменение в календарь.', 'تعذّر تنفيذ التغيير في التقويم.'));
+        if (writeStates.includes('INCOMPLETE')) statuses.push(say(
+          "I couldn't confirm all the requested calendar changes.", 'לא הצלחתי לאשר שכל השינויים המבוקשים ביומן בוצעו.',
+          'Не удалось подтвердить все запрошенные изменения в календаре.', 'تعذّر عليّ تأكيد جميع التغييرات المطلوبة في التقويم.'));
+        if (writeStates.includes('UNCONFIRMED')) statuses.push(say(
+          "I couldn't confirm whether the meeting moved.", 'לא הצלחתי לאשר אם הפגישה הוזזה.',
+          'Не удалось подтвердить перенос встречи.', 'تعذّر عليّ تأكيد ما إذا كان موعد الاجتماع قد تغيّر.'));
+        if (writeStates.includes('OBSERVED') || writeStates.includes('UNCHANGED')) statuses.push(say(
+          'I found the meeting already at the requested time.', 'הפגישה כבר מופיעה ביומן במועד המבוקש.',
+          'Встреча уже стоит в календаре на запрошенное время.', 'وجدت الاجتماع مجدولًا بالفعل في الموعد المطلوب.'));
+        // A confirmed single write is also a scheduling outcome. Localize
+        // the actual action, including when a calendar read preceded it.
+        if (writeStates.length && writeStates.every(state => state === 'OK')) {
+          const calendarActions: Record<string, string> = {
+            create_meeting: say('I booked the meeting.', 'קבעתי את הפגישה.', 'Я назначила встречу.', 'حجزت الاجتماع.'),
+            move_meeting: say('I moved the meeting.', 'הזזתי את הפגישה.', 'Я перенесла встречу.', 'غيّرت موعد الاجتماع.'),
+            update_meeting: say('I updated the meeting.', 'עדכנתי את הפגישה.', 'Я обновила встречу.', 'حدّثت الاجتماع.'),
+            delete_meeting: say('I removed the meeting.', 'הסרתי את הפגישה.', 'Я удалила встречу.', 'أزلت الاجتماع.'),
+            book_floating_block: say('I blocked the time on the calendar.', 'שריינתי את הזמן ביומן.', 'Я зарезервировала время в календаре.', 'حجزت الوقت في التقويم.'),
+          };
+          // Keep the existing multi-action summary for independent work outside scheduling.
+          const schedulingOnly = ranked.every(t => t.name in calendarActions || t.name === 'create_approval' || t.name === 'check_calendar_health');
+          for (const name of schedulingOnly ? distinct : []) {
+            if (calendarActions[name] && toolCallSummaries.some(line => line.startsWith(`[${name} OK`))) {
+              statuses.push(calendarActions[name]);
+            }
+          }
+        }
+        if (statuses.length && toolCallSummaries.some(line => /^\[create_approval(?:[:\] ])/.test(line) && line.endsWith(' notified=approval_owner'))) {
+          statuses.push(say('I notified the approver.', 'הודעתי לגורם המאשר.', 'Я уведомила согласующего.', 'أبلغت المسؤول عن الموافقة.'));
+        }
+        if (statuses.length) {
+          finalReply = statuses.join(' ');
+        } else if (calendarRead && ranked.every(t => t.name === 'check_calendar_health')) {
+          finalReply = say("I couldn't summarize the calendar results.", 'לא הצלחתי לסכם את תוצאות הבדיקה ביומן.',
+            'Не удалось подвести итог проверки календаря.', 'تعذّر عليّ تلخيص نتائج التحقق من التقويم.');
+        } else {
+          const verbsText = topVerbs.length ? topVerbs.join(' and ') : 'handled a few things';
+          finalReply = `Done — ${verbsText}. Let me know if anything's off.`;
+        }
         logger.warn('Orchestrator: tool work happened but no reply text — posted grounded fallback', {
           threadTs,
           iterations: iteration,

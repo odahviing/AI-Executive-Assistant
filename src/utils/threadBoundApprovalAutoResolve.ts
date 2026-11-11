@@ -89,6 +89,7 @@ interface BoundCandidate {
   subkind: string | null;
   subject: string | null;
   requesterSlackId: string | null;
+  detailsJson: string | null;
   details: Record<string, unknown>;
 }
 
@@ -99,6 +100,7 @@ function toCandidate(r: RequestRow): BoundCandidate {
     subkind: r.subkind,
     subject: r.subject,
     requesterSlackId: r.requester_slack_id,
+    detailsJson: r.details_json,
     details: parseDetails<Record<string, unknown>>(r) ?? {},
   };
 }
@@ -219,6 +221,8 @@ function candidateContextLine(c: BoundCandidate, profile: UserProfile): string {
 
 export async function tryAutoResolveThreadBoundApproval(params: {
   message: string;
+  /** Exact sender-authored text, separate from classifier context. */
+  typedUserMessage?: string;
   threadTs: string | undefined;
   ownerUserId: string;
   profile: UserProfile;
@@ -251,6 +255,10 @@ export async function tryAutoResolveThreadBoundApproval(params: {
   // it must also attribute the reply to the right one (or bail to 0).
   const numbered = candidates.map((c, i) => `${i + 1}. ${candidateContextLine(c, profile)}`).join('\n');
   const multi = candidates.length > 1;
+  // A distinct verdict can attest to the whole authored reply only when the
+  // classifier sees exactly that reply and the private thread binds one card.
+  const standaloneBooking = matched.length === 1 && extractCallbacks(matched[0].details).on_approve?.tool === 'create_meeting'
+    && !!params.typedUserMessage?.trim() && message === params.typedUserMessage && ownerUserId === profile.user.slack_user_id;
   const systemPrompt = `${ownerFirst} (the owner) is replying in his decision thread, where ${candidates.length} approval${multi ? 's are' : ' is'} awaiting his call:
 
 ${numbered}
@@ -263,7 +271,7 @@ ${message.slice(0, 1000)}
 Output EXACTLY ONE call to classify_reply. Set:
 - target: which approval the reply resolves — the NUMBER (1-${candidates.length}). Use 0 if the reply doesn't clearly pick ONE of them${multi ? ' (e.g. a bare "yes" when several are open and none is named)' : ''}, or doesn't address any.
 - verdict:
-  · approve — a clear yes on the targeted approval. "yes", "go", "ok", "do it", "sure", "yeah", "lock it in", "go ahead", "the 11am one", "tuesday works", "כן", "אישור", "תאשר".
+  · ${standaloneBooking ? 'standalone_yes — the ENTIRE reply is unconditional assent to this booking exactly as displayed, in any language. A change of person, inbox, time or terms (even unnamed), a question, a quotation, a condition, or an additional instruction requires pass_to_sonnet.' : 'approve — a clear yes on the targeted approval. "yes", "go", "ok", "do it", "sure", "yeah", "lock it in", "go ahead", "the 11am one", "tuesday works", "כן", "אישור", "תאשר".'}
   · reject — a clear no. "no", "cancel", "skip it", "don't", "drop it", "לא", "ביטול".
   · pass_to_sonnet — anything else: mixed ("yes but 3pm" — that's an amend), conditional ("yes if she's free"), a question, topic change, or ambiguous tone ("fine", "I guess").
 
@@ -274,6 +282,7 @@ Rules:
 
   let target = 0;
   let verdict: AutoResolveVerdict = 'pass_to_sonnet';
+  let confirmedStandaloneApproval = false;
   try {
     const resp = await anthropic.messages.create({
       ...HAIKU,
@@ -286,7 +295,7 @@ Rules:
           type: 'object' as const,
           properties: {
             target: { type: 'integer', description: `1-${candidates.length} for the approval resolved, or 0 if none/ambiguous` },
-            verdict: { type: 'string', enum: ['approve', 'reject', 'pass_to_sonnet'] },
+            verdict: { type: 'string', enum: [standaloneBooking ? 'standalone_yes' : 'approve', 'reject', 'pass_to_sonnet'] },
           },
           required: ['target', 'verdict'],
         },
@@ -294,16 +303,22 @@ Rules:
       tool_choice: { type: 'tool', name: 'classify_reply' },
       messages: [{ role: 'user', content: message.slice(0, 1000) }],
     });
-    const toolUse = resp.content.find((b: { type: string }) => b.type === 'tool_use') as
-      | { input?: { target?: number; verdict?: string } } | undefined;
+    const calls = resp.content.filter(b => b.type === 'tool_use');
+    const toolUse = calls[0] as
+      | { name?: string; input?: { target?: number; verdict?: string } } | undefined;
     const raw = toolUse?.input;
     if (!raw || typeof raw.target !== 'number' || !raw.verdict) {
       logger.warn('autoResolveThreadBound — no/partial verdict, passing to Sonnet');
       return pass('pass_to_sonnet');
     }
-    if (raw.verdict !== 'approve' && raw.verdict !== 'reject' && raw.verdict !== 'pass_to_sonnet') return pass('pass_to_sonnet');
     target = raw.target;
-    verdict = raw.verdict;
+    if (raw.verdict === 'standalone_yes' && standaloneBooking && target === 1
+      && resp.stop_reason === 'tool_use' && calls.length === 1 && toolUse?.name === 'classify_reply') {
+      confirmedStandaloneApproval = true;
+      verdict = 'approve';
+    } else if (raw.verdict === 'approve' || raw.verdict === 'reject' || raw.verdict === 'pass_to_sonnet') {
+      verdict = raw.verdict;
+    } else return pass('pass_to_sonnet');
   } catch (err) {
     logger.warn('autoResolveThreadBound — classifier threw, passing to Sonnet', { err: String(err).slice(0, 200) });
     return pass('pass_to_sonnet');
@@ -326,7 +341,9 @@ Rules:
   // v3.1.3 — owner short-form auto-resolve is always owner-driven (never the
   // colleague responding to a counter): resolvedByColleague:false so an owner
   // reject on an awaiting_colleague row closes it (doesn't bounce).
-  const ctx: ResolveContext = { app, profile, resolvedByColleague: false };
+  const ctx: ResolveContext = { app, profile, resolvedByColleague: false, ownerDecisionMessage: params.typedUserMessage ?? '',
+    ...(confirmedStandaloneApproval ? { confirmedStandaloneApproval: true, expectedOwnerDecisionDetails: bound.detailsJson,
+      resolvingUserId: ownerUserId } : {}) };
   const decision = verdict === 'approve'
     ? { verdict: 'approve' as const, data: {} }
     : { verdict: 'reject' as const, reason: 'owner short-form reject' };

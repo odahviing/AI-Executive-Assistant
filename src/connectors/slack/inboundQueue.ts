@@ -52,6 +52,7 @@ const DEBOUNCE_MS = 1500;
 interface PendingMessage {
   text: string;
   rawText: string;
+  typedText: string;
   arrivedAt: number;
   /**
    * The authenticated Slack sender id (S6) — never a claim in the text.
@@ -167,6 +168,7 @@ export function isMergeAbort(err: unknown, signal?: AbortSignal): boolean {
 export type TurnRunner = (params: {
   mergedText: string;
   mergedRawText: string;
+  mergedTypedText: string;
   meta: Record<string, unknown>;
   signal: AbortSignal;
   markWrite: () => void;
@@ -197,6 +199,8 @@ export function enqueueMessage(params: {
   text: string;
   /** Human text before transport framing, for intent/participant decisions. */
   rawText?: string;
+  /** Literal event text for decisions requiring a single authenticated sender's words. */
+  typedText: string;
   /** The authenticated Slack sender id (S6). Never derived from the text. */
   senderId: string;
   senderName?: string;
@@ -234,6 +238,7 @@ export function enqueueMessage(params: {
   const msg: PendingMessage = {
     text: params.text,
     rawText: params.rawText ?? params.text,
+    typedText: params.typedText,
     arrivedAt: Date.now(),
     senderId: params.senderId,
     senderName: params.senderName,
@@ -331,6 +336,7 @@ async function scheduleRun(key: string): Promise<void> {
     await runner({
       mergedText,
       mergedRawText: batch.map(m => m.rawText).join('\n\n'),
+      mergedTypedText: spansMultipleSenders ? '' : batch.map(m => m.typedText).join('\n\n'),
       meta,
       signal: controller.signal,
       markWrite: () => { state.hasWriteFired = true; },

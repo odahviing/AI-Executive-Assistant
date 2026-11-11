@@ -182,8 +182,8 @@ export async function processImageFileShare(ctx: SlackAppContext, params: Proces
     }
 
     // Caption: Slack stuffs the user's typed text into event.text / message.text
-    const captionText = ((message.text as string | undefined) ?? '').trim();
-    const messageText = captionText || '(image attached, no caption)';
+    const typedText = (message.text as string | undefined) ?? '';
+    const messageText = typedText.trim() || '(image attached, no caption)';
 
     const sayFn = async (msgOrText: any) => {
       const txt = typeof msgOrText === 'string' ? msgOrText : msgOrText.text;
@@ -199,6 +199,7 @@ export async function processImageFileShare(ctx: SlackAppContext, params: Proces
     await processMessage({
       senderId: message.user!,
       text: messageText,
+      typedText,
       channelId,
       ts,
       threadTs,

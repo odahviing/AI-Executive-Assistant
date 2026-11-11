@@ -13,8 +13,86 @@ emailSource=emailSource.replace("reply:'Fixture reply',socialCoda:'Private rappo
 emailSource=emailSource.replace('function load(rel){','if(options.db)mocks[\'src/db/index.ts\']=options.db;\n function load(rel){');
 const email=vm.runInNewContext('(function(require,__dirname,process){'+emailSource+'\nreturn {harness,raw,profile};})',{Buffer,URLSearchParams,AbortSignal,setImmediate})(createRequire(path.join(__dirname,'test-email-transport.cjs')),__dirname,process);
 for(const state of ['success','no-tools','failed','unknown'])test('email actual producer '+state,async()=>{const d=database();const h=email.harness({db:d.api,toolSummaries:state==='no-tools'?undefined:[receipt],graph:c=>{if(c.method==='get')return {value:c.url==='done'?[]:[email.raw('m')],'@odata.deltaLink':'done'};if(c.url.endsWith('/createReply'))return {id:'draft',body:{content:'quote'}};if(c.url.endsWith('/send')&&state==='unknown')throw Error('lost response');if(c.url.endsWith('/send')&&state==='failed')throw {statusCode:403};}});h.startInbound();h.start();await h.tick();await h.tick();const history=[...d.rows.values()].flatMap(r=>JSON.parse(r.context));const assistant=history.filter(x=>x.role==='assistant');if(['failed','unknown'].includes(state)){assert.equal(assistant.length,0);assert.equal(h.calls.filter(c=>c.url.endsWith('/send')).length,1);}else{assert.equal(assistant.length,1);assert.deepEqual(assistant[0].toolSummaries,state==='no-tools'?[]:[receipt]);if(!process.env.DIPLOMAT_SNAPSHOT&&state==='success')fs.writeFileSync(path.join(dir,'delivered-history.json'),JSON.stringify(history,null,2));}});
-function whatsapp(options={}){const d=database(),sends=[];const api=load('src/connectors/whatsapp.ts',{'whatsapp-web.js':{MessageMedia:{fromFilePath:()=>({})}},'qrcode-terminal':{},path,fs:{writeFileSync(){},unlinkSync(){}},os:require('os'),'../config':{config:{OPENAI_API_KEY:'fixture'}},'../db':options.dbFailure?{...d.api,appendToConversation:(...args)=>{if(args[2].role==='assistant')throw Error('db unavailable');d.api.appendToConversation(...args)}}:d.api,'../core/orchestrator':{runOrchestrator:async()=>({reply:'reply',toolSummaries:options.noTools?undefined:[receipt]})},'../voice':{shouldRespondWithAudio:()=>!!options.audio,textToSpeech:async()=>{if(options.preparationFailure)throw Error('TTS unavailable');return Buffer.from('fixture')}},'../connections/registry':{},'../utils/logger':logger},'export {handleWhatsAppMessage as handle};');async function send(kind){sends.push(kind);if(options.failure)throw Error('unconfirmed');return options.unknown?undefined:{id:{_serialized:'sent'}};}const message={id:{_serialized:'inbound'},from:options.outsider?'456@c.us':'123@c.us',type:'chat',body:'request',reply:()=>send('text')};const client={sendPresenceAvailable:async()=>{},sendMessage:()=>send('audio')};return {run:()=>api.handle(message,{user:{slack_user_id:'OWNER'}},client,'123'),sends,history:()=>d.api.getConversationHistory(message.from)};}
+function whatsapp(options = {}) {
+  const d = database(), sends = [], turns = [], voiceDecisions = [], downloads = [];
+  const api = load('src/connectors/whatsapp.ts', {
+    'whatsapp-web.js': { MessageMedia: { fromFilePath: () => ({}) } }, 'qrcode-terminal': {},
+    path, fs: { writeFileSync() {}, unlinkSync() {} }, os: require('os'),
+    '../config': { config: { OPENAI_API_KEY: 'fixture' } },
+    '../db': options.dbFailure ? { ...d.api, appendToConversation: (...args) => {
+      if (args[2].role === 'assistant') throw Error('db unavailable');
+      d.api.appendToConversation(...args);
+    } } : d.api,
+    '../core/orchestrator': { runOrchestrator: async input => {
+      turns.push(input);
+      return { reply: 'reply', toolSummaries: options.noTools ? undefined : [receipt] };
+    } },
+    '../voice': {
+      shouldRespondWithAudio: ({ inputWasVoice }) => {
+        voiceDecisions.push(inputWasVoice);
+        return options.audio ?? inputWasVoice;
+      },
+      textToSpeech: async () => {
+        if (options.preparationFailure) throw Error('TTS unavailable');
+        return Buffer.from('fixture');
+      },
+    },
+    '../voice/fileTranscribe': { transcribeAudioFile: async () => options.transcript },
+    '../connections/registry': {}, '../utils/logger': logger,
+  }, 'export {handleWhatsAppMessage as handle};');
+  async function send(kind) {
+    sends.push(kind);
+    if (options.failure) throw Error('unconfirmed');
+    return options.unknown ? undefined : { id: { _serialized: 'sent' } };
+  }
+  const message = {
+    id: { _serialized: 'inbound' }, from: options.outsider ? '456@c.us' : '123@c.us',
+    type: 'chat', body: 'request', reply: () => send('text'), react: async () => {},
+    downloadMedia: async () => { downloads.push(true); return { data: 'YQ==' }; },
+    ...options.message,
+  };
+  const client = { sendPresenceAvailable: async () => {}, sendMessage: () => send('audio') };
+  return {
+    run: () => api.handle(message, { user: { slack_user_id: 'OWNER' } }, client, '123'),
+    sends, turns, voiceDecisions, downloads, history: () => d.api.getConversationHistory(message.from),
+  };
+}
 for(const [name,opts,count,known] of [['text',{},1,true],['no-tools',{noTools:true},1,true],['audio',{audio:true},1,true],['failed-text',{failure:true},1,false],['unknown-text',{unknown:true},1,false],['failed-audio',{audio:true,failure:true},1,false],['unknown-audio',{audio:true,unknown:true},1,false],['pre-send-fallback',{audio:true,preparationFailure:true},1,true],['fallback-send-unknown',{audio:true,preparationFailure:true,failure:true},1,false],['outside',{outsider:true},0,false],['db-failure',{dbFailure:true},1,false]])test('WhatsApp actual producer '+name,async()=>{const h=whatsapp(opts);await h.run();await h.run();assert.equal(h.sends.length,count);const a=h.history().filter(x=>x.role==='assistant');assert.equal(a.length,known?1:0);if(known)assert.equal(JSON.stringify(a[0].toolSummaries),JSON.stringify(opts.noTools?[]:[receipt]));});
+
+const ownerText = '  Invite Alex@New.example  ';
+for (const [label, message, expected] of [
+  ['typed chat', { type: 'chat' }, ownerText],
+  ['typed attachment caption', { type: 'image', hasMedia: true }, ownerText],
+  ['forwarded chat', { type: 'chat', isForwarded: true }, ''],
+  ['forwarded caption', { type: 'image', hasMedia: true, isForwarded: true }, ''],
+  ['provider-generated contact card', { type: 'vcard' }, ''],
+  ['voice recording', { type: 'ptt', hasMedia: true }, ''],
+  ['audio file', { type: 'audio', hasMedia: true }, ''],
+]) test('WhatsApp owner input provenance: ' + label, async () => {
+  const transcript = 'Recognized by speech model: another@example.test';
+  const h = whatsapp({ message: { ...message, body: ownerText }, transcript });
+  await h.run();
+  const voice = message.type === 'audio' || message.type === 'ptt';
+  const input = voice ? transcript : ownerText.trim();
+  assert.equal(h.turns.length, 1);
+  const turn = h.turns[0];
+  assert.deepEqual([turn.userId, turn.authority, turn.surface, turn.channel], ['OWNER', 'owner', 'owner_dm', 'whatsapp']);
+  assert.equal(turn.userMessage, input);
+  assert.equal(h.history()[0].content, voice ? '[Voice message]: ' + input : input);
+  assert.deepEqual(h.sends, [voice ? 'audio' : 'text']);
+  assert.deepEqual(h.voiceDecisions, [voice]);
+  assert.equal(turn.typedUserMessage, expected);
+});
+
+for (const from of ['456@c.us', '123@g.us', 'status@broadcast']) {
+  test('WhatsApp rejects typed and audio turns before content work: ' + from, async () => {
+    for (const type of ['chat', 'ptt']) {
+      const h = whatsapp({ message: { from, type, body: ownerText }, transcript: ownerText });
+      await h.run();
+      assert.deepEqual([h.turns.length, h.downloads.length, h.history().length, h.sends.length], [0, 0, 0, 0]);
+    }
+  });
+}
 
 let contextSource=fs.readFileSync(path.join(__dirname,'test-turn-context-boundaries.cjs'),'utf8').split("test('room framing")[0];
 const contextFixture=vm.runInNewContext('(function(require,__dirname,process){'+contextSource+'\nreturn fixture;})',{Buffer})(require,__dirname,{argv:[]});

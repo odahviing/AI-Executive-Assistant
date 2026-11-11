@@ -168,6 +168,15 @@ const relayCopy = {
   approval_in_person: ['Mode: in person', 'אופן המפגש: פנים אל פנים', 'Format: vor Ort', 'Modalidad: presencial', 'النوع: حضوري', 'Формат: очно'],
   approval_category: ['Category: {value}', 'קטגוריה: {value}', 'Kategorie: {value}', 'Categoría: {value}', 'الفئة: {value}', 'Категория: {value}'],
   approval_invite_body: ['Invitation text: {value}', 'תוכן ההזמנה: {value}', 'Einladungstext: {value}', 'Texto de la invitación: {value}', 'نص الدعوة: {value}', 'Текст приглашения: {value}'],
+  original_request_from: [
+    'Original request from {target}.', 'הבקשה המקורית התקבלה מאת {target}.',
+    'Die ursprüngliche Anfrage kam von {target}.', 'La solicitud original es de {target}.',
+    'الطلب الأصلي من {target}.', 'Первоначальный запрос от {target}.',
+  ],
+  booking_question: [
+    'Should I book “{subject}”?', 'לקבוע את ״{subject}״?', 'Soll ich „{subject}“ buchen?',
+    '¿Agendo «{subject}»?', 'هل أحجز «{subject}»؟', 'Назначить встречу «{subject}»?',
+  ],
   approval_title_unavailable: ['existing meeting — title unavailable', 'פגישה קיימת — הכותרת אינה זמינה', 'bestehender Termin — Titel nicht verfügbar', 'reunión existente — título no disponible', 'اجتماع موجود — العنوان غير متاح', 'существующая встреча — название недоступно'],
   consequence_zone: ['If yes → I\'ll update their stored timezone to {value}.', 'אם כן ← אעדכן את אזור הזמן השמור ל{value}.', 'Bei Zustimmung → ich ändere die gespeicherte Zeitzone auf {value}.', 'Si aceptas → actualizaré la zona horaria guardada a {value}.', 'عند الموافقة ← سأحدّث المنطقة الزمنية المحفوظة إلى {value}.', 'Если да → обновлю сохранённый часовой пояс на {value}.'],
   consequence_run: ['If yes → I\'ll run {value}.', 'אם כן ← אבצע את {value}.', 'Bei Zustimmung → ich führe {value} aus.', 'Si aceptas → ejecutaré {value}.', 'عند الموافقة ← سأنفذ {value}.', 'Если да → выполню {value}.'],

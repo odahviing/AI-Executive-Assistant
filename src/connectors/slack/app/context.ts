@@ -29,6 +29,8 @@ export interface ProcessMessageParams {
      * so anything fused into it is read as the sender's own words.
      */
     text: string;
+    /** Slack event text before mention resolution, transcription or attachment ingestion. */
+    typedText: string;
     /**
      * The machine-written, MODEL-facing framing this turn carries: the MPIM
      * `<<GROUP DM — participants: …>>` preamble, the `[THREAD PARTICIPANTS: …]`

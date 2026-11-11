@@ -2321,6 +2321,20 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               : undefined;
             if (travelers.length > 0 || hasDaySummary || isRecoveryResult || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional || requestedTimeLocal || timezoneHint || preferredSlotStatus || hasAttendeeStatus || movingEventIdMismatchWarning || travelBufferNote) {
               const result: Record<string, unknown> = { slots: annotatedSlots };
+              // Positions refer to the intact slots, including their individual clocks and rules.
+              if (context.channel !== 'email' && (hasAttendeeConflicts || hasAttendeeStatus)) {
+                const byFacts = new Map<string, number[]>();
+                annotatedSlots.forEach((slot: any, index: number) => {
+                  if (!slot.attendee_conflicts?.length && !slot.attendee_status?.length) return;
+                  const key = JSON.stringify([slot.attendee_conflicts, slot.attendee_status]
+                    .map(entries => (entries ?? []).map((entry: unknown) => JSON.stringify(entry)).sort()));
+                  const positions = byFacts.get(key) ?? [];
+                  positions.push(index + 1);
+                  byFacts.set(key, positions);
+                });
+                const shared = [...byFacts.values()].filter(positions => positions.length > 1);
+                if (shared.length) result.shared_attendee_fact_groups = shared;
+              }
               // #148 — grounded timezone strings so Sonnet quotes the conversion, never recomputes it.
               Object.assign(result, tzGroundingFields);
               // gh#owner-path-move-meeting-id-misresolution-unguarded (point 1,
@@ -2345,7 +2359,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // General searches keep attendee hours hard; an off_hours tag
                 // can appear only on an exact requested-slot path that opted in.
                 result._attendee_conflicts_note =
-                  `Some returned slots carry \`attendee_conflicts: [{email, reason, assumed?, line}]\`. Next to each tagged slot, quote every conflict entry's \`line\` VERBATIM (e.g. "Tue 10:00 — <line>") — it is already in the right grammatical person and already hedged when any hours were assumed rather than confirmed. Describe only the attached conflicts: do not infer that another slot is off-hours or that a blanket override occurred. Never present a tagged slot as clean.`;
+                  `Some returned slots carry \`attendee_conflicts: [{email, reason, assumed?, line}]\`. For each slot or shared_attendee_fact_groups list (one-based slot positions), quote each conflict entry's \`line\` VERBATIM (e.g. "Tue 10:00 — <line>") — it is already in the right grammatical person and already hedged when any hours were assumed rather than confirmed. Describe only the attached conflicts: do not infer that another slot is off-hours or that a blanket override occurred. Never present a tagged slot as clean.`;
               }
               if (hasAttendeeStatus) {
                 // scanner-relay-first-person-attendee-status (2026-08-30) — NOT
@@ -2357,7 +2371,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // calendar. Stripped on the email leg alongside the field
                 // itself (ops.ts email scrub).
                 result._attendee_status_note =
-                  `Each slot's \`attendee_status\` entries carry \`line\` — a pre-rendered status sentence, already in the right grammatical person for whoever you're replying to ("you show tentative then" when it's their own calendar; the attendee's name otherwise). Quote it verbatim next to the slot (translate faithfully if the conversation isn't in English — keep the same grammatical person). NEVER re-derive it, and NEVER state an attendee's status in first person ("I show tentative") — "I" is you, Maelle, and it is never your calendar.`;
+                  `Each slot's \`attendee_status\` entries carry \`line\` — a pre-rendered status sentence, already in the right grammatical person for whoever you're replying to ("you show tentative then" when it's their own calendar; the attendee's name otherwise). Quote it verbatim once for the slot or its shared_attendee_fact_groups list (translate faithfully if the conversation isn't in English — keep the same grammatical person). NEVER re-derive it, and NEVER state an attendee's status in first person ("I show tentative") — "I" is you, Maelle, and it is never your calendar.`;
               }
               if (usedOwnerAttendeeTagged) {
                 const ownerFirst = context.profile.user.name.split(' ')[0];
@@ -2390,7 +2404,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   // A sampled day_summary explains rejected candidates, not every
                   // instant in that day or window.
                   result._no_all_attendee_free_note =
-                    `No suitable slot in this search met every participant constraint, so these are ${ownerFirst}'s genuinely open slots (his working hours, focus time and own calendar all still respected) with each attendee busy/out-of-office/travel conflict tagged in \`attendee_conflicts: [{email, reason, line}]\`. Present them and say plainly, per slot, who can't make it by quoting every conflict entry's \`line\` verbatim (e.g. "Tue 16:15 — <line>"; two conflicts → quote both). A \`day_summary\` row with \`accepted:0\` establishes only that no sampled candidate survived this search and its constraints; describe that scoped result, and describe broader availability only when an explicit calendar finding establishes it. Never present a tagged slot as clean. ${ownerFirst} can choose one, or you can offer to search a different timeframe or wider window.`;
+                    `No suitable slot in this search met every participant constraint, so these are ${ownerFirst}'s genuinely open slots (his working hours, focus time and own calendar all still respected) with each attendee busy/out-of-office/travel conflict tagged in \`attendee_conflicts: [{email, reason, line}]\`. Present them and say plainly who can't make it by quoting each conflict entry's \`line\` verbatim once for its slot or shared_attendee_fact_groups list (one-based slot positions), retaining each time and its qualifications. A \`day_summary\` row with \`accepted:0\` establishes only that no sampled candidate survived this search and its constraints; describe that scoped result, and describe broader availability only when an explicit calendar finding establishes it. Never present a tagged slot as clean. ${ownerFirst} can choose one, or you can offer to search a different timeframe or wider window.`;
                 }
               }
               if (hasOverOptional) {
