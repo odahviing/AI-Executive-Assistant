@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
 **3 product decisions await you** — 4 open items; 0 captured, 0 ready for an authorized lane batch, 1 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (11):** offer-identical-conflicts-once · offer-paired-meetings-joint-status · partial-booking-remaining-decision · followup-scheduling-answer-delta · prior-options-recap-prohibition · unresolved-target-bundles-fields · separate-search-pair-presentation · empty-calendar-read-completion-claim · options-turn-requests-booking-subject · discussions-booking-request-omitted · rebranding-approved-alex-invite
+**Independently verified, awaiting wrap (0):** none
 
 ### Needs a product decision (3)
 
