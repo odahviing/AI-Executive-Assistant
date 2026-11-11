@@ -6,6 +6,44 @@ import fs from 'fs';
 const logPath = process.env.LOG_PATH || './logs';
 if (!fs.existsSync(logPath)) fs.mkdirSync(logPath, { recursive: true });
 
+// Preserve the types of the existing Cloud Logging export columns. Several
+// events use the same metadata name for a different type of value.
+const isText = (value: unknown) => typeof value === 'string';
+const isNumber = (value: unknown) => typeof value === 'number';
+const isObject = (value: unknown) => value !== null && typeof value === 'object';
+const exportColumns = [
+  { field: 'resolved', migrate: isText, alternate: 'resolvedScalar' },
+  { field: 'dropped', migrate: isNumber, alternate: 'droppedCount' },
+  { field: 'notes', migrate: isNumber, alternate: 'notesCount' },
+  { field: 'added', migrate: Array.isArray, alternate: 'addedList' },
+  { field: 'summary', migrate: Array.isArray, alternate: 'summaryList' },
+  { field: 'code', migrate: isText, alternate: 'codeText' },
+  { field: 'requested', migrate: isText, alternate: 'requestedText' },
+  { field: 'moving_event_ids', migrate: isText, alternate: 'movingEventIdsText' },
+  { field: 'items', migrate: Array.isArray, alternate: 'itemsJson', encode: true },
+  { field: 'err', migrate: isObject, alternate: 'err', encode: true },
+];
+const formatExportColumns = winston.format(info => {
+  let payload: Record<string, unknown> | undefined;
+  for (const { field, migrate, alternate, encode } of exportColumns) {
+    if (!migrate(info[field])) continue;
+    // Start from Winston's published JSON so errors, cycles and non-JSON
+    // values receive exactly its normal serialization before we move them.
+    payload ??= JSON.parse(info[Symbol.for('message')] as string) as Record<string, unknown>;
+    const value = encode ? JSON.stringify(payload[field]) : payload[field];
+    let target = alternate;
+    if (target !== field) {
+      while (Object.prototype.hasOwnProperty.call(payload, target)) target += 'FromLegacy';
+      delete payload[field];
+      delete info[field];
+    }
+    payload[target] = value;
+    info[target] = value;
+  }
+  if (payload) info[Symbol.for('message')] = JSON.stringify(payload);
+  return info;
+});
+
 const logger = winston.createLogger({
   // Verbosity intentionally kept at 'debug'/'info' — the log volume is how we
   // diagnose coord/MPIM/Hebrew-flow bugs after the fact. Rotation (below)
@@ -14,7 +52,8 @@ const logger = winston.createLogger({
   format: winston.format.combine(
     winston.format.timestamp(),
     winston.format.errors({ stack: true }),
-    winston.format.json()
+    winston.format.json(),
+    formatExportColumns()
   ),
   defaultMeta: { service: 'maelle' },
   transports: [

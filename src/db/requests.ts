@@ -87,6 +87,26 @@ function isSubkindValidForKind(subkind: string, kind: string, state: string): bo
 // ── create ──────────────────────────────────────────────────────────────────
 
 export function createRequest(input: CreateRequestInput): RequestRow {
+  const eventId = input.outcomeExternalEventId;
+  if (input.kind === 'follow_up' && input.subkind === 'colleague_booking_record' && eventId) {
+    // Each confirmed event has one original requester. Include legacy subject-keyed
+    // and cancelled records so a replay cannot replace the requester or revive a link.
+    const db = getDb();
+    return db.transaction(() => {
+      const existing = db.prepare(`
+        SELECT * FROM requests WHERE owner_user_id = ? AND outcome_external_event_id = ?
+          AND kind = 'follow_up' AND subkind = 'colleague_booking_record' LIMIT 1
+      `).get(input.ownerUserId, eventId) as RequestRow | undefined;
+      return existing ?? insertRequest({
+        ...input,
+        idempotencyKey: `colleague_booking_record:${JSON.stringify([input.ownerUserId, eventId])}`,
+      });
+    }).immediate();
+  }
+  return insertRequest(input);
+}
+
+function insertRequest(input: CreateRequestInput): RequestRow {
   const db = getDb();
   const id = `req_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 

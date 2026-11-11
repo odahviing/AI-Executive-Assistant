@@ -264,7 +264,8 @@ export interface CreateRequestInput {
   /** Set ONLY when this request's first DM IS the terminal-question. Reminder/status DMs do NOT stamp this. */
   terminalDmMsgTs?: string;
 
-  /** If omitted, computed from (owner, requester, kind, subject_normalized). */
+  /** Defaults to owner, requester, kind and normalized subject. Confirmed colleague
+   * booking records always use the calendar owner's exact event identity. */
   idempotencyKey?: string;
 
   outcomeExternalEventId?: string;

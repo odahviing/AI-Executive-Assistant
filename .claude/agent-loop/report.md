@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
 **3 product decisions await you** — 4 open items; 0 captured, 0 ready for an authorized lane batch, 1 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (0):** none
+**Independently verified, awaiting wrap (2):** bq-sink-log-field-schema · colleague-booking-requester-link
 
 ### Needs a product decision (3)
 

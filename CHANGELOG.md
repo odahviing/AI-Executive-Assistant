@@ -1,3 +1,11 @@
+## 5.4.3 — Restore BigQuery log exports and preserve booking requesters
+
+Maelle now writes conflicting log fields in forms BigQuery can accept. Separate colleague bookings with the same title each keep their own requester link.
+
+### Fixed
+- Keep the established BigQuery column types when events use the same field for different kinds of values. Preserve both values when an event already uses the alternate field name.
+- Identify a confirmed colleague booking by its calendar owner and exact event ID. A retry keeps the original requester, including when the meeting has been renamed or its requester record has been cancelled.
+
 ## 5.4.2 — Meeting approvals keep the selected recipients
 
 A booking approval now carries the selected attendee addresses through to the calendar request. When a colleague asks for a booking, the owner's approval card shows who made the request and which meeting the owner is deciding on.
