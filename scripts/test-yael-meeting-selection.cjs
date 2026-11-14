@@ -40,7 +40,7 @@ function createMoveHarness(opts={}){
   findAvailableSlots:async p=>{state.slotChecks.push(p);if(opts.offline)throw new CalendarOfflineError('offline');if(opts.ruleViolation){p.diagnosticsOut.rejectedCounts={category_per_day:1};return [];}return [{start:p.searchFrom,attendee_conflicts:opts.attendeeBusy?[{email:'other@example.test',reason:'busy'}]:[]}];},
   firstRejectReason:()=> 'category_per_day',humanizeViolationLabel:()=> 'category limit',HANDLER_ERROR_CODE:{NOT_RULE_COMPLIANT:'not_rule_compliant',MEETING_ROOM_UNAVAILABLE_LARGE_MEETING:'meeting_room_unavailable_large_meeting'},
   attendeeConflictRefusal:()=>({success:false,error:'attendee_conflict'}),bookedOverAttendeesNote:()=> 'other is busy',
-  checkIntendedWeekday:()=>({ok:true}),wasOfferedSlot:()=>false,getFloatingBlocks:()=>[],hasOtherHumanAttendee:()=>roster.length>0,openQuestionsField:()=>({}),
+  checkIntendedWeekday:()=>({ok:true}),wasOfferedSlot:()=>false,getFloatingBlocks:()=>opts.block?[opts.block]:[],isFloatingBlockEvent:()=>!!opts.block,blockSizedToEvent:b=>b,windowMsForDay:(date,time,zone)=>DateTime.fromISO(date+'T'+time,{zone}).toMillis(),formatIsoTime:(s)=>s,hasOtherHumanAttendee:()=>roster.length>0,openQuestionsField:()=>({}),
   grantRelaxed:(a,c)=>({relaxed:c.authority==='owner'&&(!opts.respectRelaxed||a.relaxed===true),relaxedReason:undefined}),
   planMeeting:async p=>{state.plans.push(p);if(opts.planFailure)throw Error('planner unavailable');if(opts.plan)return opts.plan(p);return {action:opts.roomUnavailable?'room_unavailable_large':'book',preserveExisting:true};},
   checkSlot:opts.checkSlot,
@@ -51,6 +51,8 @@ function createMoveHarness(opts={}){
   auditLog:p=>state.audits.push(p),logActivity:p=>state.activities.push(p),resolveActivityTargetIdentity:()=>({}),
   shadowNotify:async()=>{},computeVacatedSlot:()=>undefined,rebalanceFloatingBlocksAfterMutation:async p=>typeof opts.rebalance==='function'?opts.rebalance(p):opts.rebalance??({moves:[]}),presentationLocalFieldFor:()=>({}),clearOfferedSlots:noop,renderWeDualClock:s=>s,
  };
+ // Allow integration suites to exercise the real writer and reconciliation reader.
+ Object.assign(stubs, opts.calendar);
  const dependencies=new Proxy(stubs,{get(target,name){if(name==='then')return undefined;if(name in target)return target[name];return (...a)=>{throw Error('UNMOCKED '+String(name));};}});
  const mod=compile(read('src/skills/meetings/ops/handlers/moveMeeting.ts')+'\nexport { checkSameSubjectCollision };',id=>id==='luxon'?{DateTime}:dependencies);
  function viewed(ids=[selectedId]){ledger.recordViewedThreadEvents('thread',ids.map(id=>{const e=events.find(e=>e.id===id);return {eventId:id,subject:e.subject,dateIso:DateTime.fromISO(e.start.dateTime).setZone(ctx.timezone).toISODate()};}));}

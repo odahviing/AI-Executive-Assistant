@@ -46,6 +46,106 @@ function loadClassifier() {
 
 
 const profile = {user:{name:'Owner Example'},assistant:{name:'Maelle'},skills:{}};
+
+const alex = 'Customer success status with Alex';
+const ayalla = 'Customer success with Ayalla';
+const ordinaryCreate = {
+  senderRole: 'owner', inspectIndependentOrdinaryCreate: true,
+  message: `and after book a meeting with Dana and Lee 25 mins\nright after the meeting with Alex\n“${ayalla}”`,
+  meetingContextMessages: [
+    { role: 'user', content: 'Move it to 11:15.' },
+    { role: 'assistant', content: `Moved "${alex}" to 11:15. I booked it anyway, as you asked.` },
+  ],
+};
+const titleEvidence = { subjectQuote: ayalla, priorSubjectQuote: alex, sourceMessageIndex: 1 };
+const classifiedCreate = {
+  meeting_action: 'execute', meeting_continuation: false, standalone_courtesy: false,
+  meeting_people: ['Dana', 'Lee'], meeting_people_groups: [['Dana','Lee']], independent_ordinary_create: titleEvidence,
+};
+test('independent booking after a completed move produces source-bound titles on the existing call', async () => {
+  const { result, captured, calls } = await run(classifiedCreate, ordinaryCreate);
+  assert.deepEqual(result.independentOrdinaryCreate, titleEvidence);
+  assert.equal(calls, 1);
+  const schema = captured.tools[0].input_schema.properties.independent_ordinary_create;
+  assert.equal(schema.additionalProperties, false);
+  assert.deepEqual([...schema.required], ['subjectQuote','priorSubjectQuote','sourceMessageIndex']);
+  assert.ok(!captured.tools[0].input_schema.required.includes('independent_ordinary_create'));
+  assert.ok(captured.system.includes('including wider or visit-wide instructions'));
+});
+test('explicit original-script titles may identify an independent booking', async () => {
+  const quotes = { subjectQuote: 'השקת מוצר', priorSubjectQuote: 'שיחת צוות', sourceMessageIndex: 0 };
+  const { result } = await run({ ...classifiedCreate, independent_ordinary_create: quotes }, {
+    ...ordinaryCreate, message: 'תקבע עם דנה את השקת מוצר',
+    meetingContextMessages: [{ role:'assistant', content:'הזזתי את שיחת צוות.' }],
+  });
+  assert.deepEqual(result.independentOrdinaryCreate, quotes);
+});
+test('prior owner exception reaches only the independent-create instruction, never the indexed transcript', async () => {
+  const priorOwner = 'Para toda esta visita, reserva aunque haya conflictos.';
+  const args = { ...ordinaryCreate, ordinaryCreateOwnerContext:[priorOwner] };
+  const { result, captured, calls } = await run({ ...classifiedCreate, independent_ordinary_create:undefined }, args);
+  assert.equal(calls, 1);
+  assert.equal(result.independentOrdinaryCreate, undefined);
+  const section = captured.system.indexOf('INDEPENDENT ORDINARY CREATE');
+  const recent = captured.system.indexOf('Recent conversation (classify');
+  assert.ok(captured.system.slice(section, recent).includes(JSON.stringify([priorOwner])));
+  assert.ok(!captured.system.slice(recent).includes(priorOwner));
+  const noHistory = await run(classifiedCreate, ordinaryCreate);
+  assert.ok(!noHistory.captured.system.includes('Earlier owner messages (quoted data'));
+  for (const changes of [{senderRole:'colleague'}, {inspectIndependentOrdinaryCreate:false}, {meetingContextMessages:undefined}]) {
+    const { captured, result } = await run(classifiedCreate, {...args,...changes});
+    assert.ok(!captured.system.includes(priorOwner));
+    assert.equal(captured.tools[0].input_schema.properties.independent_ordinary_create, undefined);
+    assert.equal(result.independentOrdinaryCreate, undefined);
+  }
+});
+test('unindexed owner context cannot provide title, index, continuing participant or approval citation', async () => {
+  const unindexed = 'Project Finch';
+  const extra = { ...ordinaryCreate, ordinaryCreateOwnerContext:[unindexed] };
+  for (const patch of [{subjectQuote:unindexed}, {priorSubjectQuote:unindexed}, {sourceMessageIndex:2}]) {
+    const { result } = await run({ ...classifiedCreate, independent_ordinary_create:{...titleEvidence,...patch} }, extra);
+    assert.equal(result.independentOrdinaryCreate, undefined);
+  }
+  const badDecision = {candidateIndex:0,disposition:'approve_existing',instructionQuote:ayalla,sourceMessageIndex:2,sourceQuote:unindexed};
+  const { result } = await run({ ...classifiedCreate, meeting_continuation:true,
+    context_meeting_people:[{name:unindexed,sourceMessageIndex:2}], approval_decisions:[badDecision] },
+    { ...extra, approvalCandidates:[{subject:ayalla,action:{tool:'create_meeting',args:{subject:ayalla}}}] });
+  assert.deepEqual(result.contextMeetingPeople, []);
+  assert.deepEqual(result.approvalDecisions, []);
+});
+test('assent, amendment, exploration, explicit wider exception, uncertain and unavailable classifications give no evidence', async () => {
+  for (const [message, patch] of [
+    ['Yes, please, if he is free.', { meeting_action:'explore' }],
+    [`Move ${ayalla} to 11:30.`, { meeting_continuation:true }],
+    [`If possible, book ${ayalla}.`, { meeting_action:'explore' }],
+    [`Book ${ayalla} and ignore all conflicts for this visit.`, { independent_ordinary_create:undefined }],
+    [`Yes, book ${ayalla}.`, { standalone_approval_quote:`Yes, book ${ayalla}.` }],
+    [ordinaryCreate.message, { meeting_continuation:undefined }],
+    [ordinaryCreate.message, { approval_decisions:[{}] }],
+    [ordinaryCreate.message, { context_meeting_people:[{ name:'Dana',sourceMessageIndex:0 }] }],
+  ]) {
+    const { result } = await run({ ...classifiedCreate, ...patch }, { ...ordinaryCreate, message });
+    assert.equal(result.independentOrdinaryCreate, undefined);
+  }
+  const { result } = await run(classifiedCreate, ordinaryCreate, { stop_reason:'max_tokens' });
+  assert.equal(result.independentOrdinaryCreate, undefined);
+});
+test('rejects invented title, ungrounded prior title, unsigned provenance, stale index and same subject', async () => {
+  for (const patch of [{subjectQuote:'Generated title'}, {priorSubjectQuote:'Earlier generated title'},
+    {sourceMessageIndex:0}, {sourceMessageIndex:1.5}, {subjectQuote:'  '}, {priorSubjectQuote:''}]) {
+    const { result } = await run({ ...classifiedCreate, independent_ordinary_create:{ ...titleEvidence, ...patch } }, ordinaryCreate);
+    assert.equal(result.independentOrdinaryCreate, undefined);
+  }
+  const { result } = await run({ ...classifiedCreate, independent_ordinary_create:{ ...titleEvidence, subjectQuote:alex.toUpperCase() } },
+    { ...ordinaryCreate, message:`Book ${alex.toUpperCase()} again` });
+  assert.equal(result.independentOrdinaryCreate, undefined);
+  for (const extra of [{senderRole:'colleague'}, {inspectIndependentOrdinaryCreate:false}, {senderRole:undefined},
+    {message:ordinaryCreate.message.padEnd(4001)}, {meetingContextMessages:[...ordinaryCreate.meetingContextMessages,{role:'user',content:alex}]}]) {
+    const {result,captured}=await run(classifiedCreate,{...ordinaryCreate,...extra});
+    assert.equal(result.independentOrdinaryCreate,undefined);
+    assert.equal(captured.tools[0].input_schema.properties.independent_ordinary_create,undefined);
+  }
+});
 async function run(raw, extra = {}, response = {}) {
   let captured; let calls = 0;
   const result = await loadClassifier()({

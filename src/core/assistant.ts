@@ -9,7 +9,7 @@ import {
 import { readSkillPreferencesSnapshot, writeSkillPreferences, PREF_SKILLS } from '../utils/skillPreferences';
 import { SLACK_ID_RE } from '../utils/resolveSlackId';
 import { nameGenuinelyMatches } from '../memory/resolveAttendeeEmails';
-import { describeEffectiveWorkingHours } from '../utils/workingHoursDefault';
+import { defaultWorkingHoursForTz, describeEffectiveWorkingHours, getEffectiveWorkingHours, WEEK_ORDER } from '../utils/workingHoursDefault';
 import { DateTime } from 'luxon';
 import logger from '../utils/logger';
 
@@ -31,7 +31,9 @@ function describeCoreWrites(
 ): { not_saved?: string[]; already_set?: string[]; notes: string[] } {
   const refused = writes.filter(([, o]) => o === 'refused_lower_authority').map(([f]) => f);
   const already = writes.filter(([, o]) => o === 'already_set').map(([f]) => f);
+  const invalid = writes.filter(([, o]) => o === 'no_value').map(([f]) => f);
   const notes: string[] = [];
+  if (invalid.length) notes.push(`${invalid.join(', ')} could not be saved: invalid value.`);
   if (refused.length > 0) {
     notes.push(`${refused.join(', ')} kept the value ${ownerFirstName} already set — his entry outranks a self-correction. Don't say it's saved; say you've noted it and will confirm with him.`);
   }
@@ -39,10 +41,34 @@ function describeCoreWrites(
     notes.push(`${already.join(', ')} already had exactly that value on file — nothing needed changing, and nothing was refused. Say it's already what you have rather than announcing an update.`);
   }
   return {
-    ...(refused.length > 0 ? { not_saved: refused } : {}),
+    ...(refused.length || invalid.length ? { not_saved: [...refused, ...invalid] } : {}),
     ...(already.length > 0 ? { already_set: already } : {}),
     notes,
   };
+}
+
+/** Compare the values scheduling reads, excluding authority-only changes. */
+function schedulingInputs(personId: string): string {
+  const row = getPersonById(personId);
+  if (!row) return '';
+  const hours = getEffectiveWorkingHours(row) ?? (row.timezone ? defaultWorkingHoursForTz(row.timezone) : null);
+  const intervals = hours && WEEK_ORDER.map(day => hours.week[day].map(window => [window.hoursStart, window.hoursEnd]));
+  const travel = row.currently_traveling ? getTravelRecordById(personId, null) : null;
+  return JSON.stringify([row.email, row.timezone, row.timezone_temp, intervals, hours?.timezone, Number(row.is_vip) === 1,
+    travel?.location, travel?.from, travel?.until]);
+}
+
+/** Use completed store outcomes for both audit and scheduling feedback. */
+function profileWriteReceipt(
+  personId: string, name: string, writes: Array<[string, CoreFieldWrite]>, priorInputs?: string,
+): { updated: boolean; _slot_results_now_stale?: true; notes: string[] } {
+  const fields = writes.filter(([, outcome]) => outcome === 'applied').map(([field]) => field);
+  logger.info('Person profile write result', { personId, name, fields, outcomes: Object.fromEntries(writes) });
+  if (priorInputs !== undefined && schedulingInputs(personId) !== priorInputs) {
+    return { updated: fields.length > 0, _slot_results_now_stale: true,
+      notes: [`Re-run find_available_slots before proposing options involving ${name}. Its scheduling inputs were updated.`] };
+  }
+  return { updated: fields.length > 0, notes: [] };
 }
 
 /** Echo the effective reader; only the store outcome confirms this attempted write. */
@@ -1064,6 +1090,12 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         const state   = args.state as string | undefined;
         const nameHe  = args.name_he as string | undefined;
         const emailArg = ((args.email as string | undefined) ?? '').trim().toLowerCase() || undefined;
+        // In a mixed request, the store can validate hours independently while
+        // returning the outcome of every other accepted or refused field.
+        const reportInvalidHours = args.working_hours_structured != null && Object.keys(args)
+          .some(key => !['colleague_slack_id', 'colleague_name', 'working_hours_structured'].includes(key));
+        const priorInputs = typeof args.vip === 'boolean' || timezone || state || emailArg || args.working_hours_structured || args.currently_traveling
+          ? schedulingInputs(target.personId) : undefined;
         // v4.4.x (#170) — travel is a person_id-keyed write (setCurrentTravelById /
         // clearCurrentTravelById), so — unlike the auto-working-hours refresh and
         // engagement_rank below, which really are Slack-only — it applies to
@@ -1220,26 +1252,27 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
             reports_to:          args.reports_to          as string | undefined,
             response_speed:      args.response_speed      as PersonProfile['response_speed'],
             collaboration_notes: args.collaboration_notes as string | undefined,
-          }, setBy);
+          }, setBy, reportInvalidHours);
           coreWrites.push(...Object.entries(profileWrites) as Array<[string, CoreFieldWrite]>);
           // v3.2.6 — owner-curated VIP flag (externals can be VIPs too).
           if (typeof args.vip === 'boolean') {
             const { setPersonVipById } = require('../db') as typeof import('../db');
-            setPersonVipById(personId, args.vip);
+            coreWrites.push(['vip', setPersonVipById(personId, args.vip)]);
           }
           // v4.4.x (#170) — travel (externals travel too; L2's own example).
           applyTravel(personId);
-          logger.info('Person profile updated (external)', { personId, name: target.name });
+          if (travelWrite) coreWrites.push(['currently_traveling', travelWrite]);
+          const { notes: slotNotes, ...receipt } = profileWriteReceipt(personId, target.name, coreWrites, priorInputs);
           const described = describeCoreWrites(coreWrites, context.profile.user.name.split(' ')[0]);
           // Keep partial writes, but expose the refused email to deterministic
           // outcome consumers as well as the conversational explanation.
           if (notSavedFields.length) described.not_saved = [...(described.not_saved ?? []), ...notSavedFields];
           if (emailConflict) described.not_saved = [...(described.not_saved ?? []), 'email'];
-          if (travelWrite && travelWrite !== 'applied' && travelWrite !== 'already_set') described.not_saved = [...(described.not_saved ?? []), 'currently_traveling'];
+          if (travelWrite && !['applied', 'already_set', 'refused_lower_authority'].includes(travelWrite)) described.not_saved = [...(described.not_saved ?? []), 'currently_traveling'];
           const hours = describeHoursWrite(personId, args, target.name, profileWrites.working_hours_structured);
-          const allNotes = [...described.notes, ...hours.notes, ...extraNotes, ...travelNotes];
+          const allNotes = [...slotNotes, ...described.notes, ...hours.notes, ...extraNotes, ...travelNotes];
           return {
-            updated: coreWrites.some(([, o]) => o === 'applied') || travelWrite === 'applied' || typeof args.vip === 'boolean', name: target.name, external: getPersonById(personId)?.kind === 'external', created: target.created,
+            ...receipt, name: target.name, external: getPersonById(personId)?.kind === 'external', created: target.created,
             ...(travelWrite ? { travel_write: travelWrite } : {}),
             ...(described.not_saved ? { not_saved: described.not_saved } : {}),
             ...(described.already_set ? { already_set: described.already_set } : {}),
@@ -1292,32 +1325,30 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           const stateWrite = setCoreFieldWithProvenance(slackId, 'state', state.trim(), setBy);
           coreWrites.push(['state', stateWrite]);
           if (!timezone && (stateWrite === 'applied' || stateWrite === 'already_set')) {
-            // Static-first lookup; Sonnet fallback if needed. Fire-and-forget.
-            void (async () => {
-              try {
-                // eslint-disable-next-line @typescript-eslint/no-require-imports
-                const { inferTimezoneFromState } = require('../utils/locationTz') as typeof import('../utils/locationTz');
-                // eslint-disable-next-line @typescript-eslint/no-require-imports
-                const { refreshAutoWorkingHours } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
-                const tz = await inferTimezoneFromState(state.trim());
-                // v3.0.2 — same strict-IANA gate as the direct timezone arg.
-                // inferTimezoneFromState has a Sonnet fallback that occasionally
-                // hands back ambiguous abbreviations.
-                // eslint-disable-next-line @typescript-eslint/no-require-imports
-                const { isStrictIana } = require('../utils/timezoneValidator') as
-                  typeof import('../utils/timezoneValidator');
-                if (tz && isStrictIana(tz)) {
-                  setCoreFieldWithProvenance(slackId, 'timezone', tz, setBy);
-                  refreshAutoWorkingHours(slackId);
-                } else if (tz) {
-                  logger.warn('state→tz derivation produced non-IANA value — discarded', {
-                    slackId, state, derived: tz,
-                  });
-                }
-              } catch (err) {
-                logger.debug('state→tz derivation failed', { slackId, state, err: String(err).slice(0, 200) });
+            // Resolve the existing lookup before reporting its store outcome.
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { inferTimezoneFromState } = require('../utils/locationTz') as typeof import('../utils/locationTz');
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { refreshAutoWorkingHours } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
+              const tz = await inferTimezoneFromState(state.trim());
+              // v3.0.2 — same strict-IANA gate as the direct timezone arg.
+              // inferTimezoneFromState has a Sonnet fallback that occasionally
+              // hands back ambiguous abbreviations.
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { isStrictIana } = require('../utils/timezoneValidator') as
+                typeof import('../utils/timezoneValidator');
+              if (tz && isStrictIana(tz)) {
+                coreWrites.push(['timezone', setCoreFieldWithProvenance(slackId, 'timezone', tz, setBy)]);
+                refreshAutoWorkingHours(slackId);
+              } else if (tz) {
+                logger.warn('state→tz derivation produced non-IANA value — discarded', {
+                  slackId, state, derived: tz,
+                });
               }
-            })();
+            } catch (err) {
+              logger.debug('state→tz derivation failed', { slackId, state, err: String(err).slice(0, 200) });
+            }
           }
         }
 
@@ -1347,7 +1378,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           reports_to:          args.reports_to          as string | undefined,
           response_speed:      args.response_speed      as PersonProfile['response_speed'],
           collaboration_notes: args.collaboration_notes as string | undefined,
-        }, setBy);
+        }, setBy, reportInvalidHours);
 
         coreWrites.push(...Object.entries(profileWrites) as Array<[string, CoreFieldWrite]>);
         // v2.2 — owner directive override for engagement_rank. Tool only
@@ -1357,8 +1388,10 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         if (typeof args.engagement_rank === 'number') {
           const clamped = Math.max(0, Math.min(3, Math.round(args.engagement_rank))) as 0 | 1 | 2 | 3;
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { setEngagementRank } = require('../db') as typeof import('../db');
-          setEngagementRank(slackId, clamped, 'owner_directive');
+          const { getEngagementRank, setEngagementRank } = require('../db') as typeof import('../db');
+          const previous = getEngagementRank(slackId);
+          const current = setEngagementRank(slackId, clamped, 'owner_directive');
+          coreWrites.push(['engagement_rank', previous === current ? 'already_set' : 'applied']);
         }
 
         // v3.2.6 — owner-curated VIP flag. Owner-path only by construction
@@ -1366,8 +1399,8 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // allowlist), like engagement_rank.
         if (typeof args.vip === 'boolean') {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { setPersonVip } = require('../db') as typeof import('../db');
-          setPersonVip(slackId, args.vip);
+          const { setPersonVipById } = require('../db') as typeof import('../db');
+          coreWrites.push(['vip', setPersonVipById(target.personId, args.vip)]);
         }
 
         // v2.2.4 — travel awareness. clear=true wipes; otherwise expects
@@ -1378,40 +1411,10 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // the external branch above; see applyTravel near the top of this case.
         applyTravel(target.personId);
 
-        const fieldsWritten = Object.keys(args).filter(k => k !== 'colleague_slack_id' && k !== 'colleague_name'
-          && (k !== 'currently_traveling' || travelWrite === 'applied'));
-        // Log the STORED name — the row actually written — not the model's label
-        // for it (this line once read "Paul Kammerzelt" against Sharon's slack_id).
-        logger.info('Person profile updated', { slackId, name: target.name, fields: fieldsWritten });
-
-        // v3.0.7 — stale-slot-results signal. When the write touches a
-        // field that affects find_available_slots' verdict for this person
-        // (timezone / structured work window / travel / email — never the
-        // prose `working_hours`, which no scheduling path reads; see
-        // describeHoursWrite), enrich the tool result with a flag + note. The
-        // next Sonnet iteration sees the note in the raw tool result content
-        // and re-runs find_available_slots instead
-        // of mentally filtering its prior memory of slot options. Closes
-        // the 2026-05-26 morning bug: owner said "Isaac works Mon-Fri",
-        // Maelle wrote the profile, then narrated "Monday 11:00 is the
-        // clean option" from her stale turn-1 memory without re-running
-        // the tool to get an updated 3-option spread.
-        const SLOT_RELEVANT_FIELDS = new Set([
-          'timezone', 'working_hours_structured', 'currently_traveling',
-          // v4.8.x — a corrected address changes whose calendar free/busy is
-          // queried and where the invite goes; prior slot results used the old one.
-          'email',
-        ]);
-        const slotRelevant = fieldsWritten.some(f => SLOT_RELEVANT_FIELDS.has(f));
-
-        const base = { updated: coreWrites.some(([, o]) => o === 'applied') || travelWrite === 'applied' || typeof args.vip === 'boolean' || typeof args.engagement_rank === 'number', name: getPersonById(target.personId)?.name ?? name, created: target.created } as Record<string, unknown>;
+        if (travelWrite) coreWrites.push(['currently_traveling', travelWrite]);
+        const { notes, ...receipt } = profileWriteReceipt(target.personId, target.name, coreWrites, priorInputs);
+        const base = { ...receipt, name: getPersonById(target.personId)?.name ?? name, created: target.created } as Record<string, unknown>;
         if (travelWrite) base.travel_write = travelWrite;
-        const notes: string[] = [];
-
-        if (slotRelevant) {
-          base._slot_results_now_stale = true;
-          notes.push(`You updated slot-relevant fields for ${name}. Any prior find_available_slots results involving ${name} are now stale — the candidate set changes with the new constraint. Re-run find_available_slots before proposing options to the owner. Do not mentally filter old slot candidates; the tool's diagnostics (day_summary, attendee work-hours filter, etc.) need to re-evaluate.`);
-        }
 
         // v4.8.x — a genuine two-identities clash on the stated address (L11:
         // flag, never silently merge). The store refused the write.
@@ -1428,7 +1431,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         const described = describeCoreWrites(coreWrites, context.profile.user.name.split(' ')[0]);
         if (notSavedFields.length) described.not_saved = [...(described.not_saved ?? []), ...notSavedFields];
         if (emailConflict) described.not_saved = [...(described.not_saved ?? []), 'email'];
-        if (travelWrite && travelWrite !== 'applied' && travelWrite !== 'already_set') described.not_saved = [...(described.not_saved ?? []), 'currently_traveling'];
+        if (travelWrite && !['applied', 'already_set', 'refused_lower_authority'].includes(travelWrite)) described.not_saved = [...(described.not_saved ?? []), 'currently_traveling'];
         if (described.not_saved) {
           base.not_saved = described.not_saved;
           logger.info('update_person_profile — fields refused by provenance or identity checks', {

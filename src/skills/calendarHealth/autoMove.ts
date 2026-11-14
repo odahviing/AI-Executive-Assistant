@@ -191,9 +191,14 @@ export async function executeInternalAutoMove(params: {
       issue.fix_error = 'I could not confirm every attendee’s availability, so I left the meeting unchanged.';
       return;
     }
-    if (Object.values(busy).flat().some(slot => slot.status !== 'free' && slot.status !== 'workingElsewhere'
-        && DateTime.fromISO(slot.start).toMillis() < DateTime.fromISO(newEndIso).toMillis()
-        && DateTime.fromISO(slot.end).toMillis() > DateTime.fromISO(newStartIso).toMillis())) {
+    const overlapping = Object.values(busy).flat().filter(slot => DateTime.fromISO(slot.start).toMillis() < DateTime.fromISO(newEndIso).toMillis()
+      && DateTime.fromISO(slot.end).toMillis() > DateTime.fromISO(newStartIso).toMillis());
+    if (overlapping.some(slot => slot.status === 'unknown')) {
+      issue.fix_failed = true;
+      issue.fix_error = 'An attendee’s availability is unconfirmed, so I left the meeting unchanged.';
+      return;
+    }
+    if (overlapping.some(slot => slot.status !== 'free' && slot.status !== 'workingElsewhere')) {
       issue.fix_failed = true;
       issue.fix_error = 'An attendee is busy at the destination, so I left the meeting unchanged.';
       return;

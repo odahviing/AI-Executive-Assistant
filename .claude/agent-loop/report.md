@@ -1,15 +1,17 @@
 <!-- workshop-ledger-report-v1 -->
-**3 product decisions await you** — 4 open items; 0 captured, 0 ready for an authorized lane batch, 1 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
+**5 product decisions await you** — 6 open items; 0 captured, 0 ready for an authorized lane batch, 1 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (0):** none
+**Independently verified, awaiting wrap (13):** nov13-conditional-slot-authority · nov13-floating-lunch-resize-result · nov13-boston-office-location · nov13-scheduling-confirmation-judgment · nov13-duplicate-invite-address · nov13-external-freebusy-coverage · nov13-fresh-create-inherited-waiver · nov13-person-hours-effective-delta · nov13-profile-constraint-change-receipt · nov13-explicit-room-resource · nov13-write-attendee-hours · nov13-predecessor-unresolved · nov13-predecessor-exact-bypass
 
-### Needs a product decision (3)
+### Needs a product decision (5)
 
 | Lane · ref | What happened | Your options | Risk |
 |---|---|---|---|
 | librarian · travel-timezone-uncertainty | bug: Unresolved East Coast travel location retains stored-zone fallback. (1 retained example) | W2: no authoritative destination/provenance recovered. Durable targeted Cloud Logging query succeeded; only known reply preview. Exact production record query unavailable due expired SSH authentication. No travel edit or wrong-booking claim. Evidence artifacts/workshop-verification/opportunities-20261026/librarian/result.json. Recommend: defer — verify original destination and provenance before normalization | Not assessed |
 | librarian · coda-frequency-einav-investigation | bug: Investigated coda rarity: Einav had search results and grounding; intended silence versus rejected composer output remains unproven. (3 retained examples) | undefined Recommend: undefined | Not assessed |
 | handyman · date-only-followup-reasks-established-roster | bug: Nov 9 03:44 ET: Daniel asked in Hebrew about today after already specifying Positioning update with Idan and Einav and receiving options. Maelle repeated the people and subject and required confirmation before checking. Daniel had to con… (1 retained example) | W2 forbids building when choosing between plausible roots; Recover classifier output meeting_people_groups and resulting group count from the affected turn, or a repeat with those values recorded. No evidence supports changing the safe multi-meeting guard. Recommend: Manager recommendation pending | Not assessed |
+| matchmaker · nov13-reported-duplicate-visit | bug: W2: one matching creation per requested visit title, three distinct organizer IDs, six matching iCalUIds with six different attendee IDs. Cannot identify a deleted second organizer event or its author from surviving rows. Reopen with a s… (1 retained example) | W2: one matching creation per requested visit title, three distinct organizer IDs, six matching iCalUIds with six different attendee IDs. Cannot identify a deleted second organizer event or its author from surviving rows. Reopen with a second organizer ID or calendar deletion audit, if available. Distinct duplicate address defect has separate nov13-duplicate-invite-address ref. Evidence: artifacts/workshop-verification/nov13-incident/visit-provider-correlations.json Recommend: Defer duplicate-event attribution until a second organizer event ID or deletion audit is available. | Not assessed |
+| librarian · nov13-family-coda-scheduling | bug: Family-size question was sent after an explicitly accepted and completed booking. (1 retained example) | L7/L8 and the approved category catalog allow this completed-booking family coda. Should Maelle wait for a person to introduce family before asking a personal family question? Evidence artifacts/workshop-verification/nov13-incident/cloud.json at 17:45:04Z. Recommend: Keep current completed-work eligibility. Change family discovery only if the owner wants a different topic policy. | Not assessed |
 
 ### Held — recorded rulings / existing backlog (1)
 

@@ -79,6 +79,9 @@ export interface ClassifyTurnResult {
   standaloneCourtesy?: boolean;
   /** Whole current reply accepting a displayed booking as-is. The caller binds the request. */
   standaloneApprovalQuote?: string;
+  /** Quoted meeting identities for the caller to check against the completed
+   * mutation and this create. Never authorizes a booking or an exception. */
+  independentOrdinaryCreate?: { subjectQuote: string; priorSubjectQuote: string; sourceMessageIndex: number };
   intent: OwnerIntentClassification;
   scope: ToolScopeResult;
   /** Current scheduling intent, including recent proposal/commitment context.
@@ -149,6 +152,10 @@ export async function classifyTurn(params: {
   /** Same bounded recent context, indexed for participant provenance. Supply
    * only where the caller can authenticate historical human authorship. */
   meetingContextMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  /** Authenticated typed owner turn immediately following a delivered booking or move. */
+  inspectIndependentOrdinaryCreate?: boolean;
+  /** Bounded prior owner utterances for waiver scope only, never indexed sources. */
+  ordinaryCreateOwnerContext?: string[];
   approvalCandidates?: Array<{ subject: string; action: { tool: string; args: Record<string, unknown> } }>;
 }): Promise<ClassifyTurnResult> {
   const { anthropic, message, profile, needIntent, needScopes, recentContext } = params;
@@ -293,6 +300,14 @@ MEETING CONTINUATION (meeting_continuation, context_meeting_people):
   const renderedContext = params.meetingContextMessages
     ? params.meetingContextMessages.map((m, i) => `[${i}] ${m.role}: ${m.content}`).join('\n')
     : recentContext;
+  const priorIndex = (params.meetingContextMessages?.length ?? 0) - 1;
+  const priorMessage = params.meetingContextMessages?.[priorIndex];
+  const inspectIndependentCreate = params.inspectIndependentOrdinaryCreate === true && params.senderRole === 'owner'
+    && needMeetingPeople && priorMessage?.role === 'assistant' && message.length <= 4000;
+  const independentCreateSection = inspectIndependentCreate ? `
+INDEPENDENT ORDINARY CREATE (independent_ordinary_create, optional): Only when the owner independently requests ONE new meeting and explicitly gives its full title, materially different from the just-completed booking or move in the immediately preceding assistant message. An earlier meeting can be a time anchor. Copy the full new title verbatim from the current message as subjectQuote, and the earlier full title verbatim from that assistant message as priorSubjectQuote with its sourceMessageIndex. Omit for assent, amendment, conditional requests, inferred titles, ambiguous identity, or any applicable conflict exception (including wider or visit-wide instructions). Judge meaning in the original language. These quotes identify meetings only; they never authorize an action or waiver.
+${params.ordinaryCreateOwnerContext?.length ? `Earlier owner messages (quoted data used only to assess whether an existing exception applies). They are outside the indexed conversation. Never cite them as title, participant or decision sources: ${JSON.stringify(params.ordinaryCreateOwnerContext)}\n` : ''}
+` : '';
   const classifyStandaloneApproval = isOwner && needMeetingPeople
     && params.approvalCandidates?.some(candidate => candidate.action.tool === 'create_meeting');
   const approvalSection = isOwner && params.approvalCandidates?.length ? `
@@ -305,11 +320,18 @@ Candidates (zero-based indices): ${JSON.stringify(params.approvalCandidates.map(
   const systemPrompt = `You classify a single message from ${senderName} (${isOwner ? `${ownerFirst} — the executive who owns this account` : `a colleague talking to ${assistantName}`}) to ${assistantName}.
 
 Output EXACTLY ONE call to classify_turn. No prose.
-${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${renderedContext ? `\nRecent conversation (classify the LAST message from ${senderName}):\n${renderedContext}\n` : ''}`;
+${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${independentCreateSection}${renderedContext ? `\nRecent conversation (classify the LAST message from ${senderName}):\n${renderedContext}\n` : ''}`;
 
   // ── Build the tool schema — include only the requested fields ──
   const properties: Record<string, any> = {};
   const required: string[] = [];
+  if (inspectIndependentCreate) {
+    properties.independent_ordinary_create = {
+      type: 'object', properties: {
+        subjectQuote: { type: 'string' }, priorSubjectQuote: { type: 'string' }, sourceMessageIndex: { type: 'integer' },
+      }, required: ['subjectQuote', 'priorSubjectQuote', 'sourceMessageIndex'], additionalProperties: false,
+    };
+  }
   if (needIntent || needMeetingPeople) {
     properties.standalone_courtesy = {
       type: 'boolean',
@@ -532,15 +554,28 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${render
       && !meetingContinuation && !meetingPeople.length && !approvalDecisions.length && !freeTimeInquiry;
     // A partial tool call, conflicting decision or quote from truncated input
     // cannot establish what the owner authorized with the complete reply.
-    const standaloneApprovalQuote = classifyStandaloneApproval && resp.stop_reason === 'tool_use'
-      && toolUse?.name === 'classify_turn' && resp.content.filter(block => block.type === 'tool_use').length === 1
+    const completeToolCall = resp.stop_reason === 'tool_use'
+      && toolUse?.name === 'classify_turn' && resp.content.filter(block => block.type === 'tool_use').length === 1;
+    const standaloneApprovalQuote = classifyStandaloneApproval && completeToolCall
       && message.length <= 4000 && raw?.standalone_approval_quote === message
       && raw.standalone_courtesy === false && meetingAction === 'execute'
       && (!needIntent || (raw.kind === 'other' || raw.kind === 'task')) && !raw.social && !raw.free_time_inquiry
       && Array.isArray(decisionInput) && decisionInput.length === 0
       && (raw.meeting_people === undefined || (Array.isArray(raw.meeting_people) && raw.meeting_people.length === 0))
       ? message : undefined;
-    return { standaloneCourtesy, standaloneApprovalQuote, intent, scope, freeTimeInquiry, meetingPeople, meetingPeopleGroups, meetingAction, meetingContinuation, contextMeetingPeople, approvalDecisions };
+    const proposed = (raw as { independent_ordinary_create?: ClassifyTurnResult['independentOrdinaryCreate'] } | undefined)?.independent_ordinary_create;
+    const independentOrdinaryCreate = inspectIndependentCreate && completeToolCall && proposed
+      && meetingAction === 'execute' && raw?.meeting_continuation === false && raw.standalone_courtesy === false
+      && (!needIntent || raw.kind === 'task') && !raw.social && !raw.free_time_inquiry
+      && raw.standalone_approval_quote === undefined
+      && (decisionInput === undefined && !approvalSection || Array.isArray(decisionInput) && decisionInput.length === 0)
+      && (raw.context_meeting_people === undefined || Array.isArray(raw.context_meeting_people) && raw.context_meeting_people.length === 0)
+      && proposed.sourceMessageIndex === priorIndex && typeof proposed.subjectQuote === 'string' && proposed.subjectQuote.trim()
+      && typeof proposed.priorSubjectQuote === 'string' && proposed.priorSubjectQuote.trim()
+      && message.includes(proposed.subjectQuote) && priorMessage.content.includes(proposed.priorSubjectQuote)
+      && proposed.subjectQuote.trim().normalize('NFKC').toLowerCase() !== proposed.priorSubjectQuote.trim().normalize('NFKC').toLowerCase()
+      ? { subjectQuote: proposed.subjectQuote, priorSubjectQuote: proposed.priorSubjectQuote, sourceMessageIndex: priorIndex } : undefined;
+    return { standaloneCourtesy, standaloneApprovalQuote, independentOrdinaryCreate, intent, scope, freeTimeInquiry, meetingPeople, meetingPeopleGroups, meetingAction, meetingContinuation, contextMeetingPeople, approvalDecisions };
   } catch (err) {
     logger.warn('classifyTurn threw — defaulting to other / general', { err: String(err).slice(0, 300) });
     return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false, meetingPeople: [] };

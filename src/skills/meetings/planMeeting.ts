@@ -36,8 +36,8 @@
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
-import { getOwnerEventsForDecision, getFreeBusyForDecision, findAvailableSlots, type CalendarEvent } from '../../connectors/graph/calendar';
-import { loadAttendeeAvailabilityForEmails } from '../../utils/attendeeAvailability';
+import { getOwnerEventsForDecision, getFreeBusyForDecision, type CalendarEvent } from '../../connectors/graph/calendar';
+import { attendeeWorkSegmentsBetween, loadAttendeeAvailabilityForEmails } from '../../utils/attendeeAvailability';
 import { resolveLocation, isPhoneLocationString, type LocationVerdict } from '../../utils/resolveLocation';
 import { bookingLeadTimeHours, checkSlot } from '../../utils/scheduleRules';
 import { subjectViewerFor, type SubjectViewer } from '../../utils/displaySubject';
@@ -63,6 +63,8 @@ export interface PlanParticipant {
   just_invite?: boolean;
   isOwner?: boolean;     // v2.9 — set true by normalizeBookingRequest for owner row
 }
+
+type IndependentCreate = import('../types').SkillContext['ordinaryCreateAfterOtherMeeting'];
 
 export interface PlanMeetingInput {
   profile: UserProfile;
@@ -115,6 +117,9 @@ export interface PlanMeetingInput {
   // directly from `args.relaxed`. The normalizer's `relaxed` post-gate value
   // is the authoritative input.
   allowRelaxed?: boolean;
+  /** The owner conditioned this move on confirmed attendee availability. */
+  requireAttendeeAvailability?: boolean;
+  ordinaryCreateAfterOtherMeeting?: IndependentCreate;
   /**
    * v4.4.x (#154) — true when the AUTHENTICATED owner asked for a rule-bend
    * from a clamped surface (MPIM/channel) — `grantRelaxed` held `allowRelaxed`
@@ -166,7 +171,7 @@ export interface PlanMeetingInput {
 export function planInputFromBookingRequest(
   req: BookingRequest,
   profile: UserProfile,
-  extra?: { preloadedEvents?: CalendarEvent[] },
+  extra?: { preloadedEvents?: CalendarEvent[]; ordinaryCreateAfterOtherMeeting?: IndependentCreate },
 ): PlanMeetingInput {
   return {
     profile,
@@ -194,6 +199,7 @@ export function planInputFromBookingRequest(
     ownerRoomBend: req.relaxedReason === 'owner_room_bend',
     isFloatingBlock: req.isFloatingBlock,
     preloadedEvents: extra?.preloadedEvents,
+    ordinaryCreateAfterOtherMeeting: extra?.ordinaryCreateAfterOtherMeeting,
     // o#218 — delegates to the ONE canonical predicate instead of a sixth
     // hand-rolled duplicate (the exact duplication gh#154 hoisted the others
     // away from). The old `initiator === 'owner' && !isMpim` check drifted
@@ -260,6 +266,7 @@ export type PlanAction =
   // location or room gate outranks it for the returned `action`. The local
   // is only ever assigned alongside the 'attendee_busy' gate push, so its
   // presence here is exactly as reliable as on `confirm_override`.
+  | { action: 'attendee_condition_unmet'; reason: string; suggestedAskText: string }
   | { action: 'confirm_override'; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null; attendeeBusyLabel?: string }
   | { action: 'escalate_approval'; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null }
   /**
@@ -981,8 +988,8 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       }
     }
 
-    // ── Owner-initiated: check internal-attendee freebusy (v2.7.1) ─────────
-    // When the OWNER books/moves a meeting with internal attendees, confirm
+    // ── Owner-initiated: check attendee freebusy (v2.7.1) ─────────
+    // When the OWNER books/moves a meeting with attendees, confirm
     // they're free at the slot. Availability is a HELPER, never a blocker
     // (rule 6): on the FIRST pass we flag ONCE (confirm_override); once the
     // owner overrides (allowRelaxed), we DON'T re-ask and we DON'T silently
@@ -993,15 +1000,14 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     //
     // Colleague-initiated path is NOT checked here. Slot finder already
     // annotates colleague-facing results with per-attendee status.
-    if (initiator === 'owner' && nonOwnerParticipants.length > 0) {
-      const ownerDomainLower = ownerEmail.split('@')[1].toLowerCase();
-      const internalEmails: string[] = [];
+    if ((initiator === 'owner' || input.requireAttendeeAvailability) && nonOwnerParticipants.length > 0) {
+      const attendeeEmails: string[] = [];
       for (const p of nonOwnerParticipants) {
-        const e = (p.email ?? '').toLowerCase();
+        const e = (p.email ?? '').trim().toLowerCase();
         if (!e) continue;
-        if (e.endsWith('@' + ownerDomainLower)) internalEmails.push(e);
+        if (e !== profile.meetings.room_email?.toLowerCase() && !attendeeEmails.includes(e)) attendeeEmails.push(e);
       }
-      if (internalEmails.length > 0) {
+      if (attendeeEmails.length > 0) {
         try {
           // `notChecked` = the read never happened for this window. It used
           // to come back as `{}`, `fb[email] ?? []` read it as "free", and the
@@ -1010,101 +1016,51 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
           // NOTICE, not a block — an unread calendar is not evidence of a clash
           // either, and turning it into a confirm round would be #137 in reverse
           // (and would cost an M3 round on every Graph hiccup).
-          const fbDiag: { notChecked?: string[] } = {};
+          const fbDiag: { unresolved?: string[]; notChecked?: string[] } = {};
           // Always live. This used to read fresh ONLY on an override/replay
           // (`input.allowRelaxed`), so every ordinary booking decided whether to
           // tell him "Simon is busy then" from a copy up to five minutes old.
           // Freshness belongs to the decision, not to the mood the request came in.
           const fb = await getFreeBusyForDecision(
-            ownerEmail, internalEmails,
+            ownerEmail, attendeeEmails,
             input.slotStartIso, input.slotEndIso,
             profile.user.timezone,
             fbDiag,
             input.calendarReplacements?.map(e => e.id) ?? (input.existingEventId ? [input.existingEventId] : undefined),
-          );
-          const notChecked = fbDiag.notChecked ?? [];
+          ).catch((err): Awaited<ReturnType<typeof getFreeBusyForDecision>> => {
+            logger.warn('planMeeting — attendee calendar unavailable; evaluating working hours independently', { err: String(err).slice(0, 200) });
+            fbDiag.notChecked = attendeeEmails;
+            return {};
+          });
+          const notChecked = [...new Set([...(fbDiag.notChecked ?? []), ...(fbDiag.unresolved ?? [])])];
           const slotStart = DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone, setZone: true });
           const slotEnd = DateTime.fromISO(input.slotEndIso, { zone: profile.user.timezone, setZone: true });
           // The shared read already excludes only the identified occurrence.
           // Equal clocks alone never identify another person's calendar event.
           const busyAttendees: string[] = [];
-          for (const email of internalEmails) {
+          for (const email of attendeeEmails) {
             const slots = [...(fb[email] ?? []), ...(input.calendarReplacements ?? [])
               .filter(e => e.id !== input.existingEventId && e.attendees?.some(a => a.emailAddress.address.toLowerCase() === email))
               .map(e => ({ start: DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone }).toISO()!, end: DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone }).toISO()!, status: 'busy' as const }))];
-            const overlap = slots.some(s => {
-              if (s.status === 'free') return false;
+            const overlapping = slots.filter(s => {
               const sStart = DateTime.fromISO(s.start, { zone: (s as any)._timezone ?? 'utc' });
               const sEnd = DateTime.fromISO(s.end, { zone: (s as any)._timezone ?? 'utc' });
               return sStart < slotEnd && sEnd > slotStart;
             });
-            if (overlap) busyAttendees.push(email);
+            if (overlapping.some(s => s.status === 'busy' || s.status === 'tentative' || s.status === 'oof')) busyAttendees.push(email);
+            else if (overlapping.some(s => s.status === 'unknown') && !notChecked.includes(email)) notChecked.push(email);
           }
 
-          // create-meeting-owner-path-no-attendee-availability-floor — the
-          // overlap loop above only catches a REAL conflicting event
-          // (`attendee_busy_collision`). It says nothing about a slot that
-          // falls outside an attendee's OWN working hours in their own
-          // timezone (`outside_attendee_work_hours`) — a separate rule kind
-          // (scheduleRules.ts's ladder) that existed only inside
-          // findAvailableSlots' SEARCH walker, never at booking time. That is
-          // the gap the 2026-08-07 Kevel/Reflectiz incident actually hit: two
-          // of three named-time candidates were outside Simon's hours and
-          // this owner-path check said nothing because it only ever asked
-          // "is he busy," never "is this even inside his day." Reuse the
-          // SAME mechanism Guard B / move_meeting's colleague-path already
-          // call for this exact purpose (attendeeAvailability + a single-slot
-          // findAvailableSlots read) instead of re-deriving hours/tz math
-          // here — one spine, M1. Only check attendees not already flagged
-          // busy above; a busy attendee's heads-up already covers them.
-          const hoursCheckEmails = internalEmails.filter(e => !busyAttendees.includes(e));
+          // Use the same complete-interval work-window calculation as the search
+          // walker. A guest's mailbox domain determines neither their work
+          // schedule nor whether their provider free/busy can be read.
           const hoursBlockedEmails: string[] = [];
           const hoursBlockedAssumedEmails = new Set<string>();
-          if (hoursCheckEmails.length > 0) {
-            try {
-              // #M3 (2026-07-23 owner ruling) — pass the owner's own zone as the
-              // fallback, the same convention as find_available_slots / Guard B /
-              // move_meeting's colleague-path (attendeeAvailability.ts:165). Without
-              // it, loadAttendeeAvailabilityForEmails silently `continue`s past any
-              // attendee with no stored timezone (attendeeAvailability.ts:200-201) —
-              // dropped from THIS owner-path hours check entirely, so the owner could
-              // book a no-TZ attendee (e.g. Simon) at 07:00 THEIR time with no
-              // heads-up at all.
-              const availability = loadAttendeeAvailabilityForEmails(hoursCheckEmails, ownerEmail, profile.user.timezone);
-              if (availability && availability.length > 0) {
-                const assumedEmails = new Set(availability.filter(a => a.assumed).map(a => a.email.toLowerCase()));
-                const hoursDiag: { rejectedCounts?: Record<string, number> } = {};
-                await findAvailableSlots({
-                  userEmail: ownerEmail,
-                  timezone: profile.user.timezone,
-                  durationMinutes: Math.max(5, Math.round(slotEnd.diff(slotStart, 'minutes').minutes)),
-                  attendeeAvailability: availability,
-                  searchFrom: input.slotStartIso,
-                  searchTo: input.slotEndIso,
-                  profile,
-                  diagnosticsOut: hoursDiag,
-                  // v3.0.6-style single-slot validation — see the parallel
-                  // comment in create_meeting Guard B. The window is exactly
-                  // [start, end], so widening would only spend extra Graph
-                  // round-trips on candidates this caller discards anyway.
-                  autoExpand: false,
-                });
-                for (const key of Object.keys(hoursDiag.rejectedCounts ?? {})) {
-                  if (key.startsWith('outside_attendee_work_hours:')) {
-                    const email = key.slice('outside_attendee_work_hours:'.length);
-                    hoursBlockedEmails.push(email);
-                    // #M3 hedge — a no-TZ attendee's hours here are a GUESS
-                    // (owner's frame + default hours), never narrated to the
-                    // owner as a fact (same hedge as violationLabels.ts's
-                    // attendeeConflictLine).
-                    if (assumedEmails.has(email.toLowerCase())) hoursBlockedAssumedEmails.add(email);
-                  }
-                }
-              }
-            } catch (hoursErr) {
-              logger.warn('planMeeting — attendee working-hours check threw, proceeding', {
-                err: String(hoursErr).slice(0, 200), attendees: hoursCheckEmails,
-              });
+          const availability = loadAttendeeAvailabilityForEmails(attendeeEmails, ownerEmail, profile.user.timezone);
+          for (const entry of availability ?? []) {
+            if (attendeeWorkSegmentsBetween(entry, slotStart, slotEnd).some(segment => !segment.fitsWorkHours)) {
+              hoursBlockedEmails.push(entry.email);
+              if (entry.assumed && !entry.workingHoursTimezone) hoursBlockedAssumedEmails.add(entry.email);
             }
           }
 
@@ -1146,13 +1102,18 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
               const who = joinNames(hoursBlockedAssumed);
               parts.push(`it's probably outside ${who}'s working hours (no timezone on file, so this is a guess)`);
             }
-            const label = parts.join('; ');
+            const label = initiator === 'owner' ? parts.join('; ') : 'the requested time does not work for every attendee';
             logger.info('planMeeting — attendee availability collision', {
               busyAttendees, hoursBlockedEmails, slot: input.slotStartIso, overridden: input.allowRelaxed === true,
             });
-            if (input.allowRelaxed || intent === 'move') {
-              // Owner override, approved-replay, OR any MOVE: book anyway and TELL him.
-              // #A (2026-07-19) — a MOVE never blocks on an attendee conflict (owner's
+            const independent = input.ordinaryCreateAfterOtherMeeting;
+            const independentRoster = new Set(independent?.attendeeEmails.map(email => email.trim().toLowerCase()));
+            const newCreateNeedsDecision = intent === 'new_booking' && independent && independent.subject.trim() !== ''
+              && independent.subject.trim().toLowerCase() === input.subject?.trim().toLowerCase()
+              && independentRoster.size === attendeeEmails.length && attendeeEmails.every(email => independentRoster.has(email));
+            if (!input.requireAttendeeAvailability && !newCreateNeedsDecision && (input.allowRelaxed || intent === 'move')) {
+              // An unconditional move or override proceeds with a notice.
+              // #A (2026-07-19) — an unconditional MOVE never blocks on an attendee conflict (owner's
               // rule: "book me 5 double meetings, but FLAG it"). A colleague-requested
               // move can re-land on a time that attendee is busy ("Intro with Maya");
               // surface it as a heads-up, don't cost a confirm. Fresh BOOKS still confirm
@@ -1165,7 +1126,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
               // it goes out in the SAME message instead of a second round.
               // M13 — one dual clock, quoted, never re-derived per string.
               const subj = input.subject ?? 'this meeting';
-              const askText = `Heads up — ${label} at ${whenText(input.slotStartIso, input.slotEndIso)}. Book "${subj}" anyway, or pick a different time?`;
+              const askText = `Heads up — ${label} at ${whenText(input.slotStartIso, input.slotEndIso)}. ${intent === 'move' ? 'Move' : 'Book'} "${subj}" anyway, or pick a different time?`;
               attendeeBusyLabel = label;
               gates.push({ kind: 'attendee_busy', ask: askText });
             }
@@ -1182,18 +1143,24 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
               notChecked, slot: input.slotStartIso,
             });
             availabilityUnconfirmed = true;
-            attendeeBusyNotice = [attendeeBusyNotice, `I couldn't establish ${who}'s availability for this proposed move, so it isn't confirmed on their side`].filter(Boolean).join('; ');
+            const unknown = initiator === 'owner' ? `I couldn't establish ${who}'s availability at this time, so it remains unconfirmed on their side` : 'Availability could not be confirmed for every attendee.';
+            attendeeBusyNotice = [attendeeBusyNotice, unknown].filter(Boolean).join('; ');
           }
         } catch (err) {
           // Permission errors (Calendars.Read) or transient Graph failures —
           // fail open. The owner-side rule check has already passed; trust
           // owner's judgment on the attendee side rather than block.
           logger.warn('planMeeting — attendee freebusy check threw, proceeding', {
-            err: String(err).slice(0, 200), attendees: internalEmails,
+            err: String(err).slice(0, 200), attendees: attendeeEmails,
           });
           availabilityUnconfirmed = true;
           attendeeBusyNotice = 'Attendee availability could not be established; it remains unconfirmed.';
         }
+      }
+      if (input.requireAttendeeAvailability && (attendeeBusyLabel || availabilityUnconfirmed)) {
+        const reason = [attendeeBusyLabel, availabilityUnconfirmed ? attendeeBusyNotice ?? 'Availability could not be confirmed for every attendee.' : undefined].filter(Boolean).join('; ');
+        const when = whenText(input.slotStartIso, input.slotEndIso);
+        return { action: 'attendee_condition_unmet', reason, suggestedAskText: `The meeting was left unchanged: ${reason} at ${when}. Choose a different time, or give a new instruction naming the meeting, time, and the conflict or uncertainty you want to accept.` };
       }
     }
   }
@@ -1203,18 +1170,22 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   let isOnline: boolean;
   let location: string;
   let addRoomEmail: boolean | undefined;
+  const roomMailbox = profile.meetings.room_email?.trim().toLowerCase();
+  const roomInRoster = !!roomMailbox && participants.some(p => p.email?.trim().toLowerCase() === roomMailbox);
   let preserveExisting: boolean | undefined;
   if (locationVerdict && locationVerdict.kind === 'resolved') {
     isOnline = locationVerdict.isOnline;
     location = locationVerdict.location;
-    addRoomEmail = locationVerdict.addRoomEmail;
+    addRoomEmail = locationVerdict.addRoomEmail || (roomInRoster && (intent !== 'move' || location === input.existingEventLocation)) || undefined;
   } else if (locationVerdict && locationVerdict.kind === 'preserve_existing') {
     isOnline = locationVerdict.isOnline;
     location = locationVerdict.location;
     preserveExisting = true;
     // Preserving the venue does not preserve its availability at a new time.
-    addRoomEmail = !isOnline && !!profile.meetings.room_email && participants.some(p => p.email?.toLowerCase() === profile.meetings.room_email!.toLowerCase());
+    addRoomEmail = roomInRoster;
   } else if (locationVerdict && locationVerdict.kind === 'skip_stamp') {
+    // An explicit resource invitation still needs its own availability check.
+    addRoomEmail = roomInRoster || undefined;
     // Logistic / Private category on a fresh booking — no auto-stamp. Empty
     // location, not online. (A move of one comes back `preserve_existing` from
     // resolveLocation path 1.5, never this branch — its venue is the owner's.)
@@ -1227,8 +1198,8 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   }
 
   // ── Meeting room availability ───────────────────────────────────────────
-  // When the verdict pointed at the big Meeting Room (office day + internal
-  // ≥4), check the room mailbox is actually free. Three outcomes:
+  // When the selected venue or roster reserves the configured resource,
+  // check its mailbox at the requested time.
   //   - free: proceed as-is.
   //   - busy + ≤5 people: swap to small-room label, drop the room mailbox.
   //   - busy + ≥6 people: refuse, surface ask to owner.

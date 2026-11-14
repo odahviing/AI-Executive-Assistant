@@ -56,7 +56,7 @@ function person(options = {}) {
     'src/db.ts': db, 'src/connections/registry.ts': {}, 'src/memory/peopleMemory.ts': { syncPersonOperationalSections: async () => true },
     'src/utils/skillPreferences.ts': {}, 'src/utils/resolveSlackId.ts': { SLACK_ID_RE: /^U[A-Z0-9]+$/ },
     'src/memory/resolveAttendeeEmails.ts': { nameGenuinelyMatches: () => false },
-    'src/utils/workingHoursDefault.ts': { refreshAutoWorkingHours() {}, refreshAutoWorkingHoursById() {} },
+    'src/utils/workingHoursDefault.ts': { getEffectiveWorkingHours: () => null, describeEffectiveWorkingHours: () => null, refreshAutoWorkingHours() {}, refreshAutoWorkingHoursById() {} },
     'src/utils/logger.ts': logger, 'src/utils/resolvePersonTarget.ts': { resolvePersonTarget: () => target },
     'src/utils/timezoneValidator.ts': { isStrictIana: () => true },
   }, ['src/core/assistant.ts']);

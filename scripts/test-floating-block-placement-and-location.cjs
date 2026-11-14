@@ -14,7 +14,7 @@
  *   F. calendar-health missing-block detection: whole-day presence, the
  *      override-day gate, and `can_skip` = fine to leave un-booked when no room.
  *   G. analyzeCalendar's detector uses the same day-scoped presence + can_skip.
- *   H. the owner-path block move writes its move_meeting activity row; the
+ *   H. the owner-path block move records an undo row after an acknowledged PATCH; the
  *      dead `confirm_outside_window` read on moves is gone.
  *
  * Production modules and AST-selected production branches are compiled from
@@ -684,14 +684,30 @@ test('G · an in-window lunch stuck under a meeting is still reported (legitimat
   assert.match(issues[0].detail, /overlaps Workshop/);
 });
 
-// ── H. owner-path block move writes its activity row; the dead flag is gone ─
-test('F5 · the owner-path floating-block move logs a move_meeting row before returning', () => {
-  const chain = one(collect(source('src/skills/meetings/ops/handlers/moveMeeting.ts'), n => ts.isArrowFunction(n)
-    && n.getText().includes('action_summary: `Moved ${matchedBlock.name}')), 'owner block-move chain');
-  const call = one(collect(chain, n => ts.isCallExpression(n) && n.expression.getText() === 'logActivity'), 'logActivity in chain');
-  assert.match(call.getText(), /subkind: 'move_meeting'/);
-  assert.match(call.getText(), /original_start: preMoveStartIso/);
-});
+// H. Undo history records acknowledged owner moves.
+for (const responseLost of [false, true]) {
+  const outcome = responseLost ? 'lost response leaves no undo action' : 'acknowledged PATCH records the original and new intervals';
+  test('F5 · owner floating block ' + outcome, () => {
+    const handler = namedFunction('src/skills/meetings/ops/handlers/moveMeeting.ts', 'handleMoveMeeting');
+    const branch = one(collect(handler, n => ts.isIfStatement(n) && n.expression.getText() === 'isOwnerPath'
+      && collect(n.thenStatement, child => ts.isIdentifier(child) && child.text === 'matchedBlock').length > 0
+      && collect(n.thenStatement, child => ts.isCallExpression(child) && child.expression.getText() === 'logActivity').length > 0), 'floating owner activity branch');
+    const call = one(collect(branch.thenStatement, n => ts.isCallExpression(n) && n.expression.getText() === 'logActivity'), 'owner activity call');
+    let statement = call;
+    while (statement.parent !== branch.thenStatement) statement = statement.parent;
+    const rows = [];
+    const from = '2026-10-13T12:00:00+03:00', to = '2026-10-13T12:15:00+03:00';
+    const oldEnd = '2026-10-13T12:25:00+03:00', newEnd = '2026-10-13T12:55:00+03:00';
+    compile(statement.getText(), {responseLost, logActivity: row => rows.push(row),
+      context:{profile:{user:{slack_user_id:'owner'}},userId:'owner',senderRole:'owner',threadTs:'thread',channelId:'dm'},
+      args:{meeting_id:'lunch',meeting_subject:'Lunch'},preMoveStartIso:from,preMoveEndIso:oldEnd,effectiveStart:to,effectiveEnd:newEnd});
+    assert.equal(rows.length, responseLost ? 0 : 1);
+    if (!responseLost) {
+      assert.equal(rows[0].subkind, 'move_meeting');
+      assert.deepEqual(plain(rows[0].outcomeJson), {event_id:'lunch',original_start:from,original_end:oldEnd,new_start:to,new_end:newEnd});
+    }
+  });
+}
 
 test('F8 · move_meeting / bookingRequest carry no confirm_outside_window read or reference', () => {
   for (const file of ['src/skills/meetings/bookingRequest.ts', 'src/skills/meetings/ops/handlers/moveMeeting.ts']) {

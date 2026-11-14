@@ -932,18 +932,15 @@ export function promoteTimezoneTempById(
 // gating). Set only on the owner's explicit say-so. Seed for the full VIP
 // feature (#58). Default 0; idempotent.
 
-export function setPersonVip(slackId: string, vip: boolean): void {
+export function setPersonVipById(personId: string, vip: boolean): CoreFieldWrite {
   const db = getDb();
-  db.prepare(
-    `UPDATE people_memory SET is_vip = ?, updated_at = datetime('now') WHERE slack_id = ?`
-  ).run(vip ? 1 : 0, slackId);
-}
-
-export function setPersonVipById(personId: string, vip: boolean): void {
-  const db = getDb();
-  db.prepare(
+  const row = getPersonById(personId);
+  if (!row) return 'no_person';
+  if ((Number(row.is_vip) === 1) === vip) return 'already_set';
+  const { changes } = db.prepare(
     `UPDATE people_memory SET is_vip = ?, updated_at = datetime('now') WHERE person_id = ?`
   ).run(vip ? 1 : 0, personId);
+  return changes ? 'applied' : 'no_person';
 }
 
 /**
@@ -1372,13 +1369,13 @@ export function resolveOutboundLanguageForPerson(person: PersonMemory | null | u
  * role_summary overwrote an owner-stated one, and a colleague's self-written
  * working window replaced the one the owner dictated, with no trace.
  */
-export function updatePersonProfile(slackId: string, updates: Partial<PersonProfile>, by: CoreFieldSetBy): ProfileWriteOutcomes {
+export function updatePersonProfile(slackId: string, updates: Partial<PersonProfile>, by: CoreFieldSetBy, reportInvalidHours = false): ProfileWriteOutcomes {
   const pid = personIdForSlackId(slackId);
-  return pid ? updatePersonProfileById(pid, updates, by) : {};
+  return pid ? updatePersonProfileById(pid, updates, by, reportInvalidHours) : {};
 }
 
 /** v3.2.0 — person_id-keyed worker. */
-export function updatePersonProfileById(personId: string, updates: Partial<PersonProfile>, by: CoreFieldSetBy): ProfileWriteOutcomes {
+export function updatePersonProfileById(personId: string, updates: Partial<PersonProfile>, by: CoreFieldSetBy, reportInvalidHours = false): ProfileWriteOutcomes {
   if (Object.prototype.hasOwnProperty.call(updates, 'working_hours') && updates.working_hours !== undefined) throw new Error('working_hours is historical; use working_hours_structured.week');
   const db = getDb();
   const row = db.prepare('SELECT profile_json, timezone FROM people_memory WHERE person_id = ?').get(personId) as { profile_json: string | null; timezone: string | null } | undefined;
@@ -1398,7 +1395,30 @@ export function updatePersonProfileById(personId: string, updates: Partial<Perso
     const current = existing[field];
     const holder = tags[field];
     const currentRank = holder ? SET_BY_RANK[holder] : 0;   // untagged legacy = unknown authority
-    if (present(current) && JSON.stringify(current) === JSON.stringify(value)) {
+    let proposed = value;
+    let same = current === value;
+    if (field === 'working_hours_structured') {
+      const { mergeWorkingHoursUpdate, defaultWorkingHoursForTz, WEEK_ORDER } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
+      const prior = existing.working_hours_structured;
+      try {
+        const next = mergeWorkingHoursUpdate(prior, value, row.timezone ? defaultWorkingHoursForTz(row.timezone) : undefined, row.timezone);
+        proposed = next;
+        same = !!prior && prior.source === next.source && prior.timezone === next.timezone
+          && WEEK_ORDER.every(day => prior.week[day].length === next.week[day].length
+            && prior.week[day].every((window, i) => window.hoursStart === next.week[day][i].hoursStart
+              && window.hoursEnd === next.week[day][i].hoursEnd));
+      } catch (error) {
+        // A lower-authority malformed delta cannot confirm an existing fact.
+        // Preserve the existing refusal contract for that caller.
+        if (!prior || newRank >= currentRank) {
+          if (!reportInvalidHours) throw error;
+          outcomes[field] = 'no_value';
+          continue;
+        }
+        same = false;
+      }
+    }
+    if (present(current) && same) {
       // Already what was asked — the only work left is raising the tag.
       if (newRank <= currentRank) { outcomes[field] = 'already_set'; continue; }
     } else if (present(current) && newRank < currentRank) {
@@ -1406,12 +1426,7 @@ export function updatePersonProfileById(personId: string, updates: Partial<Perso
       outcomes[field] = 'refused_lower_authority';
       continue;
     }
-    if (field === 'working_hours_structured') {
-      const { mergeWorkingHoursUpdate, defaultWorkingHoursForTz } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
-      existing.working_hours_structured = mergeWorkingHoursUpdate(existing.working_hours_structured, value, row.timezone ? defaultWorkingHoursForTz(row.timezone) : undefined, row.timezone);
-    } else {
-      (existing as Record<string, unknown>)[field] = value;
-    }
+    (existing as Record<string, unknown>)[field] = proposed;
     tags[field] = by;
     outcomes[field] = 'applied';
     changed = true;

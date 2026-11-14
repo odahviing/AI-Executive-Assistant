@@ -5,6 +5,7 @@
  */
 import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
+import { isConfiguredMeetingRoom } from '../../../../utils/resolveLocation';
 
 import { formatIsoTime, computeVacatedSlot, openQuestionsField, alternativesNote, recordProposedAlternatives, subjectsPlausiblyMatch, resolveActivityTargetIdentity, HANDLER_ERROR_CODE } from '../../ops/helpers';
 import { humanizeViolationLabel, attendeeConflictRefusal, bookedOverAttendeesNote } from '../../ops/violationLabels';
@@ -87,7 +88,7 @@ export async function checkCoordinatedMoves(args: Record<string, unknown>, ctx: 
     existingEventId: e.id, existingEventCategories: e.categories, existingEventLocation: e.location?.displayName,
     existingEventIsOnline: e.isOnlineMeeting, priorSlotStartIso: DateTime.fromISO(e.start.dateTime,{zone:e.start.timeZone}).toISO()!,
     priorSlotEndIso: DateTime.fromISO(e.end.dateTime,{zone:e.end.timeZone}).toISO()!, preloadedEvents: projected,
-    calendarReplacements: replacements, allowRelaxed: grant.relaxed, ownerRoomBend: grant.relaxedReason === 'owner_room_bend',
+    calendarReplacements: replacements, requireAttendeeAvailability: args.require_attendee_availability === true, allowRelaxed: grant.relaxed, ownerRoomBend: grant.relaxedReason === 'owner_room_bend',
     viewer: subjectViewerFor(context), viewerEmail: viewerEmailFor(context) }));
   const decisions: import('../../planMeeting').PlanAction[] = [];
   for (const input of inputs) decisions.push(await planMeeting(input));
@@ -413,8 +414,8 @@ interface PendingUpdate {
   patchLocation: string | undefined;
   /** EXACTLY the `isOnline` the updateMeeting call will send. undefined = untouched. */
   patchIsOnline: boolean | undefined;
-  /** The venue re-resolve pushed the room mailbox onto the invite. */
-  roomEmailAdded: boolean;
+  /** The edit requests or reaffirms the configured resource at the event time. */
+  roomRequested: boolean;
   /** Post-edit participant count INCLUDING the owner (what the room check sizes on). */
   participantCount: number | undefined;
 }
@@ -471,7 +472,7 @@ async function colleagueUpdateRuleGate(
   args: Record<string, unknown>,
   ctx: OpCtx,
   pending: PendingUpdate,
-): Promise<{ refusal?: Record<string, unknown>; roomSmallLabel?: string }> {
+): Promise<{ refusal?: Record<string, unknown>; roomSmallLabel?: string; roomNotice?: string }> {
   const { context, userEmail } = ctx;
   const profile = context.profile;
   const ownerFirst = profile.user.name.split(' ')[0];
@@ -492,7 +493,7 @@ async function colleagueUpdateRuleGate(
     pending.categoryOverride !== undefined
     || pending.patchLocation !== undefined
     || pending.patchIsOnline !== undefined
-    || pending.roomEmailAdded;
+    || pending.roomRequested;
   if (!touchesRuleInputs) return {};
 
   // The shape re-eval already loaded the event when it ran. Since 2026-09-09 an
@@ -546,7 +547,7 @@ async function colleagueUpdateRuleGate(
     riskKinds.add('travel_buffer_collision');
   }
 
-  if (riskKinds.size === 0 && !pending.roomEmailAdded) return {};
+  if (riskKinds.size === 0 && !pending.roomRequested) return {};
 
   // Past this point something IS at risk, so an unreadable slot is "can't
   // check", never "nothing to check" — same stance as move_meeting's own
@@ -635,22 +636,24 @@ async function colleagueUpdateRuleGate(
     }
 
     // ── The room, when the venue re-resolve just invited it ────────────────
-    // Same three outcomes planMeeting applies on create/move (its
-    // `addRoomEmail` block) — never reached from update before, so a venue
-    // change quietly booked a room somebody else already had.
-    if (pending.roomEmailAdded) {
+    // Same resource outcomes planMeeting applies on create/move (its
+    // `addRoomEmail` block). A text label alone cannot reserve the room, so a venue
+    // or mailbox change must reach the provider check before PATCH.
+    if (pending.roomRequested) {
       const { checkMeetingRoomAvailability } = await import('../../../../utils/meetingRoomAvailability');
       const roomVerdict = await checkMeetingRoomAvailability({
         profile,
         startIso: existing.startIso,
         endIso: existing.endIso,
         participantCount: pending.participantCount ?? 0,
+        existingEventId: meetingId,
       });
+      if (roomVerdict.kind === 'skip') return { roomNotice: 'Meeting room availability could not be confirmed.' };
       if (roomVerdict.kind === 'room_busy_small_fits') {
         logger.info('update_meeting colleague gate — meeting room busy, falling back to the small room', {
           meetingId, smallLabel: roomVerdict.smallLabel, participantCount: pending.participantCount,
         });
-        return { roomSmallLabel: roomVerdict.smallLabel };
+        return { roomSmallLabel: roomVerdict.smallLabel, roomNotice: 'The meeting room is taken; availability of the smaller space was not checked.' };
       }
       if (roomVerdict.kind === 'room_busy_too_big') {
         logger.info('update_meeting colleague gate refused — meeting room busy + group too large', {
@@ -917,8 +920,8 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
         // On that path the block does exactly ONE thing more than before — it
         // re-runs detectCategory with the new venue as its hint (gated further
         // down on the string genuinely differing from what's on the event).
-        // It does NOT ship the attendee array (see `mergedAttendees` below) and
-        // does NOT run resolveLocation (see `rePlaceVenue` below): the explicit
+        // A configured resource may change the attendee array. A bare venue
+        // does not re-place the event through resolveLocation: the explicit
         // string is the venue, and the event's own online-ness is left alone.
         const explicitLocationRequested = typeof args.location === 'string' && !!(args.location as string).trim();
         let mergedAttendees: Array<{ name?: string; email: string; optional?: boolean }> | undefined;
@@ -932,7 +935,8 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
         // attendee change, no is_online flag, no explicit location) — so no
         // colleague update ever costs two reads of the same event.
         let existingEvent: Awaited<ReturnType<typeof getEventForAttendeeUpdate>> | undefined;
-        let roomEmailAdded = false;
+        let roomRequested = false;
+        let inferredRoom = false;
         let postEditParticipantCount: number | undefined;
         // jim-douglass follow-up (2026-08-30) — divergences between a supplied
         // address and the one actually invited (directory override, or a
@@ -994,7 +998,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
               return { name: resolved.name, email, optional: a.optional === true };
             })
             .filter(a => a.email.includes('@'));
-          resolvedAddedEmails = addList.map(a => a.email);
+          resolvedAddedEmails = [...new Set(addList.map(a => a.email))];
           const removeList = rawRemove
             .map(e => (e ?? '').trim().toLowerCase())
             .filter(e => e.includes('@'));
@@ -1074,14 +1078,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
             if (!merged.has(a.email)) merged.set(a.email, a);
           }
           const attendeesAfterEdit = [...merged.values()];
-          // The roster ships to Graph ONLY when this edit changes it (an
-          // add/remove) or re-places the venue (which may add the room mailbox).
-          // Never on a bare explicit-`location` edit: Graph replaces the WHOLE
-          // array on an attendees PATCH (calendarMutations.ts updateMeeting),
-          // so a location-only edit need not resend an unchanged roster.
-          // Existing resource and optional roles survive roster edits.
-          // `attendeesAfterEdit` still feeds the
-          // shape signals and detectCategory below on every path.
+          // Preserve Graph roles. An explicit location needs a roster PATCH only if room membership changes.
           mergedAttendees = (hasAttendeeChange || venueChangeRequested) ? attendeesAfterEdit : undefined;
 
           // Shape change detection — same signals resolveLocation reads:
@@ -1226,6 +1223,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
                 };
               }
               if (loc?.kind === 'resolved') {
+                inferredRoom = loc.addRoomEmail === true;
                 if (venueChangeRequested) {
                   // Venue change → apply the FULL verdict verbatim (trust
                   // resolveLocation), NOT gated on "differs from existing": the
@@ -1236,16 +1234,6 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
                   // "change to meeting room" also lands meeting@… without a re-ask.
                   newLocationFromShape = loc.location;
                   newIsOnlineFromShape = loc.isOnline;
-                  const roomEmail = (context.profile.meetings.room_email ?? '').toLowerCase().trim();
-                  if (loc.addRoomEmail && roomEmail && mergedAttendees
-                      && !mergedAttendees.some(a => a.email.toLowerCase() === roomEmail)) {
-                    mergedAttendees.push({ email: roomEmail, optional: true });
-                    // 2026-09-07 — flagged for the colleague rule gate below,
-                    // which is where the room's own free/busy is actually
-                    // checked (create/move do it in planMeeting; this push had
-                    // no check behind it at all).
-                    roomEmailAdded = true;
-                  }
                 } else {
                   if (loc.location !== existing.location) newLocationFromShape = loc.location;
                   if (loc.isOnline !== existing.isOnline) newIsOnlineFromShape = loc.isOnline;
@@ -1259,6 +1247,26 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
               logger.warn('update_meeting — shape re-evaluation threw, applying attendee change without category/location update', {
                 err: String(err).slice(0, 200),
               });
+            }
+          }
+
+          const roomEmail = context.profile.meetings.room_email?.trim().toLowerCase();
+          if (roomEmail) {
+            const namedVenue = explicitLocationRequested ? (args.location as string).trim() : undefined;
+            const roomAddedByCaller = addList.some(a => a.email === roomEmail);
+            const requestedRoom = roomAddedByCaller || (namedVenue
+              ? isConfiguredMeetingRoom(context.profile, namedVenue)
+              : inferredRoom);
+            const hasRoom = merged.has(roomEmail);
+            if (requestedRoom && !removeSet.has(roomEmail)) {
+              roomRequested = true;
+              if (!hasRoom) {
+                mergedAttendees = [...attendeesAfterEdit, { email: roomEmail, optional: true }];
+              }
+            } else if (hasRoom && (namedVenue || venueChangeRequested || newLocationFromShape !== undefined)
+                && !isConfiguredMeetingRoom(context.profile, namedVenue ?? newLocationFromShape)
+                && isConfiguredMeetingRoom(context.profile, existing.location)) {
+              mergedAttendees = attendeesAfterEdit.filter(a => a.email !== roomEmail);
             }
           }
         }
@@ -1311,10 +1319,11 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
             categoryOverride: patchCategory,
             patchLocation,
             patchIsOnline,
-            roomEmailAdded,
+            roomRequested,
             participantCount: postEditParticipantCount,
           });
           if (gate.refusal) return gate.refusal;
+          ownerRoomBusyNotice = gate.roomNotice;
           if (gate.roomSmallLabel) {
             // Room taken but the group fits the small space — planMeeting's
             // `room_busy_small_fits` outcome, applied here: swap the label and
@@ -1324,11 +1333,11 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
             patchLocation = gate.roomSmallLabel;
             newLocationFromShape = gate.roomSmallLabel;
             const roomEmailLc = (context.profile.meetings.room_email ?? '').toLowerCase().trim();
-            if (mergedAttendees && roomEmailLc) {
-              mergedAttendees = mergedAttendees.filter(a => a.email.toLowerCase() !== roomEmailLc);
+            if (roomEmailLc && (mergedAttendees ?? existingEvent?.attendees ?? []).some(a => a.email.toLowerCase() === roomEmailLc)) {
+              mergedAttendees = (mergedAttendees ?? existingEvent!.attendees).filter(a => a.email.toLowerCase() !== roomEmailLc);
             }
           }
-        } else if (roomEmailAdded && existingEvent?.startIso && existingEvent?.endIso) {
+        } else if (roomRequested && existingEvent?.startIso && existingEvent?.endIso) {
           // Owner-direct venue change — same probe, NO gate. Owner ruling
           // (2026-09-07): "well if it can check if room is free great its the
           // same busy/free as all other" — his override is total (M8), and
@@ -1360,33 +1369,44 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
               startIso: existingEvent.startIso,
               endIso: existingEvent.endIso,
               participantCount: postEditParticipantCount ?? 0,
+              existingEventId: args.meeting_id as string,
             });
             const roomEmailLc = (context.profile.meetings.room_email ?? '').toLowerCase().trim();
             if (roomVerdict.kind === 'room_busy_small_fits') {
-              if (mergedAttendees && roomEmailLc) {
-                mergedAttendees = mergedAttendees.filter(a => a.email.toLowerCase() !== roomEmailLc);
+              if (roomEmailLc && (mergedAttendees ?? existingEvent.attendees).some(a => a.email.toLowerCase() === roomEmailLc)) {
+                mergedAttendees = (mergedAttendees ?? existingEvent.attendees).filter(a => a.email.toLowerCase() !== roomEmailLc);
               }
-              ownerRoomBusyNotice = `the meeting room is already taken then; ${roomVerdict.smallLabel} is an alternative, but its availability was not checked — updated without inviting the room or changing the location`;
+              ownerRoomBusyNotice = `the meeting room is already taken then; ${roomVerdict.smallLabel} is an alternative, but its availability was not checked — the room was not invited`;
               logger.info('update_meeting owner room check — room busy, small room unverified (notice only, no auto-swap)', {
                 meetingId: args.meeting_id, smallLabel: roomVerdict.smallLabel, participantCount: postEditParticipantCount,
               });
             } else if (roomVerdict.kind === 'room_busy_too_big') {
-              if (mergedAttendees && roomEmailLc) {
-                mergedAttendees = mergedAttendees.filter(a => a.email.toLowerCase() !== roomEmailLc);
+              if (roomEmailLc && (mergedAttendees ?? existingEvent.attendees).some(a => a.email.toLowerCase() === roomEmailLc)) {
+                mergedAttendees = (mergedAttendees ?? existingEvent.attendees).filter(a => a.email.toLowerCase() !== roomEmailLc);
               }
               ownerRoomBusyNotice = 'the meeting room is already taken then and the group is too big for the small room — he\'ll need to grab space himself if he still wants it there';
               logger.info('update_meeting owner room check — room busy + group too large, proceeding without the room', {
                 meetingId: args.meeting_id, participantCount: postEditParticipantCount,
               });
+            } else if (roomVerdict.kind === 'skip') {
+              ownerRoomBusyNotice = 'Meeting room availability could not be confirmed.';
             }
           } catch (err) {
             // Fail open — same stance as planMeeting's own room check: an
             // unreadable room calendar proceeds with the invite as resolved;
             // Outlook will tell him if it actually conflicts.
+            ownerRoomBusyNotice = 'Meeting room availability could not be confirmed.';
             logger.warn('update_meeting owner room check threw, proceeding', { err: String(err).slice(0, 200) });
           }
         }
 
+        if (roomRequested && (!existingEvent?.startIso || !existingEvent.endIso)) {
+          ownerRoomBusyNotice = 'Meeting room availability could not be confirmed.';
+        }
+        if (resolvedAddedEmails && mergedAttendees) {
+          const invited = new Set(mergedAttendees.map(a => a.email.toLowerCase()));
+          resolvedAddedEmails = resolvedAddedEmails.filter(email => invited.has(email));
+        }
         await updateMeeting({
           userEmail,
           timezone,
@@ -1437,10 +1457,13 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           // Room" was indistinguishable from a location change — the claim-checker
           // couldn't match it to a draft's "added meeting@…" and inverted a TRUE add
           // into "not added yet, confirm the address" (2026-07-15 Offensive Hub).
-          const names = rawAdd
-            .map(a => (a.email && a.name ? `${a.name} (${a.email})` : (a.email || a.name)))
-            .filter(Boolean) as string[];
-          updateChanges.push(`added ${names.join(', ')}`);
+          if (resolvedAddedEmails?.length) {
+            const names = resolvedAddedEmails.map(email => {
+              const name = mergedAttendees?.find(attendee => attendee.email.toLowerCase() === email)?.name;
+              return name ? `${name} (${email})` : email;
+            });
+            updateChanges.push(`added ${names.join(', ')}`);
+          }
         }
         if (rawRemove.length > 0) {
           updateChanges.push(`removed ${rawRemove.join(', ')}`);
@@ -1453,7 +1476,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
         // — can verify a "moved to X" / "switched to online" claim instead of
         // seeing no evidence and flagging a done change as not-done. Explicit
         // wins over shape (matches the apply at updateMeeting above).
-        if (explicitLocation) updateChanges.push(`location set to "${explicitLocation}"`);
+        if (explicitLocation) updateChanges.push(`location set to "${patchLocation}"`);
         else if (newLocationFromShape !== undefined) updateChanges.push(`location updated to "${newLocationFromShape}"`);
         // v3.7.x (#A) — narrate the APPLIED online-ness, not the raw flag. On a venue
         // change the derived verdict wins (a Meeting Room keeps Teams → isOnline=true),
@@ -1503,9 +1526,22 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           // attendeeCheckSource only recognises `_attendee_busy_note` /
           // `override_notice` by name).
           ...(ownerRoomBusyNotice
-            ? { _attendee_busy_note: `Heads up — ${ownerRoomBusyNotice}. His call is total — say it plainly, don't re-ask permission.` }
+            ? { _attendee_busy_note: `Heads up — ${ownerRoomBusyNotice}. State the room outcome plainly.` }
             : {}),
         };
+}
+
+async function verifyMoveInterval(ctx: OpCtx, meetingId: string, start: string, end: string, writeError: unknown) {
+  const { verifyApprovedCalendarAction } = await import('../../../../connectors/graph/calendar');
+  const { userEmail, timezone, context } = ctx;
+  const verify = await verifyApprovedCalendarAction({ userEmail, profile: context.profile, tool: 'move_meeting',
+    args: { meeting_id: meetingId, new_start: start, new_end: end, stated_zone: timezone } });
+  if (verify.status === 'desired_state_observed') return;
+  logger.warn('move_meeting exact outcome not confirmed', { meetingId, status: verify.status, reason: verify.reason, writeResponseLost: !!writeError });
+  return { success: false, meetingId, error: verify.reason === 'event_absent' ? 'moved_but_missing' : 'move_did_not_land',
+    _calendar_verification: verify.status, message: verify.status === 'different_state_observed'
+      ? 'A read-only check did not find this meeting at the requested full interval. The update was not repeated.'
+      : 'The calendar outcome is unconfirmed. The update was not repeated; reconcile the event before retrying.' };
 }
 
 export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
@@ -1686,22 +1722,29 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           preMoveEventType = moveProbe?.type;
           preMoveSubject = maskedMoveProbeSubject;
         }
-        // #135c — pure reschedule keeps the meeting's length. When the model
-        // omits new_end (it should, on a plain "move it to Thursday 11:00"),
-        // derive it from the moving event's existing duration read just above —
-        // so the model never has to supply (or re-ask the owner for) a length
-        // it already knows. 30-min fallback when the probe above didn't
-        // resolve start/end (metadata had no readable interval).
-        if ((typeof args.new_end !== 'string' || (args.new_end as string).length === 0) && typeof args.new_start === 'string') {
-          let durMin = 30;
-          if (preMoveStartIso && preMoveEndIso) {
-            const s0 = DateTime.fromISO(preMoveStartIso, { zone: timezone });
-            const e0 = DateTime.fromISO(preMoveEndIso, { zone: timezone });
-            if (s0.isValid && e0.isValid && e0.toMillis() > s0.toMillis()) durMin = Math.round(e0.diff(s0, 'minutes').minutes);
+        // A move without an explicit end preserves the identified occurrence's
+        // duration. Use a matching event from the destination day if its
+        // lightweight probe lacked a complete interval. Never invent a length.
+        if ((typeof args.new_end !== 'string' || !args.new_end.length) && typeof args.new_start === 'string') {
+          const duration = (start?: string, end?: string) =>
+            DateTime.fromISO(end ?? '', { zone: timezone }).toMillis() - DateTime.fromISO(start ?? '', { zone: timezone }).toMillis();
+          let span = duration(preMoveStartIso, preMoveEndIso);
+          if (!(span > 0)) {
+            const day = DateTime.fromISO(args.new_start, { zone: timezone }).toISODate();
+            if (day) {
+              const source = (await getCalendarEvents(userEmail, day, day, timezone)).find(e => e.id === args.meeting_id && !e.isCancelled);
+              if (source?.start && source.end) {
+                const start = DateTime.fromISO(source.start.dateTime, { zone: source.start.timeZone || timezone });
+                const end = DateTime.fromISO(source.end.dateTime, { zone: source.end.timeZone || timezone });
+                span = end.toMillis() - start.toMillis();
+                if (span > 0) { preMoveStartIso = start.toISO()!; preMoveEndIso = end.toISO()!; }
+              }
+            }
           }
-          args.new_end = DateTime.fromISO(args.new_start as string, { zone: timezone }).plus({ minutes: durMin }).toISO() ?? (args.new_start as string);
+          if (!(span > 0)) return { success: false, error: 'invalid_move_interval', message: 'I could not establish the current duration. The meeting was left unchanged.' };
+          args.new_end = DateTime.fromISO(args.new_start, { zone: timezone }).plus({ milliseconds: span }).toISO();
           logger.info('move_meeting — derived new_end from existing duration (new_end omitted)', {
-            meetingId: args.meeting_id, durMin, new_end: args.new_end,
+            meetingId: args.meeting_id, durMin: span / 60_000, new_end: args.new_end,
           });
         }
 
@@ -1896,7 +1939,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 // we move anyway — and never what gets checked. Emptying it on
                 // the retry (as this first shipped) told the requester about one
                 // person and then moved over everyone.
-                const attendeeConflictConfirmed = args.confirm_attendee_conflict === true;
+                const attendeeConflictConfirmed = args.confirm_attendee_conflict === true && args.require_attendee_availability !== true;
                 const moveCheckAttendees = requiredAttendees
                   .map(a => a.email)
                   .filter(e => e !== ownerEmailLc && e !== askerEmail);
@@ -1960,6 +2003,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 // one residual case).
                 const attendeeConflicts = matched?.attendee_conflicts ?? [];
                 if (matched && attendeeConflicts.length > 0) {
+                  if (args.require_attendee_availability === true) return { success: false, error: 'attendee_condition_unmet', message: 'The requested time does not work for every attendee. The meeting was left unchanged. Choose another time, or specify the meeting, time and conflict you want to accept.' };
                   if (!attendeeConflictConfirmed) {
                     logger.info('move_meeting colleague-path — attendee conflict surfaced to requester, no owner escalation', {
                       meetingId: args.meeting_id, newStart, newEnd, requester: context.userId,
@@ -2127,8 +2171,20 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           }
         }
 
+        let floatingWriteAttempted = false;
         let effectiveStart = args.new_start as string;
         let effectiveEnd   = args.new_end   as string;
+        const unchangedInterval = async () => {
+          if (preMoveStartIso && preMoveEndIso
+            && DateTime.fromISO(preMoveStartIso, { zone: timezone }).toMillis() === DateTime.fromISO(effectiveStart, { zone: timezone }).toMillis()
+            && DateTime.fromISO(preMoveEndIso, { zone: timezone }).toMillis() === DateTime.fromISO(effectiveEnd, { zone: timezone }).toMillis()) {
+            const remembered = await recordAcceptedMoveExceptions(args, ctx, effectiveStart, effectiveEnd);
+            return { success: true, unchanged: true, meetingId: args.meeting_id,
+              booked_start: effectiveStart, booked_end: effectiveEnd,
+              ...(!remembered ? {warning: 'The meeting is at that time, but I could not save the accepted exceptions.'} : {}),
+              message: 'The identified meeting is already at that exact time. No calendar update was sent.' };
+          }
+        };
         // WE-fallback-surfacing parity (2026-08-28 bouncer finding) — the
         // colleague-path block-snap below is the third of three surfaces
         // that thread `usedWorkingElsewhereFallback` (check_join_availability
@@ -2215,12 +2271,12 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                   : alignNearestQuarter(newStartDt.toMillis(), timezone);
                 const hintStartDt = DateTime.fromMillis(alignedMs, { zone: timezone });
                 const hintStartMs = hintStartDt.toMillis();
-                const hintEndMs = hintStartMs + movingDurationMin * 60 * 1000;
+                const requestedDurationMs = DateTime.fromISO(args.new_end as string, { zone: timezone }).toMillis() - newStartDt.toMillis();
+                if (!(requestedDurationMs > 0)) return { success: false, error: 'invalid_move_interval', message: 'The end must follow the start.' };
+                const hintEndMs = hintStartMs + requestedDurationMs;
                 const inWindow = hintStartMs >= wStart && hintEndMs <= wEnd;
                 effectiveStart = hintStartDt.toISO()!;
-                effectiveEnd = hintStartDt
-                  .plus({ minutes: movingDurationMin })
-                  .toISO()!;
+                effectiveEnd = DateTime.fromMillis(hintEndMs, { zone: timezone }).toISO()!;
                 logger.info(inWindow
                   ? 'move_meeting (owner) — floating block in-window, using hint as-is'
                   : 'move_meeting (owner) — floating block out-of-window, one-step owner override', {
@@ -2232,42 +2288,38 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                   ? ''
                   : ` (outside its usual ${matchedBlock.preferred_start}–${matchedBlock.preferred_end} window — moved as asked).`;
                 // Skip the colleague-path findBlockDestination branch below.
-                return await updateMeeting({
+                const unchanged = await unchangedInterval();
+                if (unchanged) return unchanged;
+                floatingWriteAttempted = true;
+                let responseLost = false;
+                try { await updateMeeting({
                   userEmail, timezone,
                   meetingId: args.meeting_id as string,
                   start: effectiveStart, end: effectiveEnd,
                   isAllDay: preMoveIsAllDay,
                   eventType: preMoveEventType,
-                }).then(async () => {
-                  if (!await recordOwnerAutoMoveCorrection({ ownerUserId: context.profile.user.slack_user_id,
-                    eventId: args.meeting_id as string, priorStart: preMoveStartIso, priorEnd: preMoveEndIso,
-                    newStart: effectiveStart, newEnd: effectiveEnd, timezone })) ownerDecisionWarning = 'The meeting moved, but I could not save your rejection of the automatic move. That decision still needs recording.';
-                  await closeMeetingArtifacts({
-                    ownerUserId: context.profile.user.slack_user_id,
-                    meetingId: args.meeting_id as string,
-                    reason: 'moved',
-                    subject: args.meeting_subject as string | undefined,
-                    bookingThreadTs: context.threadTs,
-                    fulfillingRequestId: args._fulfilling_request_id as string | undefined,
-                    // v4.2.x (option C) — the instant this write landed on, post-snap
-                    // (the quarter-grid alignment just above). Unlike the main move
-                    // path this branch has no `verifyEventMoved` read-back, so the
-                    // claim it supports is "Graph accepted this PATCH", not "the
-                    // calendar reads back this time". Harmless here and not worth a
-                    // second Graph round-trip: the branch only fires for a FLOATING
-                    // BLOCK, a block has no attendees, and every writer of
-                    // `ctx.proposed_start` is a notice to an attendee
-                    // (skills/meetingReschedule.ts ← calendarHealth/autoMove.ts, whose
-                    // solo-event guard refuses an event with no non-owner attendee) —
-                    // so no open notice can reference a block's event id and step 2a
-                    // finds nothing to correct.
-                    newStartIso: effectiveStart,
-                    newEndIso: effectiveEnd,
-                  });
-                  // M18 — the same `move_meeting` activity row the main move
-                  // path writes far below, so "undo that" (handleRevertAction)
-                  // finds this move too. This branch returned before that row
-                  // until 2026-09-14. A block has no attendees → no target.
+                }); } catch { responseLost = true; }
+                const failure = await verifyMoveInterval(ctx, args.meeting_id as string, effectiveStart, effectiveEnd, responseLost);
+                if (failure) return failure;
+                if (!await recordOwnerAutoMoveCorrection({ ownerUserId: context.profile.user.slack_user_id,
+                  eventId: args.meeting_id as string, priorStart: preMoveStartIso, priorEnd: preMoveEndIso,
+                  newStart: effectiveStart, newEnd: effectiveEnd, timezone })) ownerDecisionWarning = 'I could not save your rejection of the automatic move. That decision still needs recording.';
+                await closeMeetingArtifacts({
+                  ownerUserId: context.profile.user.slack_user_id,
+                  meetingId: args.meeting_id as string,
+                  reason: 'moved',
+                  subject: args.meeting_subject as string | undefined,
+                  bookingThreadTs: context.threadTs,
+                  fulfillingRequestId: args._fulfilling_request_id as string | undefined,
+                  newStartIso: effectiveStart,
+                  newEndIso: effectiveEnd,
+                });
+                // M18 — the same `move_meeting` activity row the main move
+                // path writes far below, so "undo that" (handleRevertAction)
+                // finds this move too. This branch returned before that row
+                // until 2026-09-14. A block has no attendees → no target.
+                // Only an acknowledged write belongs in the undo history.
+                if (!responseLost) {
                   logActivity({
                     ownerUserId: context.profile.user.slack_user_id,
                     kind: 'follow_up',
@@ -2285,24 +2337,29 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                     originThreadTs: context.threadTs,
                     originChannel: context.channelId,
                   });
-                  // v3.2.1 (#120 / 120b) — return the vacated slot here too. The
-                  // floating-block move (e.g. lunch) is exactly the case where
-                  // the owner moves a block to FREE its slot for another meeting;
-                  // without this the freed-slot info was dropped.
-                  const vacated = computeVacatedSlot(preMoveStartIso, preMoveEndIso, timezone);
-                  return {
-                    success: true,
-                    action_summary: `Moved ${matchedBlock.name} to ${formatIsoTime(effectiveStart, timezone)}.${windowNote}`,
-                    ...(ownerDecisionWarning ? { warning: ownerDecisionWarning } : {}),
-                    // #1.5 — surface the POST-snap booked instant on the floating-block
-                    // owner-move path too (lunch is the canonical case). Without it
-                    // mutationActions falls back to the pre-snap input arg and the reply
-                    // narrates a time the block never landed on (the 11:10-vs-11:15 bug).
-                    booked_start: effectiveStart,
-                    booked_end: effectiveEnd,
-                    ...(vacated ? { vacated } : {}),
-                  };
-                });
+                }
+                // v3.2.1 (#120 / 120b) — return the vacated slot here too. The
+                // floating-block move (e.g. lunch) is exactly the case where
+                // the owner moves a block to FREE its slot for another meeting;
+                // without this the freed-slot info was dropped.
+                const intervalLabel = `${formatIsoTime(effectiveStart, timezone)}–${formatIsoTime(effectiveEnd, timezone)}`;
+                const vacated = computeVacatedSlot(preMoveStartIso, preMoveEndIso, timezone);
+                return {
+                  success: true,
+                  meetingId: args.meeting_id,
+                  ...(responseLost ? { _calendar_verification: 'desired_state_observed', _write_response_lost: true } : {}),
+                  action_summary: responseLost
+                    ? `A read-only check confirms ${matchedBlock.name} is at ${intervalLabel}.`
+                    : `Moved ${matchedBlock.name} to ${intervalLabel}.${windowNote}`,
+                  ...(ownerDecisionWarning ? { warning: ownerDecisionWarning } : {}),
+                  // #1.5 — surface the POST-snap booked instant on the floating-block
+                  // owner-move path too (lunch is the canonical case). Without it
+                  // mutationActions falls back to the pre-snap input arg and the reply
+                  // narrates a time the block never landed on (the 11:10-vs-11:15 bug).
+                  booked_start: effectiveStart,
+                  booked_end: effectiveEnd,
+                  ...(vacated ? { vacated } : {}),
+                };
               }
 
               // Colleague-path — keep existing alignment + conflict guard.
@@ -2339,6 +2396,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             }
           }
         } catch (err) {
+          if (floatingWriteAttempted) return { success: false, error: 'move_outcome_unconfirmed', message: 'The floating block update was attempted. Reconcile its calendar interval before retrying.' };
           logger.warn('move_meeting floating-block alignment threw — proceeding with caller args', {
             err: String(err).slice(0, 200),
           });
@@ -2432,6 +2490,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             // practice (the colleague gate above validates the destination
             // STRICTLY and returns needs_owner_approval before this call), but
             // an invariant with a live counter-example is not an invariant.
+            requireAttendeeAvailability: args.require_attendee_availability === true,
             allowRelaxed: moveRelaxedGrant.relaxed,
             // v4.4.x (#154) — see the field doc on PlanMeetingInput.ownerRoomBend.
             ownerRoomBend: moveRelaxedGrant.relaxedReason === 'owner_room_bend',
@@ -2463,6 +2522,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           // case that produced this in the live incident is already refused at
           // the source-event load above; what reaches here is a Graph organizer
           // read that blipped on an event that otherwise reads fine.)
+          if (movePlan.action === 'attendee_condition_unmet') return { success: false, error: movePlan.action, message: movePlan.suggestedAskText };
           if (movePlan.action === 'refuse_not_owners') {
             if (movePlan.organizerEmail) {
               logger.info('move_meeting refused — planMeeting resolved owner as attendee, not organizer', {
@@ -2734,15 +2794,8 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           }
         }
 
-        if (preMoveStartIso && preMoveEndIso
-          && DateTime.fromISO(preMoveStartIso, { zone: timezone }).toMillis() === DateTime.fromISO(effectiveStart, { zone: timezone }).toMillis()
-          && DateTime.fromISO(preMoveEndIso, { zone: timezone }).toMillis() === DateTime.fromISO(effectiveEnd, { zone: timezone }).toMillis()) {
-          const remembered = await recordAcceptedMoveExceptions(args, ctx, effectiveStart, effectiveEnd);
-          return { success: true, unchanged: true, meetingId: args.meeting_id,
-            booked_start: effectiveStart, booked_end: effectiveEnd,
-            ...(!remembered ? {warning: 'The meeting is at that time, but I could not save the accepted exceptions.'} : {}),
-            message: 'The identified meeting is already at that exact time. No calendar update was sent.' };
-        }
+        const unchanged = await unchangedInterval();
+        if (unchanged) return unchanged;
         let moveWriteError: unknown;
         try { await updateMeeting({
           userEmail,
@@ -2773,20 +2826,8 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // does not prove failure, and a matching start does not prove duration.
         // Reuse the existing approved-action reconciliation reader; never retry
         // a mutation to discover whether it succeeded.
-        {
-          const { verifyApprovedCalendarAction } = await import('../../../../connectors/graph/calendar');
-          const verify = await verifyApprovedCalendarAction({ userEmail, profile: context.profile, tool: 'move_meeting',
-            args: { meeting_id: args.meeting_id, new_start: effectiveStart, new_end: effectiveEnd, stated_zone: timezone } });
-          if (verify.status !== 'desired_state_observed') {
-            logger.warn('move_meeting exact outcome not confirmed', { meetingId: args.meeting_id, status: verify.status, reason: verify.reason, writeResponseLost: !!moveWriteError });
-            return { success: false, meetingId: args.meeting_id,
-              error: verify.reason === 'event_absent' ? 'moved_but_missing' : 'move_did_not_land',
-              _calendar_verification: verify.status,
-              message: verify.status === 'different_state_observed'
-                ? 'A read-only check did not find this meeting at the requested full interval. The update was not repeated.'
-                : 'The calendar outcome is unconfirmed. The update was not repeated; reconcile the event before retrying.' };
-          }
-        }
+        const moveFailure = await verifyMoveInterval(ctx, args.meeting_id as string, effectiveStart, effectiveEnd, moveWriteError);
+        if (moveFailure) return moveFailure;
 
         await closeMeetingArtifacts({
           ownerUserId: context.profile.user.slack_user_id,

@@ -227,7 +227,7 @@ EXPLAINING WHY A DAY ISN'T OFFERED. The tool returns a \`day_summary\` array wit
   • \`accepted: 0, top_reasons: ['owner_out_of_office']\` → "Monday is out — ${profile.user.name.split(' ')[0]} is out of office that day." If that entry also carries \`oof_until_display\`, the away stretch runs past this one day — name the real end instead: "Monday is out — ${profile.user.name.split(' ')[0]} is away through Friday 29 Aug."
   • \`accepted: 0, top_reasons: ['category_per_day']\` → "Already at the daily cap for that category."
   • \`attendee_busy_collision\` (also in \`blocked_by\`) → the attendee's OWN calendar is genuinely busy during your shared hours — real evidence. Scope it ("X is booked during your shared hours Thursday"), don't inflate to "unavailable all day."
-  • \`outside_attendee_work_hours\` → the only openings fall outside the attendee's ASSUMED hours (a timezone-derived default, usually NOT their real schedule). Do NOT say "X isn't available" — say it no-overlap and hedge: "your free time Thursday is outside X's likely working hours." If ${profile.user.name.split(' ')[0]} then states the attendee's REAL hours ("Lori starts 7am ET, so 7am works"), pass \`attendee_hours\` (below) to OVERRIDE the assumed default for that one search — don't keep clipping to the wrong hours.
+  • \`outside_attendee_work_hours\` → use the returned hours note: distinguish stated hours from an assumed window. Describe the hours conflict without claiming the attendee is booked. If ${profile.user.name.split(' ')[0]} then states the attendee's REAL hours ("Lori starts 7am ET, so 7am works"), pass \`attendee_hours\` (below) to OVERRIDE the assumed default for that one search — don't keep clipping to the wrong hours.
   • \`accepted: >0\` → the day HAS options; if Sonnet's spread picker didn't surface one, say "there are slots that day, want me to pull them?"
   • Date not in \`day_summary\` at all → "I haven't checked that day yet — want me to look?"
 
@@ -347,7 +347,7 @@ Omit \`search_from\` / \`search_to\` in candidate mode; the candidate range is u
       },
       {
         name: 'create_meeting',
-        description: `Create a new calendar event directly — THE booking tool. The agreed time comes from find_available_slots (which already checked every internal attendee's calendar); externals get the invite by email and accept/decline natively. Follow the location / category / work-day rules in the prompt section.
+        description: `Create a new calendar event directly — THE booking tool. Use the agreed time and the finder’s per-attendee status. Externals receive the invite by email. Follow the location / category / work-day rules in the prompt section.
 
 RESCHEDULING ≠ CREATING. Before booking a recurring 1:1 (Weekly / BiWeekly) to a NEW time: if that person's series already exists on the calendar, you are RESCHEDULING — call move_meeting on the existing occurrence (get its id from get_calendar), NOT create_meeting. Creating a fresh event leaves a duplicate next to the live series. create_meeting is for genuinely NEW meetings only.
 
@@ -465,13 +465,13 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
       },
       {
         name: 'move_meeting',
-        description: `Move (reschedule) an existing meeting — THE tool whenever the owner asks to move / reschedule / shift / push a meeting that's already on the calendar. Prefer over create_meeting AND delete+recreate; preserves attendees, Teams link, duration, history. Includes relocating a recurring 1:1 (Weekly/BiWeekly) to a different day or week — moving a recurring occurrence creates a single-occurrence exception, leaves the rest of the series intact (that's what 'move my weekly' means). Get the occurrence id from get_calendar. Keep the meeting's current duration unless told otherwise (new_end = new_start + existing length).
+        description: `Move (reschedule) an existing meeting — THE tool whenever the owner asks to move / reschedule / shift / push a meeting that's already on the calendar. Prefer over create_meeting AND delete+recreate; preserves attendees, Teams link, duration, history. Includes relocating a recurring 1:1 (Weekly/BiWeekly) to a different day or week — moving a recurring occurrence creates a single-occurrence exception, leaves the rest of the series intact (that's what 'move my weekly' means). Get the occurrence id from get_calendar. Omit new_end to keep its current duration.
 
 Owner-path: execute an explicit instruction with a settled target or an accepted concrete plan, preserving existing override authority. Feasibility questions and frustration call for discovery. Honor a promise to present options before moving until the concrete plan is accepted.
 
 For an agreed joint plan, pass coordinated_moves with all identified occurrences and exact targets together. Otherwise, a single move requires meeting_id, meeting_subject and new_start. The handler validates the selected shape and rechecks the complete proposed calendar before execution. Present any materially changed plan for a new decision; keep unchanged accepted scope and overrides. Report each event's returned outcome, including partial or unknown completion.
 
-FREED SLOT — after a successful move the result includes \`vacated\` = the slot the meeting just LEFT (its old time): { start, end, label }. Surface it when useful ("that frees up your 11:00 today") so it's in the conversation. If the owner then asks to put something into "the new open slot" / "the freed slot", use \`vacated\` — don't re-ask what time the moved meeting used to be, and don't confuse where it moved TO with where it moved FROM.
+The confirmation uses the new time. Use \`vacated\` (previous interval) when the freed slot matters to the request.
 
 Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already booked with them, call this directly. The handler runs a rule-compliance check server-side (owner's work hours, work days, travel buffers, floating blocks, no conflicts). If the new slot passes, the move happens silently and the owner is shadow-notified. If the new slot breaks a rule, the tool returns { needs_owner_approval: true, reason, message } — don't keep trying; fall back to create_approval(kind=policy_exception) with the requested slot so the owner can decide, and tell the colleague warmly that you're checking. If the colleague (who's on the meeting) asks to move it but names NO new time, don't escalate straight to approval — call find_available_slots (owner + the other required attendees), offer the requested or configured count of rule-compliant slots, let them pick, then move_meeting. Escalate (create_approval kind=policy_exception) only if they insist on a specific time that breaks a rule.`,
         input_schema: {
@@ -480,6 +480,10 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
             meeting_id: { type: 'string', description: 'Required for a single move: the specific event occurrence ID. Omit for coordinated_moves.' },
             meeting_subject: { type: 'string', description: 'Required for a single move: the subject corresponding to meeting_id. Omit for coordinated_moves.' },
             coordinated_moves: coordinatedMoves,
+            require_attendee_availability: {
+              type: 'boolean',
+              description: 'Set true when the move depends on attendees being free, even if the requester believes they are free. Busy or unconfirmed availability then stops the move. Omit for an unconditional move, including acceptance of this specific disclosed conflict.',
+            },
             accepted_exceptions: {
               type: 'array',
               description: 'OPTIONAL owner-path acceptance evidence: one entry per previously disclosed fact knowingly accepted in the CURRENT owner message. Quote actual delivered assistant prose and the current owner message verbatim; tool summaries and unsent findings are not disclosure. Ground every field in the offered data; omit uncertain facts. A cold exact-time command or relaxed:true alone is not acceptance. For coordinated_moves, event_id binds each entry to its occurrence. This evidence is independently checked by the handler.',
@@ -1231,6 +1235,9 @@ ${firstName.toUpperCase()}'S SCHEDULING PREFERENCES — soft guidance, NOT hard 
 ${(() => {
   const ns = profile.schedule.night_shift;
   const lines: string[] = [];
+  if (profile.meetings.packing_preference === 'dense') {
+    lines.push('- Dense calendar packing is on: prefer back-to-back meetings to consolidate free time.');
+  }
   if (ns) {
     lines.push(`- Night-shift window: ${ns.hours_start}–${ns.hours_end} — ${firstName}'s standard late work time${ns.typical_day ? ` on ${ns.typical_day}` : ''} (already merged into work_hours). Also useful for overlap with attendees whose working day begins as ${firstName}'s is ending, when he offers it.`);
   }
@@ -1271,8 +1278,7 @@ When nothing fits, state the result and ask whether to widen the search or consi
 ${ships('move_meeting') ? `FLOATING BLOCKS ARE YOUR CALL, COLLEAGUE MEETINGS NEED ${firstName.toUpperCase()}'S CALL — when narrating fallout from a meeting change, take ownership of floating-block resolution (move/skip yourself, or one shadow note); only ask ${firstName} about colleague/external conflicts. Don't bundle them in one question.
 An additional colleague move requires agreement before execution. Existing floating-block autonomy remains separate.
 
-` : ''}OWNER INSTRUCTS AN EXACT TIME — with an explicit booking/move instruction or accepted exact plan, call create_meeting / move_meeting DIRECTLY with relaxed:true. Preserve accepted overrides and report their trade-offs in the confirmation; new undisclosed attendee conflicts still need the existing decision. A feasibility question that names a time remains discovery. Honor any promise to present options before moving until the concrete plan is accepted. For OUT-OF-BOUNDS times the finder won't return at all, a proposal from raw calendar gaps must disclose the violation; floating-block out-of-window booking uses \`confirm_outside_window\`.
-Same "don't re-confirm what he already chose" applies to ATTENDEE conflicts he's seen: when ${firstName} picks a slot you JUST offered as attendee-conflicted (the prior find_available_slots returned it under \`_no_all_attendee_free_note\` / \`attendee_conflicts\`), call create_meeting with relaxed:true on the FIRST call — he already saw who's busy and chose through it, so don't ask "book anyway?" again; the booking confirmation still carries that attendee_conflicts entry's \`line\` (quoted verbatim, e.g. "Maayan's busy then"), so honesty holds. GUARDRAIL: only for a conflict you actually SHOWED him last turn — a time he names COLD that turns out attendee-conflicted keeps the normal first-time confirm (he hasn't seen that one yet).
+` : ''}OWNER INSTRUCTS AN EXACT TIME — an explicit instruction or accepted concrete plan goes directly to the booking or move tool. Start a new booking with ordinary checks. An exception applies only to the authorized action, roster and slot. Use relaxed:true for that exception. Picking an offer with a disclosed attendee conflict accepts it: book that exact offer directly and quote the returned conflict line. Surface new attendee conflicts for a decision. A feasibility question calls for discovery; honor a promise of options until the plan is accepted. For OUT-OF-BOUNDS times the finder won't return, disclose the violation; floating-block out-of-window booking uses \`confirm_outside_window\`.
 
 HYPOTHETICAL VALIDATION — "can we do X at Y?" → ASK THE TOOL.
 When ${firstName} asks a hypothetical ("can we do Elan after Gilly?", "would 13:00 work?", "is 15:30 free for 40 min?"), call \`find_available_slots\` with a NARROW window around the proposed time (searchFrom=Y, searchTo=Y+duration_minutes). The tool already enforces every rule he taught you (travel buffer, focus protection, lunch as floating, work hours, day type, attendee availability). Read the result:
@@ -1289,13 +1295,13 @@ Prefer a suitable single move. If an adjacent meeting blocks preserving the day 
 
 An opening requested for the meeting already under discussion is move discovery. A request for another meeting is a new booking.
 
-VALIDATE A MOVE BEFORE PROPOSING IT — the slot you propose must come FROM \`find_available_slots\` (with \`moving_event_ids\`), NEVER from a gap you eyeballed in get_calendar. get_calendar shows only ${firstName}'s calendar, not the ATTENDEES' — so an open-looking gap can die at booking ("Maayan's busy at 13:30") one turn after he says yes. The tool checks every attendee + the requested duration up front, so a conflict surfaces BEFORE he commits, not after. Read the result before speaking: the window opens → propose it; it doesn't → name what's still blocking. One tool call up front replaces the staircase ("move Simon to free 2h" → "yes" → "actually only 1h, lunch's next").
+VALIDATE A MOVE BEFORE PROPOSING IT — use \`find_available_slots\` with \`moving_event_ids\` and the requested duration. Present the returned availability, conflicts and unchecked attendees for that candidate.
 
 ` : ''}TIMEZONES — the tool does the math, you never do. NEVER convert a clock time in your head: inverted labels, and searching a foreign number as ${firstName}'s local time, are recurring failures. Tag the zone, then QUOTE what the tool returns.
 - Time GIVEN in another zone ("9:45 ET", "mornings 9–12 ET") → pass the clock time as-stated + \`search_window_timezone\` = that IANA zone, WITH a real time-of-day (not a bare date). The tool converts and returns \`_requested_time_local\` ("08:00 EDT = 15:00 his time") — quote that. Omit the tag only when it's already his zone ("4pm my time").
 - Options to show/forward in a specific zone — INCLUDING an organizer gathering options for US colleagues with no attendee stored there → \`present_in_timezone\` + quote the returned \`presentation_local\` verbatim.
 - Requester attendance follows \`requester_is_attending\` in the tool schema for both search and booking.
-NARRATE every time in the LISTENER's zone (${firstName} → his; a colleague → theirs) from the tool's returned strings (\`per_attendee_local[].local_display\` / the fields above) — never your own arithmetic. Append the other party's zone once as a parenthetical only if relevant ("Wed 12:45 — 15:15 her time"); skip it when both share a zone. Mention \`travelers\` once ("Anna's in Boston this week"). An attending colleague needs no tag — their stored timezone already drives the labels.
+NARRATE every time in the LISTENER's zone (${firstName} → his; a colleague → theirs) from the tool's returned strings (\`per_attendee_local[].local_display\` / the fields above) — never your own arithmetic. ${isSlackNative && isOwner ? "Add a second clock when requested or when it explains a scheduling constraint. Keep the tool's labeled travel-day display." : 'Append the other party\'s zone once as a parenthetical only if relevant ("Wed 12:45 — 15:15 her time"); skip it when both share a zone.'} Mention \`travelers\` once ("Anna's in Boston this week"). An attending colleague needs no tag — their stored timezone already drives the labels.
 
 BOOKING / MOVING a time GIVEN in another zone — same tag-don't-convert contract, on the booking tools. When the time was stated in a non-owner zone ("book it 9:30 EST", "2pm ET", or a destination-zone clock while ${firstName} is travelling), \`create_meeting\` / \`move_meeting\` take \`stated_zone\`: pass the clock EXACTLY as stated (start/new_start = "...T09:30:00") + \`stated_zone\` = the zone he named (see the field's own values), and the tool converts deterministically. SAME TRAP as the search field above: do NOT also hand-convert the time — passing a converted clock AND stated_zone double-converts it. Omit stated_zone only when he named no zone.
 
@@ -1303,7 +1309,7 @@ AVAILABILITY VS BOOKING — answer the question, then OFFER to book.
 When a colleague asks "is ${firstName} free at X?" / "is X open Sunday at 14:00?" — that's an AVAILABILITY check, not a booking request. Answer the availability question first ("yes, he's free Sunday 10.5 at 14:00 for 55 min"), THEN offer the next step in the same reply: "want me to send the invite, or are you just checking?" Give them the choice. Don't assume they want it booked, don't assume they don't. The colleague might be lining up multiple options before committing, OR they might be ready to lock it in — let them tell you. ONLY call \`create_meeting\` after they say go.
 
 JOINT-ATTENDEE QUERIES — one call, not three.
-When ${firstName} asks "when are WE free?" / "when can I meet with X?" / "is X free?" / "any opening for the meeting with X?", call find_available_slots ONCE with attendee_emails=[X's email]. The tool fetches both calendars and returns slots where everyone is free. NEVER do this as three sequential turns — read his calendar, then read X's calendar, then compute the overlap in your head. That's three turns of work and three Sonnet rounds when one tool call does it. (Externals without people_memory entries: still pass their email; if the tool can't fetch their busy from Graph, slots come back filtered against ${firstName}'s side only and you narrate honestly.)
+Pass every known attendee email, including externals, to one find_available_slots call for the requested window. Report the returned coverage for that slot. An unreadable calendar stays unconfirmed even if the requester expects the person to be free.
 ATTENDEE FREE/BUSY IS ANNOTATION, NEVER A GATE. Lead with ${firstName}'s availability — NEVER demand an attendee's email (or any attendee detail) before you'll suggest times. An attendee you can't check — external/gmail, or whose email you don't have yet — is "couldn't confirm their side," not a blocker: offer ${firstName}'s open times and note their side is unconfirmed. The attendee's calendar never withholds a suggestion; only ${firstName}'s does.
 
 USER-NAMED DAYS — narrow the search, don't post-hoc apologize.
@@ -1324,7 +1330,7 @@ Examples:
   User: "this week"
     → 1 call (single contiguous span, no disjoint windows named)
 
-FOLLOW-UPS — reuse the established meeting, date, people and choices. Answer only what changed or was asked, keeping material caveats. "That Monday" refers to the discussed date. If the referent remains ambiguous, ask one focused question and stop before proposing or acting.
+FOLLOW-UPS — reuse the established meeting, date, people and choices. Answer only what changed or was asked, keeping material caveats. "That Monday" refers to the discussed date. A short yes accepts one identifiable proposal. If it fits two pending actions, ask which one before acting. For any other ambiguous reference, ask one focused question before proposing or acting.
 TRIP / EVENT-RELATIVE DATES — resolve to a concrete date AND confirm it before mutating. When a date is anchored to a trip or another event ("the Sunday after my trip", "the week after Boston", "before I leave"), work out the actual calendar date and STATE IT BACK before booking: "That's Sunday July 5, the week after Boston — book them there?". NEVER silently snap a trip-relative phrase to the nearest matching weekday from today — "the Sunday after" is almost never THIS Sunday when he's anchoring on a future trip. Applies in every language.
 
 LEAD WITH THE GAP, NOT THE CALENDAR.
@@ -1428,7 +1434,7 @@ For a named meeting that may already exist, first use the supplied MEETINGS YOU 
 
 MEETINGS HONESTY (extends base RULE 1/2/5 — calendar-specific facts only):
 
-Mutation tools return {success|ok: boolean}. Say "booked" / "moved" / "deleted" / "locked in" / "all done" only after the tool returned success THIS turn; quote its action_summary / cancelled_label. On failure, name what happened. For aggregate phrasing ("all four moved"), every individual mutation must have returned success.
+Mutation tools return {success|ok: boolean}. Say "booked" / "moved" / "deleted" / "locked in" / "all done" only after the tool returned success THIS turn; quote its action_summary / cancelled_label. For a routine confirmation, add only material conflicts, unknowns, side effects or details the requester asked for. On failure, name what happened. For aggregate phrasing ("all four moved"), every individual mutation must have returned success.
 
 A slot genuinely open when you offered it can go stale by the time it's accepted — ${firstName}'s booking-notice window is checked against the CURRENT clock, not the moment you floated it, so simply waiting on a reply is enough to cross that line, nothing else about it having changed. Own that reversal plainly and name what changed — "that worked when I offered it, but it's since crossed his booking-notice window" — never a bare refusal that reads as arbitrary, whether it shows up as a refused booking attempt or you catch it yourself before ever calling the tool.
 

@@ -356,6 +356,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     blockedWriteTools,
     resolvedMeetingAttendees,
     resolvedMeetingAttendeeGroups,
+    ordinaryCreateAfterOtherMeeting,
     contextualApprovalDecisions,
     standaloneBookingApproval,
     availabilityQuestionDetected,
@@ -600,6 +601,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // never dropped. Per-turn (rebuilt each response round with the turn's set).
       resolvedMeetingAttendees,
       resolvedMeetingAttendeeGroups,
+      ordinaryCreateAfterOtherMeeting,
       contextualApprovalDecisions,
       standaloneBookingApproval,
       // The transport can enrich userMessage with names, transcripts, and file

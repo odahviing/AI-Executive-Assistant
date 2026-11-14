@@ -163,6 +163,8 @@ export interface SkillContext {
    * turns and when nothing resolved.
    */
   resolvedMeetingAttendees?: string[];
+  /** A distinct newly requested booking must check its attendees. This signal grants no exception. */
+  ordinaryCreateAfterOtherMeeting?: { subject: string; attendeeEmails: readonly string[] };
   /** Meeting-scoped partition of the resolved roster. Undefined: legacy flat
    * input. Empty: ambiguous/incomplete grouping, never use the flat union as
    * one meeting. One group retains omitted-attendee protection; multiple groups

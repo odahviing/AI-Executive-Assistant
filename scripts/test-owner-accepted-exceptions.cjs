@@ -17,7 +17,7 @@ const statements=declaration.parent.statements,first=statements.indexOf(declarat
 const last=statements.findIndex((n,i)=>i>first&&ts.isExpressionStatement(n)&&n.getText(sf).startsWith('await closeMeetingArtifacts('));
 assert.ok(first>=0&&last>first,'real post-move branch anchors');
 const branch=statements.slice(first,last+1+(statements[last+1]?.getText(sf).includes('recordAcceptedMoveExceptions')?1:0)).map(n=>n.getText(sf)).join('\n');
-const helper=all.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='recordAcceptedMoveExceptions')?.getText(sf)||'';
+const helper=all.filter(n=>ts.isFunctionDeclaration(n)&&['recordAcceptedMoveExceptions','verifyMoveInterval'].includes(n.name?.text)).map(n=>n.getText(sf)).join('\n');
 const unchanged=all.find(n=>ts.isIfStatement(n)&&n.expression.getText(sf).startsWith('preMoveStartIso && preMoveEndIso')&&n.thenStatement.getText(sf).includes('unchanged: true'));
 assert.ok(unchanged,'actual idempotent unchanged branch');
 const day='2026-09-14',start=`${day}T10:00:00+03:00`,end=`${day}T10:40:00+03:00`;

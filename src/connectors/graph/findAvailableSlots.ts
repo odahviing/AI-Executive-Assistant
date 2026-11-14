@@ -585,6 +585,15 @@ export async function findAvailableSlots(params: {
         // hard-blocked. An all-day WE status simply isn't busy; away days now
         // come from the per-date schedule override (#143) and are walked
         // normally with that day's effective windows + tz.
+        if (slot.status === 'unknown') {
+          // The owner's event calendar is checked independently by checkSlot.
+          // Attendee windows with unread status remain explicitly qualified.
+          if (email !== ownerEmailLower && params.diagnosticsOut) {
+            const unchecked = params.diagnosticsOut.attendeesNotChecked ??= [];
+            if (!unchecked.includes(email)) unchecked.push(email);
+          }
+          continue;
+        }
         if (slot.status !== 'free' && slot.status !== 'workingElsewhere') {
           allBusy.push({
             start: DateTime.fromISO(slot.start).toJSDate(),

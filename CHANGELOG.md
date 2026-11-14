@@ -1,3 +1,20 @@
+## 5.4.4 — Scheduling respects attendee hours, room availability and meeting order
+
+Maelle checks the people, room and preceding meeting before offering or changing a time. A new booking gets its own conflict decision, and the scheduling tools distinguish unavailable calendar data from confirmed availability.
+
+### Fixed
+- Apply recorded attendee hours on creates and moves, including when free/busy is unavailable. Preserve split hours and closed days when editing a person's weekly schedule. Repeated profile updates report what actually changed and keep earlier slot results valid when effective constraints stay the same.
+- Check an explicitly named room on creates and edits, including hybrid meetings. For a move conditioned on everyone being free, stop when any required calendar is busy or unreadable.
+- Keep candidate and preferred times within the requested window and after the preceding meeting. Ask for clarification when the preceding event cannot be verified.
+- Keep a prior meeting's conflict exception scoped to that meeting. Remove duplicate recipient addresses after roster resolution while preserving distinct invitees.
+- Reconcile the interval of a floating lunch move or resize with the calendar result. If the write response is lost and a later read finds the requested interval, report what the calendar shows without taking credit for moving it.
+
+### Changed
+- Scheduling instructions distinguish known conflicts, unchecked attendees and choices the requester has already made. Recognition of conditions and the wording of replies still depend on the model.
+
+### Framework
+- Refresh the Golden path's reference to the writer for person email corrections.
+
 ## 5.4.3 — Restore BigQuery log exports and preserve booking requesters
 
 Maelle now writes conflicting log fields in forms BigQuery can accept. Separate colleague bookings with the same title each keep their own requester link.

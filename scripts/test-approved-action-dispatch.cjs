@@ -27,22 +27,12 @@ async function postMoveResult(reason, options = {}) {
   const filename = path.join(root, 'src/skills/meetings/ops/handlers/moveMeeting.ts');
   const source = fs.readFileSync(filename, 'utf8');
   const ast = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true);
-  let block;
-  function visit(node) {
-    if (ts.isVariableDeclaration(node) && node.name.getText(ast) === 'verify'
-      && node.initializer && ts.isAwaitExpression(node.initializer)
-      && ts.isCallExpression(node.initializer.expression)
-      && node.initializer.expression.expression.getText(ast) === 'verifyApprovedCalendarAction') {
-      block = node.parent.parent.parent;
-    }
-    ts.forEachChild(node, visit);
-  }
-  visit(ast);
-  assert.ok(block && ts.isBlock(block), 'actual post-move readback branch located');
-  const wrapped = `module.exports = async function(args,userEmail,effectiveStart,effectiveEnd,timezone,logger,context,moveWriteError) ${block.getText(ast)}`;
+  const verifier = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'verifyMoveInterval');
+  assert.ok(verifier, 'shared post-move readback located');
+  const wrapped = verifier.getText(ast) + '\nmodule.exports=verifyMoveInterval;';
   const code = ts.transpileModule(wrapped, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const module = { exports: {} };
-  vm.runInNewContext(`(function(require,module){${code}\n})`, {}, { filename })(spec => {
+  vm.runInNewContext(`(function(require,module){${code}\n})`, {logger:{warn(){}}}, { filename })(spec => {
     assert.equal(spec, '../../../../connectors/graph/calendar');
     return { verifyApprovedCalendarAction: async input => {
       assert.equal(input.tool, 'move_meeting');
@@ -55,9 +45,8 @@ async function postMoveResult(reason, options = {}) {
         reason: reason === 'not_found' ? 'event_absent' : reason };
     } };
   }, module);
-  return module.exports({ meeting_id: 'event-one', meeting_subject: 'Private subject' }, 'owner@example.com',
-    '2026-09-12T12:00:00Z', '2026-09-12T13:00:00Z', 'UTC', { warn() {} }, context,
-    options.responseLost ? Error('write response lost') : undefined);
+  return module.exports({ userEmail:'owner@example.com', timezone:'UTC', context }, 'event-one',
+    '2026-09-12T12:00:00Z', '2026-09-12T13:00:00Z', options.responseLost ? Error('write response lost') : undefined);
 }
 function harness(value, options = {}) {
   const calls = [], unexpected = [], verifications = [];

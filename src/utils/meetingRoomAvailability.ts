@@ -1,25 +1,15 @@
 /**
- * meetingRoomAvailability (v2.8.2) — busy/free check on the office meeting
- * room mailbox, with size-aware fallback.
+ * Checks the configured room mailbox when a create, move, or update selects its
+ * venue label, explicitly invites the mailbox, or retains it at a new time.
+ * Internal, external, and hybrid meetings of any size can request the room.
+ * A move excludes its own occurrence and includes other proposed room commitments.
  *
- * Called only when the location decision tree picks the big meeting room
- * (office day + internal-only, ≥4 people). Probes the room mailbox via Graph
- * free/busy:
- *
- *   - Room free
- *       → caller proceeds with Meeting Room + room mailbox invited.
- *   - Room busy + participantCount ≤ 5
- *       → caller switches location to `small_meeting_room_label` ("Office"),
- *         drops the room mailbox from the invite. The 4-5 person group can
- *         use the small office space.
- *   - Room busy + participantCount ≥ 6
- *       → caller refuses the booking and surfaces `suggestedAskText` to the
- *         owner: room is taken AND the group is too big for the small
- *         fallback. Owner decides: change time, shrink the list, etc.
- *
- * An unread room returns `skip`, never `room_free`; the planner preserves
- * that uncertainty in its result. Moving occurrences use identity exclusion,
- * and coordinated replacements retain other proposed room commitments.
+ * A free room can be invited. An unread calendar yields an unconfirmed result.
+ * For a busy room, the helper reports whether the group fits the smaller space
+ * (up to five people). Availability of that space is unchecked. The planner
+ * and colleague update handler can select the smaller venue or seek a decision
+ * for a larger group. An owner updating the venue receives a busy-room notice
+ * and keeps the requested location text while the update drops the busy mailbox.
  */
 
 import { DateTime } from 'luxon';
@@ -68,18 +58,19 @@ export async function checkMeetingRoomAvailability(params: {
       });
       return { kind: 'skip', reason: 'room availability could not be read' };
     }
-    const slots = [...(fb[roomEmail] ?? []), ...(params.calendarReplacements ?? [])
+    const slots = [...(fb[roomEmail.toLowerCase()] ?? []), ...(params.calendarReplacements ?? [])
       .filter(e => e.id !== params.existingEventId && e.attendees?.some(a => a.emailAddress.address.toLowerCase() === roomEmail.toLowerCase()))
       .map(e => ({ start: DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone }).toISO()!,
         end: DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone }).toISO()!, status: 'busy' }))];
     const slotStart = DateTime.fromISO(startIso, { zone: profile.user.timezone });
     const slotEnd = DateTime.fromISO(endIso, { zone: profile.user.timezone });
-    isBusy = slots.some(s => {
-      if (s.status === 'free') return false;
+    const overlapping = slots.filter(s => {
       const sStart = DateTime.fromISO(s.start, { zone: (s as any)._timezone ?? 'utc' });
       const sEnd = DateTime.fromISO(s.end, { zone: (s as any)._timezone ?? 'utc' });
       return sStart < slotEnd && sEnd > slotStart;
     });
+    isBusy = overlapping.some(s => s.status !== 'free' && s.status !== 'unknown');
+    if (!isBusy && overlapping.some(s => s.status === 'unknown')) return { kind: 'skip', reason: 'room availability could not be confirmed' };
   } catch (err) {
     logger.warn('checkMeetingRoomAvailability — getFreeBusy threw, room availability unconfirmed', {
       roomEmail, err: String(err).slice(0, 200),

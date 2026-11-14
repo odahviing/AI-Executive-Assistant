@@ -1008,7 +1008,7 @@ export async function getFreeBusyForDecision(
     if (email.toLowerCase() === callerEmail.toLowerCase()) continue;
     const ownSources = sources.filter(e => e.attendees?.some((a: any) => a.emailAddress?.address?.toLowerCase() === email.toLowerCase()));
     if (!ownSources.length) continue;
-    const key = Object.keys(busy).find(k => k.toLowerCase() === email.toLowerCase()) ?? email;
+    const key = email.toLowerCase();
     try {
       if (ownSources.some(e => !e.iCalUId)) throw new Error('Moving occurrence has no cross-calendar identity');
       const ids = new Set(ownSources.map(e => e.iCalUId));
@@ -1039,7 +1039,7 @@ export async function getFreeBusyForDecision(
       // do not carve a merged interval or assert its remaining contents.
       const ranges = ownSources.map(e => ({ start: DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? 'UTC' }).toMillis(), end: DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone ?? 'UTC' }).toMillis() }));
       busy[key] = (busy[key] ?? []).filter(s => !ranges.some(r => Date.parse(s.start) < r.end && Date.parse(s.end) > r.start));
-      if (diagnostics) diagnostics.notChecked = [...new Set([...(diagnostics.notChecked ?? []), email])];
+      if (diagnostics) diagnostics.notChecked = [...new Set([...(diagnostics.notChecked ?? []), key])];
       logger.warn('Moving attendee availability is unconfirmed — event identity read unavailable', { email, err: String(err).slice(0, 160) });
     }
   }
@@ -1085,22 +1085,24 @@ async function getFreeBusyImpl(
     const result: Record<string, FreeBusySlot[]> = {};
     const unresolved: string[] = [];
     for (const schedule of response.value || []) {
+      const key = String(schedule.scheduleId ?? '').trim().toLowerCase();
+      if (!key) continue;
       // v3.3.7 (#124h) — Graph marks a non-existent / unresolvable address
       // with a per-schedule `error` object instead of scheduleItems. Surface
       // it; an empty array here is indistinguishable from "free all week".
       if (schedule.error) {
-        unresolved.push(String(schedule.scheduleId ?? '').toLowerCase());
-        result[schedule.scheduleId] = [];
+        unresolved.push(key);
+        result[key] = [];
         continue;
       }
-      result[schedule.scheduleId] = (schedule.scheduleItems || []).map((item: any) =>
+      result[key] = (schedule.scheduleItems || []).map((item: any) =>
         parseGraphFreeBusySlot(item, timezone),
       );
     }
     // Belt-and-suspenders: an address Graph dropped from the response entirely.
     for (const e of emails) {
       const lower = e.toLowerCase();
-      const present = Object.keys(result).some(k => k.toLowerCase() === lower);
+      const present = Object.hasOwn(result, lower);
       if (!present && !unresolved.includes(lower)) unresolved.push(lower);
     }
     return { result, unresolved, notChecked: [] };
@@ -1270,10 +1272,10 @@ export async function getEventEndInstant(
       // that surfaces this subject to a colleague (the must_be_after_event_id
       // ordering refusal) can mask it through displaySubject instead of
       // shipping the raw Graph subject of a private predecessor meeting.
-      .select('id,subject,end,sensitivity,categories')
+      .select('id,subject,end,sensitivity,categories,type,isCancelled')
       .get();
     const endIso = event?.end?.dateTime;
-    if (!endIso) return null;
+    if (!endIso || event.isCancelled === true || event.type === 'seriesMaster') return null;
     const dt = DateTime.fromISO(endIso, { zone: event.end.timeZone ?? timezone }).setZone(timezone);
     if (!dt.isValid) return null;
     return { end: dt, subject: event.subject ?? 'unknown', sensitivity: event.sensitivity, categories: event.categories };

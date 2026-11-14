@@ -146,6 +146,8 @@ export async function buildTurnContext(input: OrchestratorInput) {
   let currentMessageMeetingPeople: string[] = [];
   let resolvedMeetingAttendees: string[] = [];
   let meetingPeopleGroups: string[][] | undefined;
+  let ordinaryCreateSubject: string | undefined;
+  let ordinaryCreateAfterOtherMeeting: SkillContext['ordinaryCreateAfterOtherMeeting'];
   let resolvedMeetingAttendeeGroups: SkillContext['resolvedMeetingAttendeeGroups'];
   let contextualApprovalDecisions: SkillContext['contextualApprovalDecisions'];
   let standaloneBookingApproval: SkillContext['standaloneBookingApproval'];
@@ -267,6 +269,32 @@ export async function buildTurnContext(input: OrchestratorInput) {
           }
         } catch { approvalCandidates.length = 0; boundBooking = undefined; }
       }
+      // Only a delivered runtime receipt may anchor this transition. A synthetic
+      // history row, a model-authored receipt, or an ambiguous group of mutations cannot.
+      const prior = recentMessages.at(-1);
+      const receipts = prior?.toolSummaries;
+      const prefix = receipts?.length ? receipts.join(' ') + '\n' : '';
+      const writes = receipts?.filter(line => line.startsWith('[move_meeting ') || line.startsWith('[create_meeting '));
+      const receipt = writes?.length === 1 ? writes[0] : undefined;
+      const priorProse = prior?.role === 'assistant' && prefix && prior.content.startsWith(prefix)
+        ? prior.content.slice(prefix.length) : '';
+      const inspectCreate = ownerDecisionPath && !!input.typedUserMessage?.trim() && !!priorProse
+        && !input.proseOnly && !input.extraInstruction && !input.forceToolOnFirstTurn
+        && !input.images?.length && !input.extractedAttendeeEmails?.length
+        && (!input.inboundConnectionId || input.inboundConnectionId === 'slack')
+        && receipt?.endsWith(' attendee_check=noted')
+        && (receipt.startsWith("[move_meeting OK — Moved '") || receipt.startsWith("[create_meeting OK — Booked '"));
+      // A visit-wide instruction can precede the four recent messages. For this
+      // candidate alone, include all earlier available owner messages once, intact.
+      // Skip the optional signal if the complete owner text exceeds the budget.
+      const privateOwnerContext = inspectCreate ? conversationHistory.flatMap((m, i) => {
+        if (m.role !== 'user') return [];
+        const recentIndex = i - (conversationHistory.length - recentMessages.length);
+        const included = recentIndex < 0 ? '' : meetingContextMessages[recentIndex].content;
+        return included.length === m.content.length ? [] : [m.content];
+      }) : [];
+      const inspectIndependentOrdinaryCreate = !!inspectCreate && !approvalCandidates.length
+        && privateOwnerContext.reduce((sum, message) => sum + message.length, 0) <= 4000;
       const classifierCandidates = approvalCandidates.length ? approvalCandidates : boundBooking ? [boundBooking] : [];
       const turnResult = await classifyTurn({
         anthropic,
@@ -279,8 +307,18 @@ export async function buildTurnContext(input: OrchestratorInput) {
         senderName: input.senderName,
         recentContext: recentContext || undefined,
         meetingContextMessages: isPrivateSlackDm ? meetingContextMessages : undefined,
+        inspectIndependentOrdinaryCreate,
+        ordinaryCreateOwnerContext: inspectIndependentOrdinaryCreate ? privateOwnerContext : undefined,
         approvalCandidates: classifierCandidates.length ? classifierCandidates.map(({ row, action }) => ({ subject: row.subject ?? '', action })) : undefined,
       });
+      const fresh = turnResult.independentOrdinaryCreate;
+      if (inspectIndependentOrdinaryCreate && fresh && fresh.sourceMessageIndex === meetingContextMessages.length - 1
+        && input.typedUserMessage!.includes(fresh.subjectQuote) && priorProse.includes(fresh.priorSubjectQuote) && fresh.subjectQuote.trim().length > 0
+        && fresh.subjectQuote.trim().normalize('NFKC').toLowerCase() !== fresh.priorSubjectQuote.trim().normalize('NFKC').toLowerCase()
+        && (receipt!.startsWith("[move_meeting OK — Moved '" + fresh.priorSubjectQuote + "' to ")
+          || receipt!.startsWith("[create_meeting OK — Booked '" + fresh.priorSubjectQuote + "' for "))) {
+        ordinaryCreateSubject = fresh.subjectQuote;
+      }
       if (boundBooking?.row.details_json && turnResult.standaloneApprovalQuote === input.typedUserMessage
         && turnResult.standaloneApprovalQuote === userMessage) {
         standaloneBookingApproval = { requestId: boundBooking.row.id,
@@ -529,6 +567,21 @@ export async function buildTurnContext(input: OrchestratorInput) {
         });
         const covered = new Set(resolvedMeetingAttendeeGroups.flatMap(group => group.emails).map(email => email.toLowerCase()));
         if (!resolvedMeetingAttendees.every(email => covered.has(email.toLowerCase()))) resolvedMeetingAttendeeGroups = [];
+      }
+      const group = resolvedMeetingAttendeeGroups?.length === 1 ? resolvedMeetingAttendeeGroups[0] : undefined;
+      if (ordinaryCreateSubject && group && !group.unresolvedNames.length && group.emails.length > 0
+        && currentMessageMeetingPeople.length === turnMeetingPeople.length && unresolved.length === 0
+        && resolved.length === currentMessageMeetingPeople.length) {
+        // A literal Slack mention identifies a person even though the classifier
+        // sees a display name. Reconcile the literal IDs, not transport framing.
+        const typed = input.typedUserMessage!;
+        const mentions = [...new Set([...typed.matchAll(/<@([A-Z0-9]+)>/g)].map(m => m[1]))];
+        const { resolveAttendeeEmail } = require('../../memory/resolveAttendeeEmails') as typeof import('../../memory/resolveAttendeeEmails');
+        const mentioned = mentions.filter(id => id !== profile.user.slack_user_id).map(slack_id => resolveAttendeeEmail({ slack_id }).email);
+        const emails = new Set(group.emails.map(email => email.toLowerCase()));
+        const complete = mentioned.every(email => emails.has(email)) && resolved.every(person =>
+          mentioned.includes(person.email) || typed.toLowerCase().includes(person.name.toLowerCase()));
+        if (complete) ordinaryCreateAfterOtherMeeting = { subject: ordinaryCreateSubject, attendeeEmails: [...emails].sort() };
       }
       // Continuation participants constrain the meeting search, but do not
       // turn an owner-calendar question into a current named-person question.
@@ -1547,6 +1600,7 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     socialClassification,
     resolvedMeetingAttendees,
     resolvedMeetingAttendeeGroups,
+    ordinaryCreateAfterOtherMeeting,
     contextualApprovalDecisions,
     standaloneBookingApproval,
     availabilityQuestionDetected,

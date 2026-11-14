@@ -610,6 +610,19 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               message: `I don't have an email for ${missingEmail.map(a => a.name).join(', ')}, so I can't send the calendar invite. Get it (find_slack_user for an internal teammate, or ask ${ownerFirst}/the requester for an external), then re-call — I won't book a meeting no one can be invited to.`,
             };
           }
+          // Roster recovery precedes directory lookup. A name-only entry and a
+          // recovered address can resolve to the same invitee. Keep the first
+          // resolved row so the planner and Graph see the same unique roster.
+          const invitedEmails = new Set<string>();
+          for (let index = 0; index < attendees.length;) {
+            const email = attendees[index].email!.trim().toLowerCase();
+            if (invitedEmails.has(email)) attendees.splice(index, 1);
+            else {
+              attendees[index].email = email;
+              invitedEmails.add(email);
+              index++;
+            }
+          }
         }
 
         // v2.3.2 — colleague-path booking gate. When a colleague has confirmed
@@ -1178,14 +1191,11 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 };
               }
             } else {
-              logger.warn('create_meeting — must_be_after_event_id not found; proceeding without order check', {
-                eventId: mustBeAfterId,
-              });
+              return { success: false, error: 'anchor_event_not_found', message: 'Refresh the preceding event before booking. Its end could not be confirmed.' };
             }
           } catch (err) {
-            logger.warn('create_meeting — predecessor lookup threw, skipping order check', {
-              err: String(err).slice(0, 200),
-            });
+            logger.warn('create_meeting — predecessor lookup unavailable', { err: String(err).slice(0, 200) });
+            return { success: false, error: 'anchor_event_not_found', message: 'Refresh the preceding event before booking. Its end could not be confirmed.' };
           }
         }
 
@@ -1357,7 +1367,10 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           }
         }
         const bookingRequest = await normalizeBookingRequest('create_meeting', args, context);
-        const plan = await planMeeting(planInputFromBookingRequest(bookingRequest, context.profile));
+        const plan = await planMeeting(planInputFromBookingRequest(bookingRequest, context.profile, {
+          ordinaryCreateAfterOtherMeeting: context.interactive && context.authority === 'owner' && context.surface === 'owner_dm' && !context.approvedBookingAttendeeEmails
+            ? context.ordinaryCreateAfterOtherMeeting : undefined,
+        }));
         logger.info('create_meeting — planMeeting verdict', {
           action: plan.action, start: args.start, subject: args.subject,
           reasoning: 'reasoning' in plan ? plan.reasoning : undefined,

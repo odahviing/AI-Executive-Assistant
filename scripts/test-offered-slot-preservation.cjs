@@ -76,6 +76,13 @@ const stated = compile(source('src/utils/weTimeResolver.ts').text, {}, name => {
 const requestedClock = one(collect(source(handlerDir + 'findAvailableSlots.ts'), n =>
   ts.isVariableStatement(n) && variableNames(n).includes('resolveRequestedClock')), 'actual requested-clock helper');
 
+// Exercise the production named-slot guard with the no-predecessor fixture.
+function orderGuardFor(branch) {
+  return ['violatesOrder', 'anchoredSlotFailure'].filter(name => calls(branch, name)).map(name =>
+    one(collect(source(handlerDir + 'findAvailableSlots.ts'), n =>
+      ts.isVariableStatement(n) && variableNames(n).includes(name)), name));
+}
+
 function harness() {
   let now = Date.now();
   class Clock extends Date { static now() { return now; } }
@@ -100,7 +107,7 @@ function harness() {
   function execute(nodes, env, tail = '') {
     const body = nodes.map(n => n.getText()).join('\n');
     return compile(`export async function run() { ${body}\n${tail}\n }`,
-      { DateTime, logger, ...density, ...tz, ...stated, ...env }, requireSafe).run();
+      { DateTime, logger, predecessorEnd: undefined, ...density, ...tz, ...stated, ...env }, requireSafe).run();
   }
   function context(actor = 'owner', channelId = 'D-offer', threadTs = 't1') {
     return { channelId, threadTs, channel: 'slack', senderRole: actor, userId: actor,
@@ -178,7 +185,7 @@ function harness() {
         return [{ start: options.returnedStart ?? params.searchFrom, end: params.searchTo }];
       }, ...options.env,
     };
-    const result = await execute([requestedClock, node], env);
+    const result = await execute([requestedClock, ...orderGuardFor(node), node], env);
     return { result, callsMade };
   }
   async function preferred(ctx, options = {}) {
@@ -189,7 +196,7 @@ function harness() {
       && ts.isIdentifier(n.expression) && n.expression.text === 'preferredSlot'), 'preferred branch');
     const siblings = first.parent.statements;
     assert.equal(last.parent, first.parent, 'preferred anchors share a block');
-    return execute([requestedClock, ...Array.from(siblings).slice(siblings.indexOf(first), siblings.indexOf(last) + 1)], {
+    return execute([requestedClock, ...orderGuardFor(last), ...Array.from(siblings).slice(siblings.indexOf(first), siblings.indexOf(last) + 1)], {
       args: { preferred_slot: options.start ?? instant, duration_minutes: 40 }, context: ctx,
       timezone: zone, searchWindowTz: '', candidateSet: options.candidateSet ?? [], chosenStarts: new Set(),
       userEmail: 'owner@example.test', attendeeBusyEmails: ['person@example.test'], attendeeAvailability: [],

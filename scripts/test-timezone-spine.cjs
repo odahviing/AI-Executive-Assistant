@@ -75,11 +75,12 @@ function harness() {
     const statements = decl.parent.statements;
     const start = statements.indexOf(decl);
     const afterId = statements.findIndex((n,i)=>i>start && names(n).includes('mustBeAfterId'));
-    assert(afterId > start && ts.isIfStatement(statements[afterId+1]));
-    const body = statements.slice(start,afterId+2).map(n=>n.getText()).join('\n');
+    const guard = statements.findIndex((n,i)=>i>afterId && ts.isIfStatement(n) && n.expression.getText()==='mustBeAfterId');
+    assert(afterId > start && guard > afterId);
+    const body = statements.slice(start,guard+1).map(n=>n.getText()).join('\n');
     return compile(`export async function run() { ${body}\nreturn effectiveSearchFrom; }`,
       {args:{time_window_is_hard:true,...args}, context, timezone:zone, userEmail:profile.user.email, DateTime, logger, ...wh, ...tz, ...resolver,
-        getCalendarEvents:async()=>[{id:'predecessor',end:{dateTime:predecessorEnd,timeZone:zone}}] }).run();
+        getEventEndInstant:async()=>({end:DateTime.fromISO(predecessorEnd,{zone})}) }).run();
   }
   return { profile, wh, tz, travel, resolver, mutations, patches, metadataReads, outcome, normalizeHandler, clipSearch,
     metadata(value) { metadata=value; },

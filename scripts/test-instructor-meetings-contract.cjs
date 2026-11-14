@@ -103,5 +103,61 @@ check('OPTIONS-R02 legitimate narrowing is disclosed without broad availability 
     assert.match(prompt, /not the only availability overall/);
   }
 });
+check('CONDITION-R01 optional move argument distinguishes conditional, assumed-free and unconditional moves', () => {
+  const schema = tool('move_meeting').input_schema;
+  const flag = schema.properties.require_attendee_availability;
+  assert.equal(flag?.type, 'boolean');
+  assert.ok(!schema.required?.includes('require_attendee_availability'));
+  assert.match(flag.description, /believes they are free/);
+  assert.match(flag.description, /Busy or unconfirmed availability/);
+  assert.match(flag.description, /unconditional move/);
+});
+check('EXCEPTION-R01 a new booking starts ordinary and a disclosed exception binds the specific action', () => {
+  assert.match(owner, /Start a new booking with ordinary checks/);
+  assert.match(owner, /authorized action, roster and slot/);
+  assert.match(owner, /Picking an offer with a disclosed attendee conflict accepts it/);
+  assert.doesNotMatch(owner, /DIRECTLY with relaxed:true/);
+});
+check('PACKING-R01 actual dense preference renders only on the owner path', () => {
+  const dense = { ...profile, meetings: { ...profile.meetings, packing_preference: 'dense' } };
+  const spread = { ...profile, meetings: { ...profile.meetings, packing_preference: 'spread' } };
+  const render = (p, ownerRole) => skill.getSystemPromptSection(p, undefined, ownerRole, 'slack');
+  assert.match(render(dense, true), /Dense calendar packing is on/);
+  for (const prompt of [render(dense, false), render(spread, true), owner]) assert.doesNotMatch(prompt, /Dense calendar packing is on/);
+});
+check('CONFIRM-R01 ambiguous yes needs a specific choice and one identifiable proposal can proceed', () => {
+  assert.match(owner, /A short yes accepts one identifiable proposal/);
+  assert.match(owner, /two pending actions, ask which one before acting/);
+});
+check('CONFIRM-R02 print secondary and vacated clocks only in context', () => {
+  assert.match(owner, /second clock when requested or when it explains a scheduling constraint/);
+  assert.match(owner, /material conflicts, unknowns, side effects or details the requester asked for/);
+  assert.match(owner, /labeled travel-day display/);
+  assert.match(email, /Append the other party's zone once as a parenthetical only if relevant/);
+  assert.match(tool('move_meeting').description, /when the freed slot matters to the request/);
+});
+check('CONFIRM-P01 partial outcomes, unchecked attendees and supplied duration changes stay explicit', () => {
+  assert.match(owner, /Account for every event and confirmed time/);
+  assert.match(owner, /Claim an attendee is free only when that slot's evidence confirms it/);
+  assert.match(tool('move_meeting').input_schema.properties.new_end.description, /Set it ONLY when the duration is actually changing/);
+});
+check('COVERAGE-R01 joint search, move proposal and create preserve unknown calendar coverage', () => {
+  for (const prompt of [owner, colleague]) {
+    assert.ok(prompt.includes('An unreadable calendar stays unconfirmed'));
+    assert.ok(prompt.includes('unchecked attendees for that candidate'));
+    assert.ok(!prompt.includes('returns slots where everyone is free'));
+  }
+  assert.ok(tool('create_meeting').description.includes('per-attendee status'));
+});
+check('HOURS-R01 search distinguishes reported hours from assumptions and busy time', () => {
+  assert.ok(tool('find_available_slots').description.includes('distinguish stated hours from an assumed window'));
+});
+check('INTEGRATION-P01 predecessor survives exact searches and booking, room venue and private role remain supported', () => {
+  assert.ok(tool('find_available_slots').input_schema.properties.must_be_after_event_id);
+  assert.ok(tool('create_meeting').input_schema.properties.must_be_after_event_id);
+  assert.ok(tool('create_meeting').input_schema.properties.start_at_event_end_id);
+  assert.ok(tool('update_meeting').input_schema.properties.location);
+  assert.match(colleague, /SCHEDULE IS PRIVATE/);
+});
 console.log('METRICS '+JSON.stringify({ownerPromptChars:owner.length,colleaguePromptChars:colleague.length,emailPromptChars:email.length,toolJsonChars:JSON.stringify(tools).length,deleteDescriptionChars:tool('delete_meeting').description.length,tokenCounts:'unavailable; no character/token estimate used'}));
 console.log(`${passed} passed; ${failed} failed`); process.exitCode=failed?1:0;

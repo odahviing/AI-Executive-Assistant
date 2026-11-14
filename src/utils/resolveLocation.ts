@@ -171,6 +171,11 @@ function onsiteOrOnlineAsk(externalNames: string[], fullLabel: string): string {
   return `Apart from ${who}, do you want the rest to meet onsite at ${fullLabel} (with ${them} on Teams), or all online?`;
 }
 
+export function isConfiguredMeetingRoom(profile: UserProfile, location: string | undefined): boolean {
+  const label = profile.meetings.office_location?.meeting_room_label || 'Meeting Room';
+  return !!profile.meetings.room_email && location?.trim().toLowerCase() === label.trim().toLowerCase();
+}
+
 export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
   const { profile } = input;
   // v3.7.x (#143) — day type from the effective work day (yaml base + per-date
@@ -217,6 +222,8 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
       kind: 'resolved',
       isOnline: input.ownerIsOnlineHint === true,
       location: loc,
+      ...(isConfiguredMeetingRoom(profile, loc)
+        ? { addRoomEmail: true } : {}),
       reasoning: 'owner-explicit location string',
     };
   }

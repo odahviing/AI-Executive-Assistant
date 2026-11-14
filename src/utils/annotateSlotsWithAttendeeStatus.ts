@@ -58,15 +58,15 @@ export async function annotateSlotsWithAttendeeStatus<S extends { start: string;
     // about times nobody looked at. The throw path a few lines down has always
     // answered 'unknown' for exactly this situation; this is the same answer for
     // the same situation, arriving by a different route.
-    const fbDiag: { notChecked?: string[] } = {};
+    const fbDiag: { notChecked?: string[]; unresolved?: string[] } = {};
     const busyMap = await getFreeBusyForDecision(params.callerEmail, [params.attendeeEmail], earliest, latest, params.timezone, fbDiag);
-    if ((fbDiag.notChecked ?? []).length > 0) {
+    if (fbDiag.notChecked?.length || fbDiag.unresolved?.length) {
       logger.warn('annotateSlotsWithAttendeeStatus: free/busy was never read — returning unknown', {
         attendeeEmail: params.attendeeEmail, earliest, latest,
       });
       return params.slots.map(slot => ({ slot, attendeeStatus: 'unknown' as const }));
     }
-    const slots = busyMap[params.attendeeEmail] ?? [];
+    const slots = busyMap[params.attendeeEmail.toLowerCase()] ?? [];
     busyRanges = slots
       .filter(s => s.status !== 'free')
       .map(s => ({
@@ -84,8 +84,8 @@ export async function annotateSlotsWithAttendeeStatus<S extends { start: string;
     return params.slots.map(slot => ({ slot, attendeeStatus: 'unknown' as const }));
   }
 
-  // Status priority: oof > busy > tentative > free
-  const statusRank: Record<string, number> = { oof: 4, busy: 3, tentative: 2, free: 1 };
+  // An observed conflict outranks an overlapping unknown item.
+  const statusRank: Record<string, number> = { oof: 4, busy: 3, tentative: 2, unknown: 1 };
 
   return params.slots.map(slot => {
     const slotStart = DateTime.fromISO(slot.start).toMillis();

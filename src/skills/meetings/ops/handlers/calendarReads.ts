@@ -804,8 +804,8 @@ export async function handleGetFreeBusy(args: Record<string, unknown>, ctx: OpCt
           // wire shape of "nobody has a single busy block" — so the answer to "is
           // he free?" was an unqualified yes, from a call that never reached his
           // calendar. Reported as an explicit refusal-to-answer below, not as data.
-          const fbDiag: { notChecked?: string[] } = {};
-          const raw = await getFreeBusy(userEmail, args.emails as string[], args.start_date as string, args.end_date as string, timezone, args.force_refresh === true ? 'force' : 'cached', fbDiag);
+          const fbDiag: { notChecked?: string[]; unresolved?: string[] } = {};
+          let raw = await getFreeBusy(userEmail, args.emails as string[], args.start_date as string, args.end_date as string, timezone, args.force_refresh === true ? 'force' : 'cached', fbDiag);
           if ((fbDiag.notChecked ?? []).length > 0) {
             logger.warn('get_free_busy — the free/busy read never happened; refusing to report anyone as free', {
               emails: args.emails, start_date: args.start_date, end_date: args.end_date,
@@ -831,15 +831,15 @@ export async function handleGetFreeBusy(args: Record<string, unknown>, ctx: OpCt
           // — but leaving a second copy of a pattern that was a real leak next
           // door is how it comes back.
           const isSharedSurface = context.senderRole === 'colleague';
-          if (isSharedSurface && Array.isArray(args.emails) && (args.emails as string[]).includes(userEmail)) {
-            const ownerBusy = raw[userEmail] ?? [];
+          if (isSharedSurface && Array.isArray(args.emails) && (args.emails as string[]).some(email => email.toLowerCase() === userEmail.toLowerCase())) {
+            const ownerBusy = raw[userEmail.toLowerCase()] ?? [];
             const synthetic = buildOutOfHoursBusy(
               args.start_date as string,
               args.end_date as string,
               context.profile,
               timezone,
             );
-            raw[userEmail] = [...ownerBusy, ...synthetic];
+            raw = { ...raw, [userEmail.toLowerCase()]: [...ownerBusy, ...synthetic] };
           }
           // #WE-spine — owner free/busy on a travel day: attach the away-tz note
           // so "am I free Wed 3pm?" on a Boston day isn't answered in a misleading
@@ -862,14 +862,19 @@ export async function handleGetFreeBusy(args: Record<string, unknown>, ctx: OpCt
           // description, which Sonnet ignored — this rides the result it just read.)
           const emailsArg = Array.isArray(args.emails) ? (args.emails as string[]) : [];
           const hasOtherAttendees = emailsArg.some(e => e && e.toLowerCase() !== userEmail.toLowerCase());
+          // Unresolved mailboxes carry no checked-free row. Build a response
+          // without mutating the provider result, which may be shared by cache.
+          const missing = new Set(fbDiag.unresolved ?? []);
+          const checked = missing.size ? Object.fromEntries(Object.entries(raw).filter(([email]) => !missing.has(email.toLowerCase()))) : raw;
+          const coverage = missing.size ? { not_checked: [...missing], _attendee_not_checked_warning: 'Availability could not be confirmed for the listed mailboxes.' } : {};
           if (hasOtherAttendees) {
             return {
-              ...(raw as Record<string, unknown>),
+              ...checked, ...coverage,
               ...(weFbNote ? { _working_elsewhere_note: weFbNote } : {}),
               _note: 'These are RAW per-person free/busy blocks, NOT a validated set of common bookable slots. To present bookable meeting options across these people (or ANY meeting with attendees), call find_available_slots — it intersects everyone\'s calendar + work hours. Do NOT offer gaps from this result as "both free" / "best bet"; that is owner-only eyeballing and will contradict the attendee check at booking time.',
             };
           }
-          return weFbNote ? { ...(raw as Record<string, unknown>), _working_elsewhere_note: weFbNote } : raw;
+          return { ...checked, ...coverage, ...(weFbNote ? { _working_elsewhere_note: weFbNote } : {}) };
         } catch (err) {
           if (err instanceof GraphPermissionError) {
             return {

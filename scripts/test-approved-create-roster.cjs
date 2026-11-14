@@ -44,6 +44,7 @@ const approvedRosterGuard = handler.body.statements.find(n => ts.isIfStatement(n
   n.expression.getText() === 'context.approvedBookingAttendeeEmails')?.getText() ?? '';
 const resolveBlock = one(create, n => ts.isTryStatement(n) && n.catchClause?.getText().includes('email auto-fill threw'));
 const missingBlock = one(create, n => ts.isVariableDeclaration(n) && n.name.getText() === 'missingEmail').parent.parent.parent;
+const requestedRoom = one(create, n => ts.isIfStatement(n) && n.expression.getText().startsWith('args.add_room_email && roomEmail &&'));
 const writeCall = one(create, n => ts.isCallExpression(n) && n.expression.getText() === 'createMeeting');
 const planParticipants = one(booking, n => ts.isFunctionDeclaration(n) && n.name?.text === 'buildParticipants').getText();
 const humanEmail = one(booking, n => ts.isFunctionDeclaration(n) && n.name?.text === 'emailStatedByHuman').getText();
@@ -89,7 +90,7 @@ function harness({ ambiguous = false, postFails = false } = {}) {
   const preflight = compile('module.exports = function(rawAttendees,context){const attendees=rawAttendees;\n'+
     approvedRosterGuard+'\n};', {}, {});
   const run = compile('module.exports = async function(args,context){const attendees=args.attendees; const attendeeEmailNotes=[];\n' +
-    resolveBlock.getText() + '\n' + missingBlock.getText() + '\nreturn ' + writeCall.getText() + ';};',
+    resolveBlock.getText() + '\n' + missingBlock.getText() + '\nconst roomEmail=context.profile.meetings?.room_email;\n' + requestedRoom.getText() + '\nreturn ' + writeCall.getText() + ';};',
     { logger, createMeeting: graph.createMeeting, HANDLER_ERROR_CODE: { ATTENDEE_MISSING_EMAIL: 'attendee_missing_email' },
       timezone: 'UTC', userEmail: profile.user.email, skipLocationField: true, resolvedLocationParts: [], effectiveIsOnline: true },
     { '../../../../memory/resolveAttendeeEmails': contact, '../../bookingRequest': plan,
@@ -640,3 +641,17 @@ test('framed-new-full-name-and-conflicting-callback-cannot-select-another-mailbo
   checkHeld(await typedDecision(approval,proposal,namedAnswer),booking,approval);
 });
 
+
+test('converging name and recovered address serialize one Graph invitation row',async()=>{
+  const h=harness(); await h.ordinary([{name:'Daniel'},{email:'Daniel@example.test'},{email:'guest@outside.test'}]);
+  assert.deepEqual(h.posts,[['daniel@example.test','guest@outside.test']]);
+});
+test('padded first email is normalized in actual Graph POST', async()=>{
+  const h=harness();await h.ordinary([{email:' Daniel@example.test '},{email:'daniel@example.test'},{email:'guest@outside.test'}]);
+  assert.deepEqual(h.posts,[['daniel@example.test','guest@outside.test']]);
+});
+test('padded explicit room and requested resource serialize once',async()=>{
+  const h=harness();await h.ordinary([{email:' Room@example.test '},{email:'guest@outside.test'}],
+    {profile:{...profile,meetings:{room_email:'room@example.test'}}},{add_room_email:true});
+  assert.deepEqual(h.posts,[['room@example.test','guest@outside.test']]);
+});

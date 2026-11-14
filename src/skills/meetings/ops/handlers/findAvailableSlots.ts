@@ -10,7 +10,7 @@ import { defaultMeetingSearchWindow } from '../../../../utils/workHours';
 import { humanizeViolationLabel, attendeeFirstName, attendeeConflictLine } from '../../ops/violationLabels';
 import { enrichUnresolvedInternal } from '../../ops/analysis';
 import {
-  getCalendarEvents,
+  getEventEndInstant,
   type DaySummaryEntry,
   type SearchRejectReason,
   findAvailableSlots,
@@ -59,9 +59,10 @@ function attendeeCheckWarnings(params: {
   attendeeEmailWarning?: Record<string, unknown>;
   attendeeNotCheckedWarning?: Record<string, unknown>;
 } {
-  const { userEmail, ownerFirstName, unresolvedAttendees, attendeesNotChecked, logSuffix, logExtra } = params;
+  const { userEmail, ownerFirstName, unresolvedAttendees, logSuffix, logExtra } = params;
   const ownerDomainLower = userEmail.includes('@') ? userEmail.split('@')[1].toLowerCase() : '';
   const unresolvedInternal = unresolvedAttendees.filter(e => ownerDomainLower && e.endsWith('@' + ownerDomainLower));
+  const attendeesNotChecked = [...new Set([...params.attendeesNotChecked, ...unresolvedAttendees.filter(e => !unresolvedInternal.includes(e))])];
   let attendeeEmailWarning: Record<string, unknown> | undefined;
   if (unresolvedInternal.length > 0) {
     const entries = enrichUnresolvedInternal(unresolvedInternal, ownerDomainLower);
@@ -330,8 +331,6 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           );
           // v2.2.5 (C) — must_be_after_event_id: clip searchFrom to AFTER the
           // predecessor's end. Optional; when omitted, behavior is unchanged.
-          // Predecessor lookup via getCalendarEvents window around the
-          // searchFrom date — saves a per-event-id roundtrip and is bounded.
           const defaultWindow = !args.search_from && !args.search_to
             ? defaultMeetingSearchWindow(context.profile) : undefined;
           let effectiveSearchFrom = (args.search_from as string | undefined)
@@ -430,40 +429,6 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             effectiveSearchFrom = DateTime.fromISO(effectiveSearchFrom, { zone: timezone }).startOf('day').toISO()!;
             effectiveSearchTo = DateTime.fromISO(effectiveSearchTo, { zone: timezone }).endOf('day').toISO()!;
           }
-          const mustBeAfterId = args.must_be_after_event_id as string | undefined;
-          if (mustBeAfterId) {
-            try {
-              const probeFrom = DateTime.fromISO(args.search_from as string, { zone: timezone })
-                .minus({ days: 30 }).toFormat('yyyy-MM-dd');
-              const probeTo = DateTime.fromISO(args.search_to as string, { zone: timezone })
-                .plus({ days: 30 }).toFormat('yyyy-MM-dd');
-              const events = await getCalendarEvents(userEmail, probeFrom, probeTo, timezone);
-              const predecessor = events.find(e => e.id === mustBeAfterId);
-              if (predecessor) {
-                const predEnd = DateTime.fromISO(predecessor.end.dateTime, { zone: predecessor.end.timeZone ?? 'utc' })
-                  .setZone(timezone);
-                const requestedFrom = DateTime.fromISO(effectiveSearchFrom, { zone: timezone });
-                if (predEnd.toMillis() > requestedFrom.toMillis()) {
-                  effectiveSearchFrom = predEnd.toISO()!;
-                  logger.info('find_available_slots — clipped searchFrom to after predecessor', {
-                    predecessorId: mustBeAfterId,
-                    predecessorEnd: predEnd.toISO(),
-                    originalFrom: args.search_from,
-                    clippedFrom: effectiveSearchFrom,
-                  });
-                }
-              } else {
-                logger.warn('find_available_slots — must_be_after_event_id not found, ignoring', {
-                  eventId: mustBeAfterId,
-                });
-              }
-            } catch (err) {
-              logger.warn('find_available_slots — predecessor lookup threw, ignoring constraint', {
-                err: String(err).slice(0, 200),
-              });
-            }
-          }
-
           // v3.1.x — zero-width / inverted window guard. "Am I free at 3pm ET
           // next Tuesday?" is a point-in-time availability check; Sonnet maps it
           // to search_from == search_to (a single instant). getFreeBusy bails on
@@ -473,13 +438,13 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // the NEXT turn. Mirror the date-only expansion above: when from >=
           // to, expand `to` to
           // from + duration_minutes so the requested instant is actually
-          // tested. (A predecessor-clip that pushed `from` past `to` lands
-          // here too.) The preferred_slot (when set) already pins the exact
+          // tested. Resolve point requests before intersecting with an anchor.
+          // The preferred_slot (when set) already pins the exact
           // instant inside this window, so the asked time is guaranteed tested.
           {
             const fromDt = DateTime.fromISO(effectiveSearchFrom, { zone: timezone });
             const toDt = DateTime.fromISO(effectiveSearchTo, { zone: timezone });
-            if (fromDt.isValid && toDt.isValid && fromDt.toMillis() >= toDt.toMillis()) {
+            if (fromDt.isValid && toDt.isValid && (fromDt.equals(toDt) || (!args.must_be_after_event_id && fromDt > toDt))) {
               const durMin = (args.duration_minutes as number) ?? 30;
               const expandedTo = fromDt.plus({ minutes: durMin }).toISO();
               if (expandedTo) {
@@ -494,6 +459,40 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             }
           }
 
+          const mustBeAfterId = args.must_be_after_event_id as string | undefined;
+          let predecessorEnd: DateTime | undefined;
+          if (mustBeAfterId) {
+            try {
+              predecessorEnd = (await getEventEndInstant(userEmail, mustBeAfterId, timezone))?.end;
+            } catch (err) {
+              logger.warn('find_available_slots — predecessor lookup unavailable', { err: String(err).slice(0, 200) });
+            }
+            if (!predecessorEnd?.isValid) {
+              return { error: 'anchor_event_not_found', message: 'Refresh the preceding event before searching. Its end could not be confirmed.' };
+            }
+            if (args.search_to && DateTime.fromISO(effectiveSearchFrom, { zone: timezone }) > DateTime.fromISO(effectiveSearchTo, { zone: timezone })) {
+              return { slots: [], message: 'The requested search interval ends before it starts.' };
+            }
+            if (args.search_to && predecessorEnd >= DateTime.fromISO(effectiveSearchTo, { zone: timezone })) {
+              return { slots: [], message: 'The preceding meeting ends at or after the end of this search window.' };
+            }
+            if (predecessorEnd > DateTime.fromISO(effectiveSearchFrom, { zone: timezone })) {
+              effectiveSearchFrom = predecessorEnd.toISO()!;
+            }
+          }
+
+          const anchoredSlotFailure = (start: string, end: string) => {
+            if (!predecessorEnd) return undefined;
+            if (DateTime.fromISO(start, { zone: timezone }) < predecessorEnd) {
+              return { available: false, broken_rule: 'order_violation', broken_rule_label: 'The time starts before the preceding meeting ends.' };
+            }
+            if (args.search_from && DateTime.fromISO(start, { zone: timezone }) < DateTime.fromISO(effectiveSearchFrom, { zone: timezone })) {
+              return { available: false, broken_rule: 'outside_search_window', broken_rule_label: 'The meeting would start before the search window.' };
+            }
+            if (args.search_to && DateTime.fromISO(end, { zone: timezone }) > DateTime.fromISO(effectiveSearchTo, { zone: timezone })) {
+              return { available: false, broken_rule: 'outside_search_window', broken_rule_label: 'The meeting would end after the search window.' };
+            }
+          };
           // v2.3.2 (5B/5C) / v2.3.6 — auto-load attendee work-hour availability
           // from people_memory via shared helper. Pre-clips slots to the
           // intersection of every attendee's window so Brett (Boston/EST)
@@ -1192,6 +1191,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 });
                 return { start: cand.start, end: cand.start, available: false, error: 'validation_error' };
               }
+              const boundFailure = anchoredSlotFailure(cand.start, cand.end);
+              if (boundFailure) return { start: cand.start, end: cand.end, ...boundFailure };
               try {
                 const slots = await findAvailableSlots({
                   userEmail,
@@ -1910,6 +1911,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // silence, not the drop.
             let preferredSlotStatus: Record<string, unknown> | undefined;
             if (preferredSlot) {
+              const preferredEnd = DateTime.fromISO(preferredSlot, { zone: timezone }).plus({ minutes: args.duration_minutes as number }).toISO() ?? preferredSlot;
+              const boundFailure = anchoredSlotFailure(preferredSlot, preferredEnd);
               const matchingCandidate = candidateSet.find(s => {
                 try {
                   // Equal instants allow offset-format differences, never a
@@ -1924,6 +1927,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   preferredSlot,
                   candidateStart: matchingCandidate.start,
                 });
+              } else if (boundFailure) {
+                preferredSlotStatus = { start: preferredSlot, end: preferredEnd, ...boundFailure };
               } else if (!matchingCandidate) {
                 // Pre-fix this branch logged and did NOTHING — the named time
                 // vanished from the payload and the model inferred it was
