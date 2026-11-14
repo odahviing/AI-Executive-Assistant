@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
 **5 product decisions await you** — 6 open items; 0 captured, 0 ready for an authorized lane batch, 1 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (13):** nov13-conditional-slot-authority · nov13-floating-lunch-resize-result · nov13-boston-office-location · nov13-scheduling-confirmation-judgment · nov13-duplicate-invite-address · nov13-external-freebusy-coverage · nov13-fresh-create-inherited-waiver · nov13-person-hours-effective-delta · nov13-profile-constraint-change-receipt · nov13-explicit-room-resource · nov13-write-attendee-hours · nov13-predecessor-unresolved · nov13-predecessor-exact-bypass
+**Independently verified, awaiting wrap (1):** nov13-boston-office-location
 
 ### Needs a product decision (5)
 
