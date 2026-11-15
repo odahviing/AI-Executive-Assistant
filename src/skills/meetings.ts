@@ -601,11 +601,9 @@ ATTENDEES (v2.9.1):
       },
       {
         name: 'hold_slot',
-        description: `Tentatively HOLD a slot someone picked but hasn't confirmed — or that ${profile.user.name.split(' ')[0]} explicitly parks — so a SECOND person asking that time hears "tentatively held" instead of "free". Internal state only; never a calendar event. Auto-expires at the slot's start OR 2 ${profile.user.name.split(' ')[0]}-workdays (whichever first), DMing the holder it was freed.
-
-WHEN TO HOLD (action='hold'): a colleague was offered slots and picks ONE but DEFERS confirmation — "slot 1 works, let me check with my team", "20:30 טוב, רק אבדוק עם דנה". NOT on a clean yes (that books — call create_meeting). NOT at offer time (offers stay open). NOT on a vague "these all look ok" (no specific slot picked). ${profile.user.name.split(' ')[0]} can also park one explicitly ("hold Tue 14:00 for Yael until Thursday").
-RELEASE (action='release'): the holder confirms (then book it), declines, or re-picks a different time; or ${profile.user.name.split(' ')[0]} cancels a hold.
-Colleague-path: a colleague can only hold/release a time that WAS offered to them in THIS conversation (validated against the offered set), max 3 active holds; a new pick in the same thread replaces the old one. Owner-path: any slot, any holder, no limit.`,
+        description: `Hold one selected offer internally while the colleague checks. Other requests see it as tentatively held. Offers alone stay open. Use create_meeting for a confirmed Outlook invite, including a placeholder.
+Colleagues may hold times offered in this conversation, up to 3 active per holder and 2 per meeting. A different pick can coexist. ${profile.user.name.split(' ')[0]} may explicitly park any slot for any holder without those caps. Report the returned expires_at on success (earlier of slot start or two owner workdays).
+Release when the holder declines, replaces or confirms the hold, or the owner cancels it.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -744,8 +742,8 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         //
         // NO `leadTimeHours` here, deliberately. The booking lead time is a
         // WRITE-path rule — "how much notice before Maelle puts a NEW commitment
-        // on his calendar" — and this tool writes nothing (see the _note on every
-        // return: the colleague forwards their own invite). Passing it made every
+        // on his calendar" — and the colleague forwards the existing invite.
+        // Passing it made every
         // same-day "can Idan join our 3pm?" fail rule 0b on `within_lead_time`,
         // i.e. a notice period applied to a presence question about a meeting
         // that already exists. Worse, the refusal dead-ended: `needs_approval`
@@ -806,8 +804,8 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         // has to physically shift, and to where, so active mode can move it in
         // the same turn.
         const joinDayName = DateTime.fromISO(dayStr, { zone: timezone }).toFormat('EEEE');
-        // A private occupancy snapshot is updated after each accepted move.
-        // Plan the next destination from that state, never the old calendar read.
+        // Plan successive destinations on a private occupancy snapshot. A
+        // read-only turn can check that every block fits without moving it.
         const joinMoveEvents = events.filter(e => !e.isAllDay).map(e => ({ ...e }));
         const sourceRanges = fb.preserveFloatingSourceRanges(joinMoveEvents, profile);
         const pendingBlockMoves: Array<{
@@ -841,7 +839,6 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           const movesDone: string[] = [];
           let movedIntoWorkingElsewhereFallback = false;
           if (activeMode && pendingBlockMoves.length > 0) {
-            const { logRebalanceMoveActivity } = await import('../utils/rebalanceFloatingBlocks');
             for (const { block, event: blockEvent } of pendingBlockMoves) {
               let moveAccepted = false;
               try {
@@ -859,24 +856,25 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
                 if (aligned === currentStart.toMillis()) continue;
                 const newStart = DateTime.fromMillis(aligned).setZone(timezone);
                 const newEnd = newStart.plus({ minutes: sizedBlock.duration_minutes });
-                await updateMeeting({
-                  userEmail, meetingId: blockEvent.id,
-                  start: newStart.toISO()!, end: newEnd.toISO()!, timezone,
-                });
-                moveAccepted = true;
-                // Record the acknowledged write before best-effort activity logging.
-                // Only the authenticated private owner may see configured details.
-                movesDone.push(joinViewer === 'owner'
-                  ? `moved ${block.name} ${currentStart.toFormat('HH:mm')}→${newStart.toFormat('HH:mm')}`
-                  : 'moved a calendar block');
-                logRebalanceMoveActivity(profile.user.slack_user_id, block.name, blockEvent, timezone, newStart, newEnd);
+                if (!context.calendarReadOnly) {
+                  const { logRebalanceMoveActivity } = await import('../utils/rebalanceFloatingBlocks');
+                  await updateMeeting({
+                    userEmail, meetingId: blockEvent.id,
+                    start: newStart.toISO()!, end: newEnd.toISO()!, timezone,
+                  });
+                  moveAccepted = true;
+                  movesDone.push(joinViewer === 'owner'
+                    ? `moved ${block.name} ${currentStart.toFormat('HH:mm')}→${newStart.toFormat('HH:mm')}`
+                    : 'moved a calendar block');
+                  logRebalanceMoveActivity(profile.user.slack_user_id, block.name, blockEvent, timezone, newStart, newEnd);
+                  if (usedWorkingElsewhereFallback) movedIntoWorkingElsewhereFallback = true;
+                  logger.info('check_join_availability active-mode: block moved in-turn', {
+                    eventId: blockEvent.id, blockName: block.name,
+                    from: currentStart.toFormat('HH:mm'), to: newStart.toFormat('HH:mm'),
+                  });
+                }
                 blockEvent.start = { dateTime: newStart.toISO()!, timeZone: timezone };
                 blockEvent.end = { dateTime: newEnd.toISO()!, timeZone: timezone };
-                if (usedWorkingElsewhereFallback) movedIntoWorkingElsewhereFallback = true;
-                logger.info('check_join_availability active-mode: block moved in-turn', {
-                  eventId: blockEvent.id, blockName: block.name,
-                  from: currentStart.toFormat('HH:mm'), to: newStart.toFormat('HH:mm'),
-                });
               } catch (err) {
                 logger.warn('In-turn block move failed - proceeding without it', {
                   eventId: blockEvent.id, err: String(err).slice(0, 200),
@@ -1024,7 +1022,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         // travel buffer — so a 21:00 ask no longer answers "he's free at that
         // time" and then fail at booking.
         // Deliberately NOT the booking lead time: that is a write-path rule and
-        // this tool writes nothing (see the checkSlot call above).
+        // no new commitment is being booked here (see the checkSlot call above).
         // M9 — the reason travels in human terms (checkSlot's own label), so the
         // colleague can understand it and, if it matters, trigger an approval.
         const joinViolation = joinCheck.violation_label ?? 'one of his scheduling rules';

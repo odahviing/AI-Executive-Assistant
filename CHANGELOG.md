@@ -1,3 +1,11 @@
+## 5.4.5 — Hold the selected meeting time and receive Slack broadcast replies
+
+When a colleague asks Maelle to hold a time she offered in Slack, she can reserve the selected interval internally. An explicit request to send a calendar invitation is a separate action.
+
+### Fixed
+- Match the selected time to the offer delivered in that conversation, including its end time. Withhold calendar changes when the choices conflict or the colleague is asking whether an invitation has been sent.
+- Process a human Slack thread reply shared back to the conversation, including during catch-up after a restart. Keep the original author and thread, and deduplicate Slack redelivery so one reply reaches the conversation once.
+
 ## 5.4.4 — Scheduling respects attendee hours, room availability and meeting order
 
 Maelle checks the people, room and preceding meeting before offering or changing a time. A new booking gets its own conflict decision, and the scheduling tools distinguish unavailable calendar data from confirmed availability.

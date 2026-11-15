@@ -354,6 +354,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     socialActive,
     socialClassification,
     blockedWriteTools,
+    holdOnlyWindows,
     resolvedMeetingAttendees,
     resolvedMeetingAttendeeGroups,
     ordinaryCreateAfterOtherMeeting,
@@ -607,6 +608,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // The transport can enrich userMessage with names, transcripts, and file
       // content. Keep it for conversational checks that use that context.
       currentUserMessage: userMessage,
+      calendarReadOnly: blockedWriteTools?.has('move_meeting') === true,
       // A missing literal source cannot establish a new recipient address.
       typedUserMessage: input.typedUserMessage ?? '',
       interactive: input.interactive !== false,
@@ -616,15 +618,34 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
 
     for (const toolUse of toolBlocks as Anthropic.ToolUseBlock[]) {
       if (blockedWriteTools?.has(toolUse.name)) {
+        const holdOnly = holdOnlyWindows !== undefined && !blockedWriteTools.has('hold_slot');
         toolResults.push({
           type: 'tool_result', tool_use_id: toolUse.id,
           content: JSON.stringify({
-            ok: false, reason: 'turn_is_read_only',
-            _note: 'This action was not executed. Answer the question or present the concrete plan for agreement; do not claim a change.',
+            ok: false, reason: holdOnly ? 'outside_selected_hold' : 'turn_is_read_only',
+            _note: holdOnly ? 'Only the selected internal hold was requested. This action was not executed.'
+              : 'This action was not executed. Answer the question or present the concrete plan for agreement; do not claim a change.',
           }),
         });
-        toolCallSummaries.push(`[${toolUse.name} FAILED] not executed — this turn permits discovery or explanation only`);
+        toolCallSummaries.push(`[${toolUse.name} FAILED] not executed — this action is unavailable for this turn`);
         continue;
+      }
+      if (holdOnlyWindows && toolUse.name === 'hold_slot') {
+        const args = toolUse.input as { action?: unknown; start_iso?: unknown; end_iso?: unknown } | null;
+        const instant = (iso: unknown) => typeof iso === 'string'
+          ? DateTime.fromISO(iso, { zone: profile.user.timezone }).toMillis() : NaN;
+        const start = instant(args?.start_iso);
+        const end = instant(args?.end_iso);
+        if (args?.action !== 'hold' || !(end > start) || holdOnlyWindows.get(start) !== end) {
+          toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id,
+            content: JSON.stringify({ success: false, error: 'hold_not_authorized',
+              message: 'Only the selected offer intervals can be held, each once. This action was not executed.' }) });
+          toolCallSummaries.push('[hold_slot FAILED] not executed — outside selected hold request');
+          continue;
+        }
+        // A choice authorizes one attempt for that interval. Only separately
+        // selected offers remain available, even after an uncertain result.
+        holdOnlyWindows.delete(start);
       }
       // ── IDEMPOTENCY: message_colleague once per turn per colleague (v1.7.4) ──
       // Same-turn duplicate sends are never what the user meant — and the

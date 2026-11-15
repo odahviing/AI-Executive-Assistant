@@ -47,6 +47,8 @@ import logger from './logger';
 
 export interface OfferedSlot {
   startIso: string;
+  /** Verified end for a Slack hold. Start-only offers still bind booking picks. */
+  endIso?: string;
   display: string;   // owner-TZ "Tuesday 2026-06-16 20:30" — unambiguous date
 }
 
@@ -99,7 +101,7 @@ function loadPersistedEmailEntries(): void {
     for (const [key, entry] of Object.entries(raw)) {
       // Defensive re-check — never resurrect something that expired while
       // the process was down.
-      if (entry && entry.expiresAt > now) stash.set(key, entry);
+      if (key.startsWith(EMAIL_KEY_PREFIX) && entry && entry.expiresAt > now) stash.set(key, entry);
     }
   } catch {
     // No file yet (first run) or unreadable — treated as "nothing to restore".
@@ -136,13 +138,14 @@ const MAX_OFFERED = 12;
  * does NOT replace: each new offer ADDS to what's been shown, so "give me
  * another option" can exclude the union of everything already offered (not just
  * the last batch) and keep advancing day after day. It also lets a pick bind to
- * a slot shown in an earlier batch. Deduped by startIso, capped, TTL refreshed.
+ * a slot shown in an earlier batch. Reoffering the same start updates its
+ * interval; a point without an end cannot keep an older duration alive.
  */
 export function recordOfferedSlots(params: {
   channelId: string;
   threadTs?: string;
   timezone: string;                       // owner TZ — display is rendered here
-  slots: Array<{ start: string }>;
+  slots: Array<{ start: string; end?: string }>;
   // v3.7.2 (#142a) — fingerprint of THIS search's shape (duration|window|
   // attendees). Passed by the spread-search recorder; OMITTED by the point-check
   // recorder — preserve-on-omit below keeps the spread fingerprint intact.
@@ -154,32 +157,39 @@ export function recordOfferedSlots(params: {
   // and a proposed-alternatives payload — requested-day options THEN the widening
   // — dropped exactly the widened ones, so a pick from the second list came back
   // "I never offered you that". One cap, at the end, on the union.
+  const key = keyFor(params.channelId, params.threadTs);
+  const isEmail = key.startsWith(EMAIL_KEY_PREFIX);
   const fresh: OfferedSlot[] = [];
   for (const s of params.slots) {
-    const dt = DateTime.fromISO(s.start, { setZone: true }).setZone(params.timezone);
+    const dt = DateTime.fromISO(s.start, { zone: params.timezone });
     if (!dt.isValid) continue;
-    fresh.push({ startIso: s.start, display: dt.toFormat('EEEE yyyy-MM-dd HH:mm') });
+    const end = !isEmail && s.end ? DateTime.fromISO(s.end, { zone: params.timezone }) : null;
+    fresh.push({
+      startIso: isEmail ? s.start : dt.toISO()!,
+      display: dt.toFormat('EEEE yyyy-MM-dd HH:mm'),
+      ...(end && end > dt ? { endIso: end.toISO()! } : {}),
+    });
   }
   if (fresh.length === 0) return;
-  const key = keyFor(params.channelId, params.threadTs);
   // Gate the lazy load on the key itself — a Slack-only deployment (or any
   // turn on a Slack key) never touches the filesystem for this module at all.
-  if (key.startsWith(EMAIL_KEY_PREFIX)) loadPersistedEmailEntries();
+  if (isEmail) loadPersistedEmailEntries();
   const prior = stash.get(key);
   const priorFresh = prior && Date.now() <= prior.expiresAt ? prior : undefined;
-  const merged = priorFresh ? [...priorFresh.slots] : [];
-  const seen = new Set(merged.map(o => o.startIso));
-  for (const f of fresh) {
-    if (!seen.has(f.startIso)) { merged.push(f); seen.add(f.startIso); }
+  const merged = new Map((priorFresh?.slots ?? []).map(slot => [Date.parse(slot.startIso), slot]));
+  for (const slot of fresh) {
+    const startMs = Date.parse(slot.startIso);
+    merged.delete(startMs);
+    merged.set(startMs, slot);
   }
   stash.set(key, {
-    slots: merged.slice(-MAX_OFFERED),
+    slots: [...merged.values()].slice(-MAX_OFFERED),
     expiresAt: Date.now() + ttlForKey(key),
     // Preserve-on-omit: the point-check recorder omits searchFingerprint, so an
     // interleaved "is he free at X?" confirmation can't wipe the spread search's.
     searchFingerprint: params.searchFingerprint ?? priorFresh?.searchFingerprint,
   });
-  if (key.startsWith(EMAIL_KEY_PREFIX)) persistEmailEntries();
+  if (isEmail) persistEmailEntries();
 }
 
 /** TTL-guarded entry lookup — evicts a stale conversation on read. ONE expiry
@@ -204,15 +214,16 @@ export function getOfferedSlots(channelId: string, threadTs?: string): OfferedSl
 }
 
 /**
- * Whether this exact instant is still on the conversation's offered list.
+ * Whether this exact start (and, for a hold, its exact end) is still on offer.
  * Booking handlers use this before their normal quarter-grid cleanup: once a
  * human approves a tool-produced offer, that offer is binding even off-grid.
  */
-export function wasOfferedSlot(channelId: string, threadTs: string | undefined, startIso: string): boolean {
+export function wasOfferedSlot(channelId: string, threadTs: string | undefined, startIso: string, endIso?: string): boolean {
   const startMs = Date.parse(startIso);
   if (!Number.isFinite(startMs)) return false;
-  return (getLiveEntry(channelId, threadTs)?.slots ?? [])
-    .some(slot => Date.parse(slot.startIso) === startMs);
+  const slot = getLiveEntry(channelId, threadTs)?.slots.find(s => Date.parse(s.startIso) === startMs);
+  if (!slot || endIso === undefined) return !!slot;
+  return !channelId.startsWith(EMAIL_KEY_PREFIX) && !!slot.endIso && Date.parse(endIso) === Date.parse(slot.endIso);
 }
 
 /**

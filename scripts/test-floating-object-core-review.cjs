@@ -155,7 +155,7 @@ const health = healthModule.exports;
     const decision = src.indexOf('if (joinCheck.passes) {', start);
     const tail = src.indexOf('const movesLine =', decision);
     assert.ok(start > 0 && decision > start && tail > decision, 'join AST region anchors');
-    const run = compile(`exports.run=async function(d) { const { DateTime, fb, profile, events, timezone, dayStr, meetingStartMs, meetingEndMs, evTime, floatingBlocks, logger, updateMeeting, userEmail }=d; const joinViewer = 'owner'; const suppressedFloatingIds = new Set(); ${src.slice(start,decision)} ${src.slice(decision + 'if (joinCheck.passes) {'.length,tail)} return movesDone; }`, n => {
+    const run = compile(`exports.run=async function(d) { const { DateTime, fb, profile, events, timezone, dayStr, meetingStartMs, meetingEndMs, evTime, floatingBlocks, logger, updateMeeting, userEmail }=d; const context = { calendarReadOnly: d.calendarReadOnly }; const joinViewer = 'owner'; const suppressedFloatingIds = new Set(); ${src.slice(start,decision)} ${src.slice(decision + 'if (joinCheck.passes) {'.length,tail)} return movesDone; }`, n => {
       if (n === '../utils/rebalanceFloatingBlocks') return { logRebalanceMoveActivity: (...args) => opts.activities?.push(args) };
       throw Error(`Unmocked join dependency ${n}`);
     }).run;
@@ -164,7 +164,7 @@ const health = healthModule.exports;
     if (opts.pinned) events[0] = event(names[0], '13:15', '14:15');
     const p = profile(names.map(n => block(n))); p.behavior = { calendar_health_mode: opts.passive ? 'passive' : 'active' };
     const original = JSON.stringify(events);
-    const moves = await run({ DateTime, fb: floating, profile:p, events, timezone:zone, dayStr:date, meetingStartMs:DateTime.fromISO(`${date}T12:00`, {zone}).toMillis(), meetingEndMs:DateTime.fromISO(`${date}T13:30`, {zone}).toMillis(), evTime:t=>DateTime.fromISO(t.dateTime,{zone:t.timeZone}), floatingBlocks:p.meetings.floating_blocks, logger, userEmail:p.user.email, updateMeeting: async w => { writes.push(w); if(w.meetingId===opts.failId) throw Error('write rejected'); } });
+    const moves = await run({ calendarReadOnly: opts.calendarReadOnly, DateTime, fb: floating, profile:p, events, timezone:zone, dayStr:date, meetingStartMs:DateTime.fromISO(`${date}T12:00`, {zone}).toMillis(), meetingEndMs:DateTime.fromISO(`${date}T13:30`, {zone}).toMillis(), evTime:t=>DateTime.fromISO(t.dateTime,{zone:t.timeZone}), floatingBlocks:p.meetings.floating_blocks, logger, userEmail:p.user.email, updateMeeting: async w => { writes.push(w); if(w.meetingId===opts.failId) throw Error('write rejected'); } });
     assert.equal(JSON.stringify(events),original,'join does not mutate input snapshot');
     return {writes,moves,activities};
   }
@@ -172,6 +172,10 @@ const health = healthModule.exports;
   await test('join-unacknowledged-move-stops-stale-occupancy-writes',async()=>{ const r=await joinMoves(['lunch','coffee'],{failId:'lunch'}); assert.equal(r.moves.length,0); assert.equal(r.writes.length,1); });
   await test('join-owner-pinned-partial-window-overlap-never-moved',async()=>{ const r=await joinMoves(['lunch'],{pinned:true}); assert.equal(r.writes.length,0); });
   await test('join-passive-never-writes-control',async()=>{ const r=await joinMoves(['lunch','coffee'],{passive:true}); assert.equal(r.writes.length,0); });
+  await test('join-read-only-active-evaluates-multiple-blocks-without-writes-or-audits',async()=>{
+    const r=await joinMoves(['lunch','coffee'],{calendarReadOnly:true});
+    assert.equal(r.writes.length,0); assert.equal(r.moves.length,0); assert.equal(r.activities.length,0);
+  });
   await test('join-successful-moves-have-activity-audit',async()=>{ const r=await joinMoves(['lunch']); assert.equal(r.activities.length,1); });
   function bookHarness(blocks, initial = [], opts = {}) {
     const state = structuredClone(initial), writes = [], activities = [];

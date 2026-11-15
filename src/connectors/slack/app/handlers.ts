@@ -19,7 +19,7 @@ import { is1on1DM, OVERLOAD_REPLY, buildGroupDmPreamble } from './helpers';
 import { isSlackDocFile, isSlackImageFile, extractSlackDocText, downloadAndScanImageBatch } from './fileIngestion';
 import type { SlackAppContext } from './context';
 import { readInternalSlackConversation } from '../../../connections/slack/eligibility';
-import { readSlackThread } from '../threadHistory';
+import { humanBroadcastParent, readSlackThread } from '../threadHistory';
 import { hasHeldDelivery } from '../deliveryAttempt';
 
 async function reportAudioFailure(client: SlackAppContext['app']['client'], botToken: string, channelId: string, threadTs: string): Promise<void> {
@@ -55,8 +55,8 @@ export function registerInboundReplayHandler(ctx: SlackAppContext): void {
     const ts = (message.ts as string) ?? postThreadTs;
     if (hasHeldDelivery({ profileId: user.slack_user_id, channelId, threadTs: postThreadTs, inboundTs: [ts] })) return;
     // Media (audio/video/image) candidates only ever come from the DM/panel
-    // scan — background.ts's MPIM/channel mention discovery excludes any
-    // `subtype` (so it never has to re-derive MPIM's owner-only image rule or
+    // scan — background.ts's MPIM/channel discovery excludes file shares
+    // (so it never has to re-derive MPIM's owner-only image rule or
     // the channel file owner-presence gate here). isMpim/isChannel are unset
     // on every path that reaches the branches below.
     const files = (message.files as Array<Record<string, unknown>> | undefined) ?? [];
@@ -179,9 +179,8 @@ export function registerDmHandler(ctx: SlackAppContext): void {
   const { app, profile, getSenderRole, resolveSlackMentions, processMessage, processImageFileShare } = ctx;
   const { assistant } = profile;
   app.message(async ({ message, say, client }) => {
-    // Allow file_share subtype (audio messages) — block everything else
     const subtype = (message as any).subtype;
-    if (subtype && subtype !== 'file_share') return;
+    if (subtype && subtype !== 'file_share' && !humanBroadcastParent(message, ctx.botUserId)) return;
     if (!('user' in message) || !message.user) return;
 
     // channelId must be defined before any use
@@ -586,7 +585,7 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
     }
 
     if (!('text' in event) || !event.text) return;
-    if ('subtype' in event && event.subtype && event.subtype !== 'file_share') return;
+    if ('subtype' in event && event.subtype && event.subtype !== 'file_share' && !humanBroadcastParent(event, ctx.botUserId)) return;
 
     // v4.7.6 (charter S3) — real channel (not MPIM) messages never reach
     // Maelle through this handler, mentioned or not. S3 requires a fresh
@@ -963,6 +962,8 @@ export function registerMentionHandler(ctx: SlackAppContext): void {
   const { assistant } = profile;
   app.event('app_mention', async ({ event, say, client }) => {
     if (!('user' in event) || !event.user) return;
+    const broadcast = 'subtype' in event && event.subtype === 'thread_broadcast';
+    if (broadcast && !humanBroadcastParent(event, ctx.botUserId)) return;
     const internalChannel = await readInternalSlackConversation(client, assistant.slack.bot_token, event.channel, event.user);
     if (!internalChannel) return;
     if (hasHeldDelivery({ profileId: profile.user.slack_user_id, channelId: event.channel,
@@ -1125,6 +1126,7 @@ export function registerMentionHandler(ctx: SlackAppContext): void {
           }
         } catch (err) {
           logger.warn('Could not load channel thread participants', { err: String(err), channelId: event.channel, threadTs });
+          if (broadcast && !isMpimChannel && event.user !== profile.user.slack_user_id) return;
           threadFetchOk = false;
         }
       }

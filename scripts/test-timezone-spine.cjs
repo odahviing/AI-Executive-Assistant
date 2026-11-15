@@ -256,26 +256,29 @@ test('colleague synthetic off-hours honors home work windows and real night boun
   const blocked=clock=>blocks.some(b=>instant(b.start).toMillis()<=instant(clock).toMillis()&&instant(b.end).toMillis()>instant(clock).toMillis());
   assert.equal(blocked('2026-09-16T12:00:00+03:00'),false); assert.equal(blocked('2026-09-16T03:00:00+03:00'),true);
 });
-async function holdVerdict(start) {
+async function holdVerdict(startIso, endIso) {
   const tree=ast('src/skills/meetings/ops/handlers/calendarReads.ts');
   const decl=only(collect(tree,n=>names(n).includes('wasOffered')),'hold offer declaration');
   const statements=decl.parent.statements; const i=statements.indexOf(decl);
   const startIndex=statements.findIndex((n,j)=>j<i && names(n).includes('holderSlackId'));
   assert(startIndex>=0&&ts.isIfStatement(statements[i+1]));
-  const stashTree=ast('src/utils/offeredSlotsStash.ts');
-  const shared=only(collect(stashTree,n=>ts.isFunctionDeclaration(n)&&n.name?.text==='wasOfferedSlot'),'exact offer function');
-  const getOfferedSlots=()=>[{startIso:'2026-09-16T17:25:00+03:00'}];
-  const exact=compile(shared.getText(),{getLiveEntry:()=>({slots:getOfferedSlots()}),Date}).wasOfferedSlot;
+  const context={channelId:'D',threadTs:'t',userId:'U'};
+  const stash=load('src/utils/offeredSlotsStash.ts',
+    {luxon,'node:fs':{},'node:path':path,'./logger':logger}, {process:{cwd:()=>'/isolated-hold'}});
+  stash.recordOfferedSlots({...context,timezone:zone,slots:[
+    {start:'2026-09-16T17:25:00+03:00',end:'2026-09-16T17:50:00+03:00'},
+  ]});
   return compile(`export async function run(){${statements.slice(startIndex,i+2).map(n=>n.getText()).join('\n')} return {success:true};}`,
-    {context:{channelId:'D',threadTs:'t',userId:'U'},startIso:start,Date},
-    {'../../../../utils/offeredSlotsStash':{getOfferedSlots,wasOfferedSlot:exact}}).run();
+    {context,startIso,endIso}, {'../../../../utils/offeredSlotsStash':stash}).run();
 }
-test('hold rejects near-match while preserving exact instant in another offset',async()=>{
-  assert.equal((await holdVerdict('2026-09-16T17:25:30+03:00')).error,'slot_not_offered');
+test('hold rejects near matches on either endpoint',async()=>{
+  assert.equal((await holdVerdict('2026-09-16T17:25:30+03:00','2026-09-16T17:50:00+03:00')).error,'slot_not_offered');
+  assert.equal((await holdVerdict('2026-09-16T14:25:00Z','2026-09-16T14:50:00.001Z')).error,'slot_not_offered');
+  assert.equal((await holdVerdict('2026-09-16T14:25:00Z','2026-09-16T14:49:59.999Z')).error,'slot_not_offered');
 });
-test('hold accepts exact offer and equivalent offset representation',async()=>{
-  assert.equal((await holdVerdict('2026-09-16T17:25:00+03:00')).success,true);
-  assert.equal((await holdVerdict('2026-09-16T14:25:00Z')).success,true);
+test('hold accepts the offered interval with equivalent offsets on both endpoints',async()=>{
+  assert.equal((await holdVerdict('2026-09-16T17:25:00+03:00','2026-09-16T17:50:00+03:00')).success,true);
+  assert.equal((await holdVerdict('2026-09-16T14:25:00Z','2026-09-16T14:50:00Z')).success,true);
 });
 function vacatedResults(newEnd) {
   const fn=compile(helperFunction('computeVacatedSlot'),{DateTime}).computeVacatedSlot;

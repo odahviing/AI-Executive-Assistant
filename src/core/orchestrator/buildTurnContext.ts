@@ -87,6 +87,9 @@ export async function buildTurnContext(input: OrchestratorInput) {
   let socialDirective: SocialDirective = noDirective();
   let socialClassification: OwnerIntentClassification | null = null;
   let meetingExplorationOnly = false;
+  // Defined only for a colleague's request to hold selected prior offers. An empty
+  // map means no eligible offer (including after a restart or stash failure).
+  let holdOnlyWindows: Map<number, number> | undefined;
   // ── TWO questions, two names — never one flag ────────────────────────────
   // Pre-fix this file carried two competing definitions of "owner turn":
   // `input.senderRole === 'owner'` (post-clamp) and a looser
@@ -276,7 +279,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
       const prefix = receipts?.length ? receipts.join(' ') + '\n' : '';
       const writes = receipts?.filter(line => line.startsWith('[move_meeting ') || line.startsWith('[create_meeting '));
       const receipt = writes?.length === 1 ? writes[0] : undefined;
-      const priorProse = prior?.role === 'assistant' && prefix && prior.content.startsWith(prefix)
+      const priorProse = prior?.role === 'assistant' && receipts && prior.content.startsWith(prefix)
         ? prior.content.slice(prefix.length) : '';
       const inspectCreate = ownerDecisionPath && !!input.typedUserMessage?.trim() && !!priorProse
         && !input.proseOnly && !input.extraInstruction && !input.forceToolOnFirstTurn
@@ -296,6 +299,41 @@ export async function buildTurnContext(input: OrchestratorInput) {
       const inspectIndependentOrdinaryCreate = !!inspectCreate && !approvalCandidates.length
         && privateOwnerContext.reduce((sum, message) => sum + message.length, 0) <= 4000;
       const classifierCandidates = approvalCandidates.length ? approvalCandidates : boundBooking ? [boundBooking] : [];
+      // The offer must have been delivered in this conversation. Never bind
+      // against tool summaries, remote/legacy rows without delivery receipts,
+      // or a merged room batch whose authenticated typed text is unavailable.
+      let holdCandidates: NonNullable<Parameters<typeof classifyTurn>[0]['holdCandidates']> = [];
+      if (needMeetingPeople && priorProse && priorProse.length <= 8000 && input.channel === 'slack'
+        && input.authority === 'colleague' && turnSenderRole === 'colleague' && input.userId !== profile.user.slack_user_id
+        && ((isPrivateSlackDm && input.surface === 'colleague_dm') || (isRoom && input.surface === 'room' && !!threadTs))
+        && input.typedUserMessage?.trim() && userMessage.includes(input.typedUserMessage)
+        && !input.proseOnly && !input.images?.length && !input.forceToolOnFirstTurn) {
+        try {
+          const { getOfferedSlots } = require('../../utils/offeredSlotsStash') as typeof import('../../utils/offeredSlotsStash');
+          const offered = getOfferedSlots(input.channelId, threadTs)?.filter(slot => slot.endIso) ?? [];
+          if (offered.length) {
+            const { getPersonMemory } = require('../../db') as typeof import('../../db');
+            const { attendeeKnownTimezoneForDay, loadAttendeeAvailabilityForPerson } =
+              require('../../utils/attendeeAvailability') as typeof import('../../utils/attendeeAvailability');
+            const requester = loadAttendeeAvailabilityForPerson(getPersonMemory(input.userId) ?? undefined, profile.user.timezone);
+            holdCandidates = offered.flatMap(slot => {
+              const start = DateTime.fromISO(slot.startIso, { zone: profile.user.timezone });
+              const end = DateTime.fromISO(slot.endIso!, { zone: profile.user.timezone });
+              if (!start.isValid || !(end > start)) return [];
+              const zone = requester && attendeeKnownTimezoneForDay(requester, slot.startIso);
+              const local = zone && zone !== profile.user.timezone ? start.setZone(zone) : undefined;
+              const label = (dt: DateTime) => `${dt.toFormat('yyyy-MM-dd HH:mm')} [${dt.zoneName}]`;
+              return [{ startIso:slot.startIso, endIso:slot.endIso!, display:label(start),
+                ...(local?.isValid ? { localDisplays:[label(local)] } : {}) }];
+            });
+          }
+        } catch (err) {
+          logger.warn('Orchestrator — hold options unavailable for selection', { err: String(err).slice(0, 160) });
+        }
+      }
+      // A classifier outage while resolving a concrete offer cannot grant a
+      // write. A normal execute result still permits confirmed invitations.
+      if (holdCandidates.length) meetingExplorationOnly = true;
       const turnResult = await classifyTurn({
         anthropic,
         message: userMessage,
@@ -307,6 +345,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
         senderName: input.senderName,
         recentContext: recentContext || undefined,
         meetingContextMessages: isPrivateSlackDm ? meetingContextMessages : undefined,
+        ...(holdCandidates.length ? { holdCandidates, holdOfferText:priorProse, holdSelectionText:input.typedUserMessage } : {}),
         inspectIndependentOrdinaryCreate,
         ordinaryCreateOwnerContext: inspectIndependentOrdinaryCreate ? privateOwnerContext : undefined,
         approvalCandidates: classifierCandidates.length ? classifierCandidates.map(({ row, action }) => ({ subject: row.subject ?? '', action })) : undefined,
@@ -375,7 +414,19 @@ export async function buildTurnContext(input: OrchestratorInput) {
       if (needScopes) toolScopes = turnResult.scope.scopes;
       if (isOwnerPath) isFreeTimeInquiry = turnResult.freeTimeInquiry === true;
       if (needMeetingPeople) {
-        meetingExplorationOnly = turnResult.meetingAction === 'explore';
+        meetingExplorationOnly = turnResult.meetingAction === 'explore'
+          || (!turnResult.meetingAction && holdCandidates.length > 0);
+        if (turnResult.meetingAction === 'hold') {
+          holdOnlyWindows = new Map();
+          const indices = turnResult.selectedHoldCandidateIndices;
+          if (indices?.length && new Set(indices).size === indices.length
+            && indices.every(index => Number.isInteger(index) && holdCandidates[index])) {
+            for (const index of indices) {
+              const slot = holdCandidates[index];
+              holdOnlyWindows.set(Date.parse(slot.startIso), Date.parse(slot.endIso));
+            }
+          }
+        }
         const rawMeetingPeople = turnResult.meetingPeople ?? [];
         // gh#158-a — classifyTurn is fed both THIS turn's message and up to 4
         // turns of recentContext so it can read conversational state, but its
@@ -1008,6 +1059,9 @@ export async function buildTurnContext(input: OrchestratorInput) {
   if (
     input.authority === 'colleague'
     && input.userId !== profile.user.slack_user_id
+    // A selected hold must bind to an earlier offer. A fresh availability
+    // precheck can record new offers before the existing stash is read below.
+    && !holdOnlyWindows
     && userMessage && userMessage.trim().length > 0
   ) {
     try {
@@ -1066,15 +1120,16 @@ export async function buildTurnContext(input: OrchestratorInput) {
       // availability surfaces (search + point-check) record what they confirmed;
       // pre-fix only the search did, so a point-check confirmation couldn't be held.
       if (result.ran && input.channelId && result.verdicts.length > 0) {
-        const bookableStarts = result.verdicts
+        const bookableSlots = result.verdicts
           .filter(v => v.bookable)
-          .map(v => {
+          .flatMap(v => {
             // Keep the exact checked occurrence when the owner's clock repeats.
             const dt = DateTime.fromISO(v.instantIso ?? `${v.date}T${v.time}`, { zone: profile.user.timezone });
-            return dt.isValid ? { start: dt.toISO()! } : null;
-          })
-          .filter((s): s is { start: string } => s !== null);
-        if (bookableStarts.length > 0) {
+            if (!dt.isValid) return [];
+            const minutes = v.gapQuery ? v.maxFreeMinutes : v.durationMin;
+            return [{ start: dt.toISO()!, ...(minutes && minutes > 0 ? { end: dt.plus({ minutes }).toISO()! } : {}) }];
+          });
+        if (bookableSlots.length > 0) {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { recordOfferedSlots } = require('../../utils/offeredSlotsStash') as
             typeof import('../../utils/offeredSlotsStash');
@@ -1082,7 +1137,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
             channelId: input.channelId,
             threadTs: input.threadTs,
             timezone: profile.user.timezone,
-            slots: bookableStarts,
+            slots: bookableSlots,
           });
         }
       }
@@ -1113,7 +1168,8 @@ export async function buildTurnContext(input: OrchestratorInput) {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getOfferedSlots } = require('../../utils/offeredSlotsStash') as
         typeof import('../../utils/offeredSlotsStash');
-      const offered = getOfferedSlots(input.channelId, input.threadTs);
+      const offered = getOfferedSlots(input.channelId, input.threadTs)?.filter(slot => !holdOnlyWindows
+        || (slot.endIso && holdOnlyWindows.get(Date.parse(slot.startIso)) === Date.parse(slot.endIso)));
       if (offered && offered.length > 0) {
         // Email vs. colleague-chat phrasing: on email the "requester" reading
         // this is the owner relaying an external's pick from a forwarded
@@ -1123,7 +1179,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
           : 'this colleague';
         offeredSlotsBlock = `## SLOTS ALREADY OFFERED IN THIS CONVERSATION (binding)
 These exact instants were offered to ${whoPicks} earlier and are still on the table:
-${offered.map(s => `- ${s.display} → start_iso ${s.startIso}`).join('\n')}
+${offered.map(s => `- ${s.display} → start_iso ${s.startIso}${holdOnlyWindows && s.endIso ? `, end_iso ${s.endIso}` : ''}`).join('\n')}
 If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 20:30"), or position ("the second one") — it means THAT exact instant: use its start_iso verbatim in any create_meeting / validation call. NEVER re-resolve the date from a weekday word; the offer above is the authoritative date.`;
       }
     } catch (err) {
@@ -1443,12 +1499,22 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
   // calendar mutation. Reads (get_calendar / find_available_slots /
   // get_my_tasks / recall_*) stay available so Sonnet can re-verify state
   // while she rewrites the wording.
-  if (input.proseOnly === true || meetingExplorationOnly || negativeReaction) {
-    for (const name of WRITE_TOOLS) blockedWriteTools.add(name);
+  const readOnly = input.proseOnly === true || meetingExplorationOnly || negativeReaction;
+  if (readOnly || holdOnlyWindows) {
+    const canHold = !readOnly && !!holdOnlyWindows?.size && tools.some(t => t.name === 'hold_slot');
+    for (const name of WRITE_TOOLS) {
+      if (!(canHold && name === 'hold_slot')) blockedWriteTools.add(name);
+    }
     const before = tools.length;
-    tools = tools.filter(t => !WRITE_TOOLS.has(t.name));
-    logger.info('Orchestrator — read-only turn: filtered out write tools', {
-      proseOnly: input.proseOnly === true, meetingExplorationOnly, negativeReaction,
+    tools = tools.filter(t => !blockedWriteTools.has(t.name));
+    if (canHold) {
+      tools = tools.map(t => t.name === 'hold_slot'
+        ? { ...t, input_schema: { ...t.input_schema, required: ['action', 'start_iso', 'end_iso'], properties: {
+          ...(t.input_schema.properties as Record<string, unknown>), action: { type: 'string', enum: ['hold'] },
+        } } } : t);
+    }
+    logger.info('Orchestrator — filtered turn write tools', {
+      proseOnly: input.proseOnly === true, meetingExplorationOnly, negativeReaction, canHold,
       before, after: tools.length, dropped: before - tools.length,
     });
   }
@@ -1592,6 +1658,7 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     systemBlocks,
     tools,
     blockedWriteTools,
+    holdOnlyWindows,
     model,
     maxTokens,
     turnSenderRole,

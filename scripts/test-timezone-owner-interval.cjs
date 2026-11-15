@@ -124,6 +124,14 @@ test('full precheck gap probes and unavailable calendar preserve truthful outcom
  const offline=harness(blocked,{offline:true});
  const blind=await offline.load('src/utils/availabilityPreCheck.ts').precheckAvailability({message:'2026-09-14 23:45?',profile:offline.profile});assert.equal(blind.ran,false);
 });
+test('positive point carries the snapped length actually checked and gap carries its largest fit', async () => {
+ for (const gap of [false, true]) {
+  const h = harness({}, {slots:[{wall_clock:'2026-09-14T14:00',stated_timezone:home,duration_minutes:53,gap_query:gap}]});
+  const r = await h.load('src/utils/availabilityPreCheck.ts').precheckAvailability({message:'2026-09-14 14:00?',profile:h.profile});
+  assert.equal(r.verdicts[0].bookable,true);
+  assert.equal(gap ? r.verdicts[0].maxFreeMinutes : r.verdicts[0].durationMin,55);
+ }
+});
 test('full booking and move plans surface blackout; explicit owner request retains one-step notice',async()=>{
  const h=harness(blocked),plan=h.load('src/skills/meetings/planMeeting.ts').planMeeting;
  for(const intent of ['new_booking','move'])for(const initiator of ['colleague','owner']){

@@ -86,6 +86,8 @@ export type SkillId =
 
 /** Runtime context passed to tool execution */
 export interface SkillContext {
+  /** Turn-level ban on incidental calendar mutations, including during availability reads. */
+  calendarReadOnly?: boolean;
   /** Independently classified owner decision, bound to the exact pending row
    * and effective action. Consumers must revalidate both before resolving. */
   contextualApprovalDecisions?: Array<{

@@ -433,8 +433,8 @@ interface SlotOutcome {
    * o#189 — the exact meeting length `checkSlot` was run at to reach this
    * verdict: the asked length (snapped to allowed durations) for a normal ask,
    * or the smallest allowed duration for a gap query's "nothing fits" verdict
-   * (the last, smallest probe in the descending sweep). Set only alongside
-   * `rejection_reason`, so the hard-block ledger can carry the SAME length —
+   * (the last, smallest probe in the descending sweep). Successful gaps
+   * carry their tested length in maxFreeMinutes. The hard-block ledger uses durationMin —
    * the live re-verification refuter (runOutputGates.ts) then re-probes at
    * this length instead of an unconditional smallest-allowed-duration, which
    * would not reproduce a block a longer ask tripped on a tail overlap.
@@ -897,7 +897,7 @@ export async function precheckAvailability(params: {
     }
 
     const check = checkAt(snappedMin);
-    if (check.passes) return { date, time, instantIso: startDt.toISO()!, bookable: true };
+    if (check.passes) return { date, time, instantIso: startDt.toISO()!, bookable: true, durationMin: snappedMin };
     return {
       date, time, instantIso: startDt.toISO()!,
       bookable: false,

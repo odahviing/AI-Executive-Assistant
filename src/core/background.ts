@@ -7,7 +7,7 @@ import { stopInterruptedRoutineTasks } from '../tasks/dispatchers/routine';
 import logger from '../utils/logger';
 import { readInternalSlackConversation } from '../connections/slack/eligibility';
 import { listSlackCatchupRetries, deferSlackCatchupRetry, clearSlackCatchupRetry } from '../db/slackCatchup';
-import { readSlackThread } from '../connectors/slack/threadHistory';
+import { humanBroadcastParent, readSlackThread } from '../connectors/slack/threadHistory';
 import { hasHeldDelivery, reconcileSlackDeliveries } from '../connectors/slack/deliveryAttempt';
 
 // v3.3.10 — recovery scope: DM + panel threads, gap-from-watermark (no time
@@ -749,7 +749,7 @@ async function discoverThreadParents(
   opts?: { includeMentionsOf?: string; oldest?: string; includeUnmentioned?: boolean; onUnavailable?: () => void },
 ): Promise<string[]> {
   try {
-    const parents: string[] = [];
+    const parents = new Set<string>();
     let cursor: string | undefined;
     const cursors = new Set<string>();
     do {
@@ -760,14 +760,19 @@ async function discoverThreadParents(
       const replyCount = typeof m.reply_count === 'number' ? m.reply_count : 0;
       const selfMention = opts?.includeMentionsOf ? mentionsBot(m.text, opts.includeMentionsOf) : false;
       const inGap = !opts?.oldest || Number(m.ts) >= Number(opts.oldest);
+      if (m.subtype === 'thread_broadcast') {
+        const parent = humanBroadcastParent(m, opts?.includeMentionsOf);
+        if (parent && inGap && (selfMention || opts?.includeUnmentioned)) parents.add(parent);
+        continue;
+      }
       const activeReply = replyCount > 0 && (!opts?.oldest || typeof m.latest_reply !== 'string' || Number(m.latest_reply) >= Number(opts.oldest));
-      if (activeReply || (inGap && (selfMention || (opts?.includeUnmentioned && m.user && !m.bot_id)))) parents.push(m.ts);
+      if (activeReply || (inGap && (selfMention || (opts?.includeUnmentioned && m.user && !m.bot_id)))) parents.add(m.ts);
     }
     cursor = res.response_metadata?.next_cursor || undefined;
     if ((res.has_more && !cursor) || (cursor && cursors.has(cursor))) throw new Error('Slack history pagination incomplete');
     if (cursor) cursors.add(cursor);
     } while (cursor);
-    return parents;
+    return [...parents];
   } catch (err) {
     opts?.onUnavailable?.();
     logger.warn('Catch-up: thread discovery unavailable', { channelId, err: String(err).slice(0, 160) });
@@ -810,7 +815,8 @@ async function findUnansweredInThread(opts: CheckOpts, threadTs: string): Promis
 
   const latestUserMsg = latestByTs(
     messages,
-    m => !!m.user && !m.bot_id && (!m.subtype || m.subtype === 'file_share') && m.user !== botUserId,
+    m => !!m.user && !m.bot_id && m.user !== botUserId
+      && (!m.subtype || m.subtype === 'file_share' || humanBroadcastParent(m, botUserId) === threadTs),
   );
   if (!latestUserMsg?.ts) return null;
   if (hasAcknowledgement(latestUserMsg, botUserId)) return null;
@@ -843,11 +849,9 @@ async function findUnansweredMentionInThread(
     return null;  // no access / no history — nothing to discover
   }
 
-  const explicitMention = latestByTs(
-    messages,
-    m => !!m.user && !m.bot_id && !m.subtype && m.user !== botUserId
-      && mentionsBot(m.text, botUserId),
-  );
+  const humanText = (m: Record<string, unknown>) => !!m.user && !m.bot_id && m.user !== botUserId
+    && (!m.subtype || humanBroadcastParent(m, botUserId) === rootTs);
+  const explicitMention = latestByTs(messages, m => humanText(m) && mentionsBot(m.text, botUserId));
   const latestBot = latestByTs(messages, m => m.user === botUserId);
   // An unanswered explicit request remains authoritative even when followed
   // by a clarification. Replay that request with the current thread context;
@@ -856,10 +860,14 @@ async function findUnansweredMentionInThread(
     && Number(explicitMention.ts) >= Number(oldest)
     && Number(explicitMention.ts) > Number(latestBot?.ts ?? 0);
   const latestMention = source === 'channel' || pendingMention ? explicitMention : latestByTs(
-    messages, m => !!m.user && !m.bot_id && !m.subtype && m.user !== botUserId,
+    messages, humanText,
   );
   if (!latestMention?.ts) return null;
   if (hasAcknowledgement(latestMention, botUserId)) return null;
+  if (source === 'channel' && latestMention.subtype === 'thread_broadcast' && latestMention.user !== opts.ownerId) {
+    const { ownerPostedInThread } = await import('./threadActions');
+    if (!ownerPostedInThread(messages, opts.ownerId)) return null;
+  }
 
   const mentionTs = parseFloat(latestMention.ts as string);
   if (mentionTs < parseFloat(oldest)) return null;  // the mention predates the downtime gap

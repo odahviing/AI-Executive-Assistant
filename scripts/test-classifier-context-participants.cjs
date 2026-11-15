@@ -156,6 +156,217 @@ async function run(raw, extra = {}, response = {}) {
   });
   return { result:JSON.parse(JSON.stringify(result)), captured, calls };
 }
+test('one colleague classification carries a selected internal hold separately from booking', async () => {
+  const offer = 'ביום חמישי אפשר ב-17:15 או ב-17:45.';
+  const message = 'תשמרי לי את 17:15 כרגע, ביום רביעי אגיד אם המועמד עבר.';
+  const { result, captured, calls } = await run(holdResponse(selectedHold), {
+    senderRole: 'colleague', message, meetingContextMessages: [{ role: 'assistant', content: offer }],
+    holdOfferText: offer, holdSelectionText: message, holdCandidates,
+  });
+  assert.equal(calls, 1);
+  assert.equal(captured.messages[0].content, message);
+  assert.ok(captured.system.includes(offer));
+  assert.equal(result.meetingAction, 'hold');
+  assert.deepEqual(result.selectedHoldCandidateIndices, [0]);
+  assert.equal(result.standaloneCourtesy, false);
+  assert.equal(result.standaloneApprovalQuote, undefined);
+  const schema = captured.tools[0].input_schema;
+  assert.ok(schema.properties.meeting_action.enum.includes('hold'));
+  assert.ok(schema.required.includes('meeting_action'));
+  assert.match(captured.system, /previously offered slot internally now/);
+  assert.match(captured.system, /actual calendar invitation is execute/);
+  assert.match(captured.system, /colleague already sent it, is scheduling status \(explore\)/);
+});
+const holdCandidates = ['15', '45'].map(minute => ({
+  startIso: `2026-11-19T10:${minute}:00-05:00`,
+  endIso: minute === '15' ? '2026-11-19T10:40:00-05:00' : '2026-11-19T11:10:00-05:00',
+  display: `Thursday 2026-11-19 10:${minute} [America/New_York]`, localDisplays: [`Thursday 2026-11-19 17:${minute} [Asia/Jerusalem]`],
+}));
+const selectedHold = { candidateIndex: 0, offeredClock: '17:15', selectedDate: '2026-11-19', selectionQuote: '17:15', timeZone:'Asia/Jerusalem', offerZoneQuote:'' };
+const secondHold = { ...selectedHold, candidateIndex:1, offeredClock:'17:45', selectionQuote:'17:45' };
+function holdResponse(selection, mode = 'single') {
+  return { meeting_action: 'hold', selected_holds: { mode, selections: Array.isArray(selection) ? selection : [selection] } };
+}
+const holdArgs = { senderRole: 'colleague', message: 'Hold 17:15 now, Wednesday is my reply deadline.',
+  holdSelectionText: 'Hold 17:15 now, Wednesday is my reply deadline.', holdOfferText: 'Thursday:\n17:15\n17:45', holdCandidates };
+for (const [name, message, pick, expected] of [
+  ['numeric ordinal omitted from quoted selection', 'Hold option 2.', { ...selectedHold, position:1, selectionQuote:'option' }, undefined],
+  ['numeric selector omitted using a neighboring clause', 'Hold it. Option 2.', { ...selectedHold, position:1, selectionQuote:'Hold' }, undefined],
+  ['Arabic numeric option survives classifier substring omission', 'احجز الخيار ٢.', { ...selectedHold, position:1, selectionQuote:'الخيار' }, undefined],
+  ['separate quantity and duration leave an explicit ordinal intact', 'Hay 3 candidatos. Reserva la opción 2 para 25 minutos.',
+    { ...secondHold, position:2, selectionQuote:'opción 2' }, 1],
+  ['extra unrelated clock does not become an ordinal', 'Hold option 2. I will call at 12:30.',
+    { ...secondHold, position:2, selectionQuote:'2' }, 1],
+  ['another option clock cannot be hidden in a second clause', 'Hold 17:15. Or should it be 17:45?', selectedHold, undefined],
+  ['unresolved clock in the same selection clause', 'Hold 17:15 or 12:30?', selectedHold, undefined],
+  ['separate non-offered deadline', 'Hold 17:15 for now. I will confirm by 12:30 on Wednesday.', selectedHold, 0],
+  ['deadline has its own time zone', 'Guarda 17:15 Asia/Jerusalem; confirmaré a las 12:30 America/New_York.', selectedHold, 0],
+  ['explicit action time zone differs from model evidence', 'Hold 17:15 America/New_York.', selectedHold, undefined],
+  ['ordinary slash in the subject leaves the selected time intact', 'Hold 17:15 for the SDR/BDR interview.', selectedHold, 0],
+  ['a slash in the subject cannot mask a different known zone', 'Hold 17:15 America/New_York for the SDR/BDR interview.', selectedHold, undefined],
+  ['unknown explicit action time zone', 'Reserva 17:15 America/Unresolved.', selectedHold, undefined],
+  ['explicit action zone correctly maps the slot instant', 'תשמרי את 17:15 Asia/Jerusalem.', selectedHold, 0],
+]) {
+  test('authenticated hold instruction: ' + name, async () => {
+    const { result } = await run(holdResponse(pick), { ...holdArgs, message, holdSelectionText:message });
+    assert.equal(result.meetingAction, expected === undefined ? 'explore' : 'hold');
+    assert.deepEqual(result.selectedHoldCandidateIndices, expected === undefined ? undefined : [expected]);
+  });
+}
+test('spoken ordinal follows the delivered order when stash order differs', async () => {
+  const message = 'Guarda la segunda opción por ahora.';
+  const { result } = await run(holdResponse({
+    ...selectedHold, selectionQuote: 'segunda', position: 2,
+  }), { ...holdArgs, message, holdSelectionText: message, holdOfferText: 'Jueves:\n17:45\n17:15' });
+  assert.equal(result.meetingAction, 'hold');
+  assert.deepEqual(result.selectedHoldCandidateIndices, [0]);
+});
+test('quoting a genuine first numeric selection cannot hide a numeric correction in another sentence', async () => {
+  const message = 'Hold option 1. Actually make it option 2.';
+  for (const exclusion of [undefined, ['Actually make it option 2']]) {
+    const response = holdResponse({ ...selectedHold, position:1, selectionQuote:'1' });
+    response.selected_holds.incidentalNumberClauses = exclusion;
+    const { result } = await run(response, { ...holdArgs, message, holdSelectionText:message });
+    assert.equal(result.meetingAction, 'explore');
+    assert.equal(result.selectedHoldCandidateIndices, undefined);
+  }
+});
+test('a separately grounded background count permits the numeric selection, a guessed or missing clause does not', async () => {
+  const message = 'Tenemos 2 candidatos. Reserva la opción 1.';
+  for (const [ancillary, expected] of [
+    [['Tenemos 2 candidatos'], 'hold'], [undefined, 'explore'], [['2'], 'explore'], [['Reserva la opción 1'], 'explore'],
+  ]) {
+    const response = holdResponse({ ...selectedHold, position:1, selectionQuote:'1' });
+    response.selected_holds.incidentalNumberClauses = ancillary;
+    const { result } = await run(response, { ...holdArgs, message, holdSelectionText:message });
+    assert.equal(result.meetingAction, expected);
+  }
+});
+test('a later conflicting numbered clause cannot be dismissed as an earlier count', async () => {
+  const message = 'Hold option 1. Actually make it option 2 please.';
+  for (const [pick, exclusion] of [
+    [{ ...selectedHold, position:1, selectionQuote:'1' }, 'Actually make it option 2 please'],
+    [{ ...secondHold, position:2, selectionQuote:'2' }, 'Hold option 1'],
+  ]) {
+    const response = holdResponse(pick);
+    response.selected_holds.incidentalNumberClauses = [exclusion];
+    const { result } = await run(response, { ...holdArgs, message, holdSelectionText:message });
+    assert.equal(result.meetingAction, 'explore');
+    assert.equal(result.selectedHoldCandidateIndices, undefined);
+  }
+});
+test('two separately named holds and a collective choice retain only requested windows', async () => {
+  for (const [message, classification] of [
+    ['Hold 17:15 and 17:45.', holdResponse([selectedHold, secondHold], 'each')],
+    ['Guarda las dos opciones.', holdResponse([selectedHold,secondHold].map((slot, i) =>
+      ({ ...slot, selectionQuote:'las dos opciones', position:i+1 })), 'all_offered')],
+  ]) {
+    const { result } = await run(classification, { ...holdArgs, message, holdSelectionText:message });
+    assert.equal(result.meetingAction, 'hold');
+    assert.deepEqual(result.selectedHoldCandidateIndices, [0, 1]);
+  }
+});
+const enumeratedPicks = [selectedHold, secondHold].map((slot, i) => ({
+  ...slot, position:i+1, selectionQuote:String(i+1),
+}));
+for (const [name, message, locale, expected] of [
+  ['explicit English joined choices', 'Hold option 1 and option 2.', 'en', 'hold'],
+  ['Spanish joined choices', 'Guarda la opción 1 y la opción 2.', 'es', 'hold'],
+  ['Russian joined choices', 'Оставь вариант 1 и вариант 2.', 'ru', 'hold'],
+  ['later replacement', 'Hold option 1. Actually make it option 2.', 'en', 'explore'],
+  ['same-clause replacement', 'Hold option 1 instead of option 2.', 'en', 'explore'],
+  ['alternatives', 'Hold option 1 or option 2.', 'en', 'explore'],
+  ['negated second term', 'Hold option 1 and not option 2.', 'en', 'explore'],
+  ['prefix expresses an uncertain choice', 'Choose between option 1 and option 2.', 'en', 'explore'],
+  ['negated instruction before joined options', 'Do not hold option 1 and option 2.', 'en', 'explore'],
+  ['qualification after a list', 'Hold option 1 and option 2 only if approved.', 'en', 'explore'],
+  ['invalid supplied locale', 'Hold option 1 and option 2.', 'invalid_tag', 'explore'],
+]) {
+  test('additive hold binding: ' + name, async () => {
+    const response = holdResponse(enumeratedPicks, 'each');
+    response.selected_holds.listLocale = locale;
+    const { result } = await run(response, { ...holdArgs, message, holdSelectionText:message });
+    assert.equal(result.meetingAction, expected);
+    assert.deepEqual(result.selectedHoldCandidateIndices, expected === 'hold' ? [0,1] : undefined);
+  });
+}
+test('Hebrew clock choices use the supplied locale conjunction, and an unrecognized connector stays unresolved', async () => {
+  for (const [list, expected] of [['17:15 ו-17:45','hold'],['17:15 וגם 17:45','explore'],['17:15 או 17:45','explore']]) {
+    const message = 'תשמרי ' + list;
+    const response = holdResponse([selectedHold, secondHold], 'each');
+    response.selected_holds.listLocale = 'he';
+    const { result } = await run(response, { ...holdArgs, message, holdSelectionText:message });
+    assert.equal(result.meetingAction, expected);
+  }
+});
+for (const [message, quote, expected] of [
+  ['Hold both.', 'both', 'hold'], ['תשמרי את שתיהן.', 'את שתיהן', 'hold'],
+  ['Hold option 2.', 'option 2', 'explore'],
+  ['Hold option 1. Actually make it option 2.', 'option', 'explore'],
+  ['Hold option 1 or option 2.', 'option 2', 'explore'],
+  ['Hold 17:15 or 17:45.', '17:45', 'explore'],
+  ['Hold either one or the other.', 'other', 'explore'],
+  ['Hold 17:15 and 17:45.', 'Hold', 'explore'],
+]) {
+  test('collective hold binding: ' + message, async () => {
+    const response = holdResponse([selectedHold,secondHold].map((slot, i) =>
+      ({ ...slot, selectionQuote:quote, position:i+1 })), 'all_offered');
+    const { result } = await run(response, { ...holdArgs, message, holdSelectionText:message });
+    assert.equal(result.meetingAction, expected);
+    assert.deepEqual(result.selectedHoldCandidateIndices, expected === 'hold' ? [0,1] : undefined);
+  });
+}
+test('unsettled alternatives and invalid additive selections supply no hold windows', async () => {
+  const message = 'Hold 17:15 or 17:45?';
+  for (const classification of [
+    { ...holdResponse([selectedHold, secondHold], 'each'), meeting_action:'explore' },
+    holdResponse([selectedHold, { ...secondHold, candidateIndex:0 }], 'each'),
+    holdResponse([selectedHold, selectedHold], 'each'),
+  ]) {
+    const { result } = await run(classification, { ...holdArgs, message, holdSelectionText:message });
+    assert.equal(result.meetingAction, 'explore');
+    assert.equal(result.selectedHoldCandidateIndices, undefined);
+  }
+});
+for (const [name, selection, args, response] of [
+  ['different offered time', { ...selectedHold, candidateIndex: 1 }],
+  ['model changed user clock', { ...selectedHold, candidateIndex: 1, offeredClock: '17:45', selectionQuote: '17:45' }],
+  ['missing identity', undefined],
+  ['wrong day', { ...selectedHold, selectedDate: '2026-11-18' }],
+  ['explicit current date and clock on a different day', selectedHold,
+    { message:'Hold 2026-11-18 17:15', holdSelectionText:'Hold 2026-11-18 17:15' }],
+  ['wrong presentation zone', { ...selectedHold, timeZone:'America/New_York' }],
+  ['invented zone quote', { ...selectedHold, offerZoneQuote:'Central European time' }],
+  ['missing authenticated current text', selectedHold, { holdSelectionText: undefined }],
+  ['clock present only in transport framing', selectedHold, { holdSelectionText: 'Wednesday' }],
+  ['no delivered offer', selectedHold, { holdOfferText: undefined }],
+  ['clock absent from latest reply', selectedHold, { holdOfferText: 'Thursday 17:45' }],
+  ['same clock offered on two days', selectedHold, { holdCandidates: [...holdCandidates, {
+    ...holdCandidates[0], startIso:'2026-11-20T10:15:00-05:00', endIso:'2026-11-20T10:40:00-05:00',
+    display:'Friday 2026-11-20 10:15 [America/New_York]', localDisplays:['Friday 2026-11-20 17:15 [Asia/Jerusalem]'] }] }],
+  ['model uses ordinal instead of explicit clock', { ...selectedHold, position: 1 }],
+  ['user numbered pick disagrees with model ordinal', { ...selectedHold, position: 1, selectionQuote: '2' },
+    { message: 'Hold option 2.', holdSelectionText: 'Hold option 2.' }],
+  ['multiple clocks in current selection', selectedHold, { message: 'Hold 17:15 or 17:45', holdSelectionText: 'Hold 17:15 or 17:45' }],
+  ['partial tool response', selectedHold, {}, { stop_reason: 'max_tokens' }],
+]) {
+  test('unbound hold becomes exploration: ' + name, async () => {
+    const { result } = await run(holdResponse(selection), { ...holdArgs, ...args }, response);
+    assert.equal(result.meetingAction, 'explore');
+    assert.equal(result.selectedHoldCandidateIndices, undefined);
+  });
+}
+test('colleague hold value is unavailable on the owner path', async () => {
+  const { result, captured } = await run({ meeting_action: 'hold' }, { senderRole: 'owner' });
+  assert.equal(result.meetingAction, undefined);
+  assert.ok(!captured.tools[0].input_schema.properties.meeting_action.enum.includes('hold'));
+});
+test('existing colleague execution, discovery and unknown values retain their meanings', async () => {
+  for (const action of ['execute', 'explore', 'none', 'invalid', undefined]) {
+    const { result } = await run({ meeting_action: action }, { senderRole: 'colleague' });
+    assert.equal(result.meetingAction, action === 'invalid' ? undefined : action);
+  }
+});
 test('grounded historical roster survives continuation as separate sourced entries', async()=>{
   const {result,captured,calls}=await run({meeting_people:[],meeting_continuation:true,context_meeting_people:[{name:'Dana',sourceMessageIndex:0},{name:'Lev',sourceMessageIndex:0}]});
   assert.deepEqual(result.contextMeetingPeople,[{name:'Dana',sourceMessageIndex:0},{name:'Lev',sourceMessageIndex:0}]);

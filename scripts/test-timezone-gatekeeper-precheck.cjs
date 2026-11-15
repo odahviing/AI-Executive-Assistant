@@ -42,7 +42,7 @@ async function run(options={}){
  }
  const input={authority:'colleague',userId:'UCOLLEAGUE',channelId:'DCOLLEAGUE',threadTs:'123.45',...options.input};
  const consumer=load('src/utils/availabilityPreCheck.ts').precheckAvailability;
- const output=await vm.runInNewContext(producer,{DateTime,profile,input,userMessage:options.message??'2026-09-15 10:00?',namedInternalAttendeeEmails:options.named||[],conversationHistory:options.history||[],logger:mocks['src/utils/logger.ts'].default,require:s=>{
+ const output=await vm.runInNewContext(producer,{DateTime,profile,input,holdOnlyWindows:options.holdOnlyWindows,userMessage:options.message??'2026-09-15 10:00?',namedInternalAttendeeEmails:options.named||[],conversationHistory:options.history||[],logger:mocks['src/utils/logger.ts'].default,require:s=>{
   if(s==='../../utils/availabilityPreCheck')return {precheckAvailability:async a=>{calls.precheck.push(a);const result=await consumer(a);calls.result=result;return result;}};
   if(s==='../../utils/attendeeAvailability'&&options.noEntry)return {loadAttendeeAvailabilityForPerson:()=>undefined};
   return load(path.posix.normalize('src/core/orchestrator/'+s)+'.ts');
@@ -102,5 +102,24 @@ test('explicit instant is not rebound to later standing offer',async()=>{const i
 test('incidental alternative fold display does not ask DST question',async()=>{const h=await run({noTravel:true,homeZone:'America/New_York',slots:[{wall_clock:'2026-09-15T17:00',stated_timezone:'Asia/Jerusalem'}],alternatives:[{start:'2026-11-01T01:30:00-05:00'}]});assert.doesNotMatch(h.result.promptBlock,/CLARIFICATION/);assert.match(h.result.toolSummaryLines[1],/01:30 EST/);});
 test('third party bail forgets repeated candidates without requesting clarification',async()=>{const h=await run({noTravel:true,homeZone:'America/New_York',named:['third@example.test'],message:'01/11/2026 01:30?'});assert.equal(h.calls.model+h.calls.calendar.length,0);assert.equal(h.result.ran,false);assert.equal(h.calls.forgets.length,3);});
 test('explicit fold siblings retain separate verdicts and producer offer instants',async()=>{const a='2026-11-01T01:30-04:00',b='2026-11-01T01:30-05:00';const h=await run({ownerZone:'America/New_York',homeZone:'America/New_York',noTravel:true,message:a+' or '+b+'?',slots:[{wall_clock:a},{wall_clock:b}]});assert.equal(h.result.verdicts.length,2);assert.deepEqual(Array.from(h.calls.stash[0].slots,s=>DateTime.fromISO(s.start).toUTC().toISO()),[DateTime.fromISO(a).toUTC().toISO(),DateTime.fromISO(b).toUTC().toISO()]);});
+test('checked slot length enters the offer across an offset change',async()=>{
+ const start='2026-11-01T01:50-04:00';
+ const h=await run({ownerZone:'America/New_York',homeZone:'America/New_York',noTravel:true,message:start+' for 25 minutes?',slots:[{wall_clock:start,duration_minutes:25}]});
+ const offer=h.calls.stash[0].slots[0];
+ assert.equal(Date.parse(offer.end)-Date.parse(offer.start),25*60000);
+ assert.match(offer.end,/01:15:00.*-05:00$/);
+});
+test('gap offer ends after the largest verified duration',async()=>{
+ const start='2026-09-15T10:00+03:00';
+ const h=await run({noTravel:true,message:start+' how much time?',slots:[{wall_clock:start,gap_query:true}]});
+ const offer=h.calls.stash[0].slots[0];
+ assert.ok(h.result.verdicts[0].maxFreeMinutes>0);
+ assert.equal(Date.parse(offer.end)-Date.parse(offer.start),h.result.verdicts[0].maxFreeMinutes*60000);
+});
+test('a request to hold a prior offer cannot manufacture another via the precheck',async()=>{
+ const h=await run({holdOnlyWindows:new Map()});
+ assert.equal(h.calls.model,0);
+ assert.equal(h.calls.stash.length,0);
+});
 if(require.main===module)(async()=>{const results=[];for(const [id,fn]of cases){try{await fn();results.push({id,status:'pass'});console.log('ok - '+id);}catch(e){results.push({id,status:'fail',error:e.stack});console.log('not ok - '+id+'\n'+e.stack);}}const passed=results.filter(x=>x.status==='pass').length,failed=results.length-passed;console.log(`${passed} passed; ${failed} failed`);process.exitCode=failed?1:0;})();
 module.exports={run};

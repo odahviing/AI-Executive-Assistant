@@ -83,10 +83,12 @@ function orderGuardFor(branch) {
       ts.isVariableStatement(n) && variableNames(n).includes(name)), name));
 }
 
-function harness() {
-  let now = Date.now();
-  class Clock extends Date { static now() { return now; } }
-  const memoryFiles = new Map();
+function harness(memoryFiles = new Map()) {
+  let now = Date.parse('2026-09-14T10:30:00Z');
+  class Clock extends Date {
+    constructor(...args) { super(...(args.length ? args : [now])); }
+    static now() { return now; }
+  }
   const fakeFs = {
     readFileSync(file) { if (!memoryFiles.has(file)) throw Error('fixture file absent'); return memoryFiles.get(file); },
     writeFileSync(file, value) { memoryFiles.set(file, value); },
@@ -111,8 +113,8 @@ function harness() {
   }
   function context(actor = 'owner', channelId = 'D-offer', threadTs = 't1') {
     return { channelId, threadTs, channel: 'slack', senderRole: actor, userId: actor,
-      profile: { user: { timezone: zone, name: 'Owner Example', email: 'owner@example.test' },
-        schedule: { work_hours: {}, office_days: { days: [] }, home_days: { days: [] } } } };
+      profile: { user: { timezone: zone, name: 'Owner Example', email: 'owner@example.test', slack_user_id: 'owner' },
+        schedule: { work_hours: {}, office_days: { days: ['Monday', 'Tuesday', 'Wednesday'] }, home_days: { days: [] } } } };
   }
   const record = (ctx, slots = [{ start: instant }], extra = {}) => stash.recordOfferedSlots({
     channelId: ctx.channelId, threadTs: ctx.threadTs, timezone: zone, slots, ...extra,
@@ -121,7 +123,8 @@ function harness() {
     const fn = namedFunction('src/skills/meetings/ops/helpers.ts', 'recordProposedAlternatives');
     compile(fn.getText(), { logger }, requireSafe).recordProposedAlternatives({
       channelId: ctx.channelId, threadTs: ctx.threadTs, timezone: zone,
-      alternatives: [{ start: instant }], widenedAlternatives: [{ start: '2026-09-17T17:25:00+03:00' }],
+      alternatives: [{ start: instant, end }],
+      widenedAlternatives: [{ start: '2026-09-17T17:25:00+03:00', end: '2026-09-17T18:05:00+03:00' }],
     });
   }
   async function grid(kind, ctx, start = instant, explicit = false) {
@@ -206,7 +209,31 @@ function harness() {
       firstRejectReason: () => 'owner_busy', humanizeViolationLabel: reason => `fixture label: ${reason}`,
     }, 'return { status: preferredSlotStatus, chosen: [...chosenStarts], preferredSlot };');
   }
-  return { stash, context, record, alternatives, candidate, preferred, spread, grid, consume, execute,
+  function holdHandler(t) {
+    const db = new (require('better-sqlite3'))(':memory:');
+    t.after(() => db.close());
+    const schema = source('src/db/client.ts').text.match(/CREATE TABLE IF NOT EXISTS slot_holds[\s\S]*?idx_slot_holds_expiry ON slot_holds\(status, expires_at\);/);
+    assert.ok(schema);
+    db.exec(schema[0]);
+    const sh = compile(source('src/db/slotHolds.ts').text, { Date: Clock }, name => {
+      assert.equal(name, './client'); return { getDb: () => db };
+    });
+    const getPersonMemory = () => ({ name: 'Example colleague' });
+    const { handleHoldSlot } = compile(namedFunction(handlerDir + 'calendarReads.ts', 'handleHoldSlot').getText(),
+      { DateTime, Date: Clock, getPersonMemory }, name => {
+        if (name.endsWith('/db/slotHolds')) return sh;
+        if (name.endsWith('/db')) return { getPersonMemory };
+        if (name.endsWith('/utils/workHours')) return workHours;
+        return requireSafe(name);
+      });
+    return {
+      hold: (ctx, startIso = instant, endIso = end, extra = {}) => handleHoldSlot(
+        { action: 'hold', subject: 'Interview', start_iso: startIso, end_iso: endIso, ...extra }, { context: ctx }),
+      active: () => sh.getActiveSlotHolds('owner'),
+      sh,
+    };
+  }
+  return { stash, context, record, alternatives, candidate, preferred, spread, grid, consume, execute, holdHandler,
     advance(ms) { now += ms; } };
 }
 
@@ -259,6 +286,110 @@ test('candidate false/error/invalid/nearby result never records an offer', async
     assert.equal(result.results[0].available, false);
     assert.equal(h.stash.getOfferedSlots(ctx.channelId, ctx.threadTs), null);
   }
+});
+
+for (const producer of ['candidate', 'preferred', 'spread', 'alternatives']) {
+  test(producer + ' authorizes only the exact offered interval, including equivalent offsets', async t => {
+    const h = harness(), ctx = h.context('colleague'), store = h.holdHandler(t);
+    if (producer === 'candidate') await h.candidate(ctx);
+    if (producer === 'preferred') await h.spread(ctx, [], (await h.preferred(ctx)).status);
+    if (producer === 'spread') await h.spread(ctx);
+    if (producer === 'alternatives') h.alternatives(ctx);
+    const ok = await store.hold(ctx, '2026-09-16T14:25:00Z', '2026-09-16T15:05:00Z', { holder_slack_id: 'impostor' });
+    assert.equal(ok.success, true);
+    for (const delta of [-1, 1, 86_400_000]) {
+      const wrongEnd = new Date(millis(end) + delta).toISOString();
+      assert.equal((await store.hold(ctx, instant, wrongEnd)).error, 'slot_not_offered');
+    }
+    const rows = store.active();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].id, ok.hold_id);
+    assert.equal(rows[0].holder_slack_id, ctx.userId);
+    assert.equal(rows[0].end_iso, '2026-09-16T15:05:00.000Z');
+    assert.equal(ok.expires_at, '2026-09-16T10:30:00.000Z');
+  });
+}
+
+test('a reoffer supersedes the duration across offsets and a later point keeps only the booking start', async t => {
+  const h = harness(), ctx = h.context('colleague'), store = h.holdHandler(t);
+  await h.spread(ctx);
+  const newEnd = '2026-09-16T14:50:00Z';
+  h.record(ctx, [{ start: '2026-09-16T14:25:00Z', end: newEnd }]);
+  assert.equal(h.stash.getOfferedSlots(ctx.channelId).length, 1);
+  assert.equal((await store.hold(ctx)).error, 'slot_not_offered');
+  assert.equal((await store.hold(ctx, instant, newEnd)).success, true);
+  for (const invalid of [undefined, 'invalid', instant, '2026-09-16T14:00:00Z']) {
+    h.record(ctx, [{ start: instant, end: invalid }]);
+    assert.equal(h.stash.wasOfferedSlot(ctx.channelId, ctx.threadTs, instant), true);
+    assert.equal((await store.hold(ctx, instant, newEnd)).error, 'slot_not_offered');
+  }
+});
+
+test('email persists its start-only shape and booked picks survive restart; Slack holds require a live conversation', async t => {
+  const files = new Map(), first = harness(files);
+  const email = first.context('colleague', 'email:thread'), slack = first.context('colleague');
+  first.record(email, [{ start: instant, end }]);
+  first.record(slack, [{ start: instant, end }]);
+  const entries = Object.values(JSON.parse([...files.values()][0]));
+  assert.equal(entries.length, 1);
+  assert.deepEqual(Object.keys(entries[0].slots[0]).sort(), ['display', 'startIso']);
+  const restarted = harness(files), store = restarted.holdHandler(t);
+  assert.equal(restarted.stash.wasOfferedSlot(email.channelId, email.threadTs, instant), true);
+  for (const ctx of [email, slack]) assert.equal((await store.hold(ctx)).error, 'slot_not_offered');
+  first.advance(2 * 3600_000 + 1);
+  assert.equal((await first.holdHandler(t).hold(slack)).error, 'slot_not_offered');
+});
+
+test('owner can hold an unoffered interval; room threads remain separate', async t => {
+  const h = harness(), store = h.holdHandler(t), room = h.context('colleague', 'Croom', 'thread');
+  assert.equal((await store.hold(h.context())).success, true);
+  await h.spread(room);
+  assert.equal((await store.hold({ ...room, threadTs: 'other' })).error, 'slot_not_offered');
+  assert.equal((await store.hold(room)).success, true);
+});
+
+test('later explicit owner/requester placeholder uses the current roster and authenticated colleague', async () => {
+  const h = harness(), ctx = h.context('colleague'), userEmail = ctx.profile.user.email;
+  const requesterEmail = 'requester@example.test';
+  ctx.conversationHistory = [{ role: 'user', content: 'A candidate might pass HR later. Details will follow.' }];
+  ctx.resolvedMeetingAttendeeGroups = [{ emails: [requesterEmail], unresolvedNames: [] }];
+  const args = { subject: 'Tentative', attendees: [{ email: userEmail }], requester_slack_id: 'future-candidate' };
+  const fn = namedFunction(handlerDir + 'createMeeting.ts', 'handleCreateMeeting');
+  const statements = Array.from(fn.body.statements);
+  const start = statements.findIndex(s => variableNames(s).includes('callerNamedAnAttendee'));
+  const finish = statements.findIndex(s => variableNames(s).includes('assistantEmail'));
+  const add = one(collect(fn, n => ts.isIfStatement(n)
+    && n.expression.getText() === 'args.requester_is_attending !== false && requesterId && requesterEmailRaw'), 'attending requester');
+  assert.ok(start >= 0 && finish > start);
+  const roster = namedFunction('src/skills/meetings/ops/helpers.ts', 'meetingScopedAttendees');
+  await h.execute([...statements.slice(start, finish), add], {
+    context: ctx, args, attendees: args.attendees, userEmail,
+    ...compile(roster.getText(), {}),
+    getPersonMemory: id => id === ctx.userId ? { name: 'Requester', email: requesterEmail } : null,
+  });
+  assert.equal(args.requester_slack_id, ctx.userId);
+  assert.deepEqual(args.attendees.map(a => a.email).sort(), [userEmail, requesterEmail].sort());
+});
+
+test('exact retries and caps leave one active hold per start; a nearer start bounds expiry', async t => {
+  const h = harness(), ctx = h.context('colleague'), store = h.holdHandler(t);
+  const slots = [0, 1, 2, 3].map(hour => ({
+    start: DateTime.fromISO('2026-09-15T14:00:00Z').plus({ hours: hour }).toISO(),
+    end: DateTime.fromISO('2026-09-15T14:25:00Z').plus({ hours: hour }).toISO(),
+  }));
+  h.record(ctx, slots);
+  const hold = (i, subject) => store.hold(ctx, slots[i].start, slots[i].end, { subject });
+  const first = await hold(0, 'A');
+  assert.equal(first.success, true);
+  assert.equal(Date.parse(first.expires_at), Date.parse(slots[0].start));
+  assert.equal((await hold(0, 'A')).success, true);
+  assert.equal(store.active().length, 1);
+  assert.equal((await hold(1, 'A')).success, true);
+  assert.equal((await hold(2, 'A')).error, 'meeting_hold_cap_reached');
+  assert.equal((await hold(2, 'B')).success, true);
+  assert.equal((await hold(3, 'B')).error, 'hold_cap_reached');
+  assert.equal(store.active().length, 3);
+  assert.equal(store.sh.getDueSlotHolds(first.expires_at).length, 1);
 });
 
 test('candidate foreign zone conversion, normalized duration, equivalent UTC result and fingerprint preservation', async () => {

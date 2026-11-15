@@ -33,7 +33,7 @@ import type { OpCtx } from './context';
 export async function handleHoldSlot(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context } = ctx;
         // Tentative slot reservation. Colleague-path: only a slot WE
-        // offered them this conversation, max 3, re-pick replaces same-thread.
+        // offered them this conversation, max 3, re-pick replaces the same start.
         // Owner-path: any slot, any holder. Auto-expires at min(2 workdays,
         // slot-start) via the tick (sweepExpiredSlotHolds). See db/slotHolds.ts.
         const ownerUserId = context.profile.user.slack_user_id;
@@ -52,7 +52,7 @@ export async function handleHoldSlot(args: Record<string, unknown>, ctx: OpCtx):
         const holdTz = context.profile.user.timezone;
         const normIso = (s: unknown): string | undefined =>
           (typeof s === 'string' && s)
-            ? (DateTime.fromISO(s, { zone: holdTz }).toUTC().toISO() ?? s)
+            ? (DateTime.fromISO(s, { zone: holdTz }).toUTC().toISO() ?? (action === 'release' ? s : undefined))
             : undefined;
         const normStartIso = normIso(args.start_iso);
         const normEndIso = normIso(args.end_iso);
@@ -97,7 +97,7 @@ export async function handleHoldSlot(args: Record<string, unknown>, ctx: OpCtx):
         // Colleague path — validate the slot was offered here, enforce the cap.
         const holderSlackId = context.userId;
         const { wasOfferedSlot } = await import('../../../../utils/offeredSlotsStash');
-        const wasOffered = wasOfferedSlot(context.channelId, context.threadTs, startIso);
+        const wasOffered = wasOfferedSlot(context.channelId, context.threadTs, startIso, endIso);
         if (!wasOffered) {
           return { success: false, error: 'slot_not_offered', message: 'You can only hold a time I actually offered you in this conversation.' };
         }
@@ -116,8 +116,7 @@ export async function handleHoldSlot(args: Record<string, unknown>, ctx: OpCtx):
         if (sh.countActiveHoldsForHolderSubject(ownerUserId, holderSlackId, args.subject as string | undefined) >= sh.MAX_HOLDS_PER_MEETING) {
           return { success: false, error: 'meeting_hold_cap_reached', message: `You already have ${sh.MAX_HOLDS_PER_MEETING} slots on hold for that meeting — release one before holding another for it.` };
         }
-        const { getPersonMemory: getPM } = await import('../../../../db');
-        const requesterRow = getPM(holderSlackId);
+        const requesterRow = getPersonMemory(holderSlackId);
         const hold = sh.createSlotHold({
           ownerUserId,
           holderSlackId,

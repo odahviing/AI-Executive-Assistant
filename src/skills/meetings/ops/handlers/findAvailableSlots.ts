@@ -2160,7 +2160,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             const offeredSlots = [
               ...annotatedSlots,
               ...(preferredSlotStatus?.available === true && typeof preferredSlotStatus.start === 'string'
-                ? [{ start: preferredSlotStatus.start }] : []),
+                && typeof preferredSlotStatus.end === 'string'
+                ? [{ start: preferredSlotStatus.start, end: preferredSlotStatus.end }] : []),
             ];
             if (offeredSlots.length > 0 && context.channelId) {
               try {
@@ -2171,7 +2172,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   channelId: context.channelId,
                   threadTs: context.threadTs,
                   timezone,
-                  slots: offeredSlots as Array<{ start: string }>,
+                  slots: offeredSlots,
                   searchFingerprint: offerFingerprint,
                 });
               } catch (err) {

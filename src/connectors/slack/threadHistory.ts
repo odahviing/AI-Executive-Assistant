@@ -2,6 +2,16 @@ import type { App } from '@slack/bolt';
 
 export type SlackHistoryMessage = Record<string, any>;
 
+/** A broadcast is a text reply. Slack's nested root is display context only. */
+export function humanBroadcastParent(message: SlackHistoryMessage, botUserId?: string | null): string | undefined {
+  if (message.subtype !== 'thread_broadcast' || typeof message.user !== 'string' || !message.user || message.user === botUserId
+    || message.bot_id || message.bot_profile || message.app_id || message.hidden
+    || typeof message.text !== 'string' || !message.text.trim() || message.files?.length) return;
+  const { ts, thread_ts } = message;
+  if (typeof ts === 'string' && typeof thread_ts === 'string' && ts !== thread_ts
+    && /^\d+\.\d+$/.test(ts) && /^\d+\.\d+$/.test(thread_ts)) return thread_ts;
+}
+
 /** Read the current tail, not the first page of an old thread. Never return
  * a partial first page as though it were current when pagination fails. */
 export async function readSlackThread(

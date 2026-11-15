@@ -50,7 +50,7 @@ import logger from './logger';
 import type { SkillContext } from '../skills/types';
 
 type CallerContext = Pick<SkillContext, 'userId' | 'senderRole' | 'authority' | 'surface'
-  | 'channel' | 'channelId' | 'inboundConnectionId' | 'isMpim' | 'isOwnerInGroup' | 'mpimMemberIds'>;
+  | 'channel' | 'channelId' | 'inboundConnectionId' | 'isMpim' | 'isOwnerInGroup' | 'mpimMemberIds' | 'calendarReadOnly'>;
 
 const WRITE_TTL_MS = 60 * 1000;
 const READ_TTL_MS = 5 * 1000;
@@ -80,6 +80,9 @@ function buildKey(ownerUserId: string, threadTs: string | undefined, toolName: s
     userId: context.userId, senderRole: context.senderRole, authority: context.authority,
     surface: context.surface, channel: context.channel, channelId: context.channelId,
     inboundConnectionId: context.inboundConnectionId,
+    // Active availability checks can move flexible blocks. Their results
+    // cannot stand in for a read-only check, or the other way around.
+    calendarReadOnly: toolName === 'check_join_availability' && context.calendarReadOnly === true,
     isMpim: context.isMpim, isOwnerInGroup: context.isOwnerInGroup,
     mpimMemberIds: context.mpimMemberIds ? [...context.mpimMemberIds].sort() : undefined,
   });
@@ -101,7 +104,8 @@ export function lookupRecentToolCall(input: {
   args: Record<string, unknown>;
   context: CallerContext;
 }): { cachedResult: unknown; ageMs: number } | null {
-  if (input.toolName === 'update_my_preferences') return null;
+  // A selected hold must revalidate its current offered interval in the handler.
+  if (input.toolName === 'update_my_preferences' || (input.toolName === 'hold_slot' && input.context.calendarReadOnly)) return null;
   const key = buildKey(input.ownerUserId, input.threadTs, input.toolName, input.args, input.context);
   const entry = cache.get(key);
   if (!entry) return null;
@@ -130,7 +134,7 @@ export function recordToolCall(input: {
   result: unknown;
   writeTools: ReadonlySet<string>;
 }): void {
-  if (input.toolName === 'update_my_preferences') return;
+  if (input.toolName === 'update_my_preferences' || (input.toolName === 'hold_slot' && input.context.calendarReadOnly)) return;
   const key = buildKey(input.ownerUserId, input.threadTs, input.toolName, input.args, input.context);
   const now = Date.now();
   cache.set(key, {

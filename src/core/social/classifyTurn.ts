@@ -13,17 +13,13 @@
  * aligned directions (task-message → meetings/tasks scope; social-message →
  * general/social).
  *
- * The two halves are gated independently by the caller via `needIntent` /
- * `needScopes`:
- *   - Owner turn, both flags on  → one call, both parts.
- *   - Colleague turn, social on  → one call, intent only (colleagues get the
- *                                  static tool allowlist, scopes unused).
- *   - Only one flag on           → one call, that part only.
- *   - Neither                    → caller skips this entirely.
+ * The caller independently requests intent, scopes and meeting classification.
+ * Colleagues use a role-specific tool allowlist and still classify scheduling
+ * intent even when social classification is off.
  *
  * Fails open on every axis: intent → kind='other' (drops the soft social
  * nudge), scopes → ['general'] (ships every tool), meetingAction → undefined.
- * Explicit exploration is consumed as a write boundary by buildTurnContext;
+ * Exploration and colleague holds describe distinct write boundaries;
  * missing classification does not establish either permission or refusal.
  *
  * Model note: Haiku. The hard social work (subject matching, granularity) was
@@ -87,7 +83,9 @@ export interface ClassifyTurnResult {
   /** Current scheduling intent, including recent proposal/commitment context.
    * Undefined means unavailable, not permission. Uses the existing participant
    * extraction call; bare-ack shortcuts retain their existing behavior. */
-  meetingAction?: 'execute' | 'explore' | 'none';
+  meetingAction?: 'execute' | 'hold' | 'explore' | 'none';
+  /** Indices into this call's authenticated full-window offers, only for grounded holds. */
+  selectedHoldCandidateIndices?: number[];
   /**
    * v3.1.2 (D) — true when the OWNER is asking a "do I have buffer / free
    * time / how packed is X / am I free" question. Orchestrator uses this
@@ -135,6 +133,175 @@ function bareAckKind(msg: string): 'courtesy' | 'other' | undefined {
   return undefined;
 }
 
+interface HoldCandidate {
+  startIso: string;
+  endIso: string;
+  display: string;
+  localDisplays?: string[];
+}
+
+/** Match structured clocks only. Selection intent and natural-language dates/ordinals belong to the classifier. */
+function clocks(text: string): string[] {
+  return Array.from(text.matchAll(/(?<![\d:])([01]?\d|2[0-3]):([0-5]\d)(?![\d:])/g),
+    match => match[1].padStart(2, '0') + ':' + match[2]);
+}
+
+// Numeric ordinals can use any decimal script. Skip ISO dates and clocks,
+// whose components refer to a calendar date or deadline, never a list position.
+function ordinalNumbers(text: string): number[] {
+  const digits = /\p{Nd}/u;
+  const normalized = text.normalize('NFKC').replace(/\p{Nd}/gu, digit => {
+    const point = digit.codePointAt(0)!;
+    if (point <= 57) return digit;
+    let zero = point;
+    while (digits.test(String.fromCodePoint(zero - 1))) zero--;
+    return String((point - zero) % 10);
+  });
+  const withoutDates = normalized.replace(/\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}(?::\d{2})?/g, ' ');
+  return Array.from(withoutDates.matchAll(/(?<![\p{L}\p{N}])\d+/gu), match => Number(match[0]));
+}
+
+function zonesMatchInstant(text: string, instant: string, date: string, clock: string): boolean {
+  const zoneIds = text.match(/(?<![\w/])(?:[A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+)+|UTC|GMT)(?![\w/+-])/g) ?? [];
+  return zoneIds.every(timeZone => {
+    try {
+      const parts = new Intl.DateTimeFormat('en-GB', { timeZone, year:'numeric', month:'2-digit', day:'2-digit',
+        hour:'2-digit', minute:'2-digit', hourCycle:'h23' }).formatToParts(Date.parse(instant));
+      const fields = Object.fromEntries(parts.map(part => [part.type, part.value]));
+      return `${fields.year}-${fields.month}-${fields.day} ${fields.hour}:${fields.minute}` === `${date} ${clock}`;
+    } catch {
+      // An unrecognized location under a timezone namespace is unresolved.
+      // Other slash-delimited text can simply be the subject, e.g. SDR/BDR.
+      return !/^(?:Africa|America|Antarctica|Arctic|Asia|Atlantic|Australia|Europe|Indian|Pacific|Etc|US|Brazil|Canada|Chile|Mexico|SystemV)\//i.test(timeZone);
+    }
+  });
+}
+
+function bindHoldSelection(proposed: unknown, candidates: HoldCandidate[], offer: string, message: string,
+  selectedCount: number, allOffered: boolean, positions: Set<number>, actionClauses: string[], precedingCounts: string[]): number | undefined {
+  if (!proposed || typeof proposed !== 'object') return;
+  const { candidateIndex, selectionQuote, offeredClock, selectedDate, timeZone, offerZoneQuote, position } = proposed as Record<string, unknown>;
+  if (typeof candidateIndex !== 'number' || !Number.isInteger(candidateIndex) || !candidates[candidateIndex]
+    || typeof selectionQuote !== 'string' || !selectionQuote.trim() || !message.includes(selectionQuote)
+    || typeof offeredClock !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(offeredClock)
+    || typeof selectedDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(selectedDate)
+    || typeof timeZone !== 'string' || !timeZone.trim() || typeof offerZoneQuote !== 'string'
+    || !offer.includes(offerZoneQuote)) return;
+  const displayed = clocks(offer);
+  if (!displayed.includes(offeredClock)) return;
+  const numericQuote = /^\p{Nd}+$/u.test(selectionQuote) ? ordinalNumbers(selectionQuote)[0] : undefined;
+  const selectedClauses = actionClauses.filter(clause => clause.includes(selectionQuote)
+    && (numericQuote === undefined || ordinalNumbers(clause).includes(numericQuote)));
+  if (selectedClauses.length !== 1) return;
+  const selectionClause = selectedClauses[0];
+  if (precedingCounts.length && (ordinalNumbers(selectionQuote)[0] !== position ||
+    precedingCounts.some(count => message.lastIndexOf(count) >= message.indexOf(selectionClause)))) return;
+  const labels = candidates.map(candidate => [candidate.display, ...(candidate.localDisplays ?? [])]);
+  const atClock = (clock: string) => labels.flatMap((forms, index) =>
+    forms.some(form => clocks(form).includes(clock)) ? [index] : []);
+  const matches = atClock(offeredClock);
+  const selected = candidates[candidateIndex];
+  if (matches.length !== 1 || matches[0] !== candidateIndex || !(Date.parse(selected.endIso) > Date.parse(selected.startIso))
+    || !labels[candidateIndex].some(form => form.endsWith(`${selectedDate} ${offeredClock} [${timeZone}]`))) return;
+  const zoneContext = actionClauses.filter(clause => clause === selectionClause || clocks(clause).length === 0).join(' ');
+  if (!zonesMatchInstant(zoneContext, selected.startIso, selectedDate, offeredClock)) return;
+  // An explicit date/time pair binds this clock's day. A separate reply
+  // deadline can be on a different day and never selects a slot.
+  for (const pair of message.matchAll(/(?<!\d)(\d{4}-\d{2}-\d{2})[T ]([01]?\d|2[0-3]):([0-5]\d)(?!\d)/g)) {
+    if (pair[2].padStart(2, '0') + ':' + pair[3] === offeredClock && pair[1] !== selectedDate) return;
+  }
+  // A different offered option anywhere in the message remains a possible
+  // target. A non-offered clock in a separate clause can be a reply deadline.
+  const currentClocks = new Set([...clocks(message).filter(clock => displayed.includes(clock)), ...clocks(selectionClause)]);
+  if (currentClocks.size) {
+    // A supplied ordinal cannot override the clock the colleague actually typed.
+    if (position !== undefined || currentClocks.size !== selectedCount || !currentClocks.has(offeredClock)
+      || !/^(?:[01]?\d|2[0-3]):[0-5]\d$/.test(selectionQuote) || clocks(selectionQuote)[0] !== offeredClock) return;
+  } else {
+    if (typeof position !== 'number' || !Number.isInteger(position) || position < 1
+      || displayed[position - 1] !== offeredClock) return;
+    // Index into the actual reply, never the stash order. Unknown or repeated
+    // options (including another timezone label for the same slot) are ambiguous.
+    const identities = displayed.map(atClock);
+    if (identities.some(ids => ids.length !== 1) || new Set(identities.map(ids => ids[0])).size !== identities.length) return;
+    const digits = ordinalNumbers(selectionQuote);
+    if (digits.length && (digits.length !== 1 || digits[0] !== (allOffered ? selectedCount : position))) return;
+    const numbers = ordinalNumbers(selectionClause);
+    if (numbers.length && (!numbers.some(number => positions.has(number))
+      || numbers.some(number => number <= identities.length && !positions.has(number)))) return;
+    // A numbered correction anywhere in the authenticated instruction remains
+    // a possible choice, even if an earlier selection quote was genuine.
+    if (actionClauses.flatMap(ordinalNumbers).some(number =>
+      number >= 1 && number <= identities.length && !positions.has(number))) return;
+    if (allOffered && selectedCount !== identities.length) return;
+  }
+  return candidateIndex;
+}
+
+// ICU formats the positive list independently of the classifier's mode label.
+// Accept the literal picks, optionally with a repeated label such as "option".
+// Unrecognized connectors and trailing qualifications require clarification.
+function isConjoinedHoldList(clause: string, picks: string[], locale: unknown): boolean {
+  if (typeof locale !== 'string') return false;
+  const separator = clause.search(/\s/u);
+  if (separator < 1) return false;
+  const object = clause.slice(separator).trimStart();
+  const ordered = picks.map(quote => ({ quote, at:object.indexOf(quote) })).sort((a,b) => a.at - b.at);
+  if (ordered.some(({ quote, at }) => at < 0 || object.lastIndexOf(quote) !== at)) return false;
+  const label = object.slice(0, ordered[0].at);
+  const items = ordered.map(item => label + item.quote);
+  try {
+    if (!Intl.ListFormat.supportedLocalesOf(locale).length) return false;
+    for (const style of ['long', 'short'] as const) {
+      const conjunction = new Intl.ListFormat(locale, { style, type:'conjunction' });
+      const disjunction = new Intl.ListFormat(locale, { style, type:'disjunction' });
+      if (conjunction.format(items) === object && disjunction.format(items) !== object) return true;
+    }
+  } catch { /* An unsupported locale provides no conjunction evidence. */ }
+  return false;
+}
+
+function bindHoldSelections(input: unknown, candidates: HoldCandidate[], offer: string, message: string): number[] | undefined {
+  if (!input || typeof input !== 'object') return;
+  const { selections, mode, listLocale = 'en', incidentalNumberClauses = [] } = input as Record<string, unknown>;
+  if (!Array.isArray(selections) || !selections.length || selections.length > candidates.length
+    || !['single', 'each', 'all_offered'].includes(String(mode)) || (mode === 'single') !== (selections.length === 1)) return;
+  const selected = new Set<number>(), quotes = new Set<string>();
+  const positions = new Set<number>(mode === 'all_offered' ? [selections.length] : selections.map(slot => slot?.position));
+  const clauses = message.split(/[\p{Sentence_Terminal};；\r\n]+/u).map(clause => clause.trim()).filter(Boolean);
+  // Only an earlier, separate background count can precede an explicitly
+  // numbered choice. A later clause never excuses a conflicting ordinal.
+  if (!Array.isArray(incidentalNumberClauses) || (incidentalNumberClauses.length && selections.some(slot => !Number.isInteger(slot?.position)))
+    || incidentalNumberClauses.some(clause =>
+    typeof clause !== 'string' || !clauses.includes(clause) || !ordinalNumbers(clause).length
+    || !/\p{Nd}+\s+\p{L}/u.test(clause) || /\p{Nd}\s*$/u.test(clause)
+    || /[#№]\s*\p{Nd}/u.test(clause) || clocks(clause).length
+    || clause.includes('/'))) return;
+  const actionClauses = clauses.filter(clause => !incidentalNumberClauses.includes(clause));
+  for (const selection of selections) {
+    const index = bindHoldSelection(selection, candidates, offer, message, selections.length, mode === 'all_offered',
+      positions, actionClauses, incidentalNumberClauses);
+    if (index === undefined || selected.has(index)) return;
+    selected.add(index);
+    quotes.add(selection.selectionQuote);
+  }
+  if (mode !== 'single') {
+    if (clauses.length !== 1) return;
+    const clause = clauses[0];
+    if (mode === 'each' && (quotes.size !== selected.size || !isConjoinedHoldList(clause, [...quotes], listLocale))) return;
+    if (mode === 'all_offered') {
+      const [collective] = quotes;
+      // For a collective keep the complete, unenumerated object of one
+      // directive. Its meaning ("both") is the existing classifier's judgment.
+      const predicate = clause.slice(0, -collective.length);
+      if (quotes.size !== 1 || selected.size !== clocks(offer).length || clocks(clause).length || ordinalNumbers(clause).length
+        || !clause.endsWith(collective) || clause.indexOf(collective) !== predicate.length
+        || !predicate.trim() || predicate === predicate.trimEnd() || predicate.trim().split(/\s+/u).length !== 1) return;
+    }
+  }
+  return [...selected];
+}
+
 export async function classifyTurn(params: {
   anthropic: Anthropic;
   message: string;
@@ -149,6 +316,10 @@ export async function classifyTurn(params: {
   senderRole?: 'owner' | 'colleague';
   senderName?: string;
   recentContext?: string;
+  /** Caller supplies verified start/end windows and the latest delivered assistant prose without internal receipts. */
+  holdCandidates?: HoldCandidate[];
+  holdOfferText?: string;
+  holdSelectionText?: string;
   /** Same bounded recent context, indexed for participant provenance. Supply
    * only where the caller can authenticate historical human authorship. */
   meetingContextMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
@@ -200,6 +371,9 @@ export async function classifyTurn(params: {
   const senderRole = params.senderRole ?? 'owner';
   const senderName = senderRole === 'owner' ? ownerFirst : (params.senderName ?? 'the colleague');
   const isOwner = senderRole === 'owner';
+  const holdCandidates = !isOwner && needMeetingPeople && params.holdOfferText && params.holdOfferText.length <= 8000
+    && params.holdSelectionText?.trim() && message.includes(params.holdSelectionText) && message.length <= 4000
+    ? params.holdCandidates ?? [] : [];
 
   // ── Scope setup (only relevant when needScopes) ──
   const summaryActive = (profile.skills as any)?.summary === true;
@@ -275,6 +449,10 @@ MEETING ACTION (meeting_action) — classify the LAST message's meaning using re
 - execute: an authorized instruction to act or acceptance of a concrete exact plan. Preserve explicit action in a mixed message ("you are not helping — move Elinor to 13:30" is execute). A settled instruction needs no generic reconfirmation.
 - explore: feasibility, discovery, correction or dissatisfaction without an explicit action; a plan still awaiting a choice; or an outstanding promise to present options before moving. A time inside "would 13:30 work?" is exploration. Frustration adds no consent. Acceptance of the concrete plan fulfills the promise and is execute.
 - none: unrelated to meeting action or discovery. Interpret contextual acceptance against the actual plan, not the acknowledgement word alone. A broad directional request authorizes discovery; unresolved target selection remains explore.
+${isOwner ? '' : `
+- hold: the colleague asks to reserve a specifically selected, previously offered slot internally now, while deferring the booking. "Hold 17:15 now; if the interview goes well I'll confirm on Wednesday" authorizes the hold now. The condition and reply day apply to the later booking. Also use hold when the colleague explicitly requests a hold on EACH of several identified slots. If the hold itself is conditional, the day conflicts, or the choice between alternatives is unsettled, return explore.
+- An explicit request or confirmation to send the actual calendar invitation is execute, even for a meeting titled "Tentative". A question about whether an invitation is being sent, or a report that the colleague already sent it, is scheduling status (explore) unless the current message independently authorizes another action.`}
+${holdCandidates.length ? `For hold, return selected_holds: mode single for one choice, each for separately identified additive holds, all_offered only for an explicit collective choice of the entire delivered list. Never treat alternatives as additive. Each selection needs the zero-based candidateIndex, local selectedDate (YYYY-MM-DD), offeredClock (24h HH:mm), and bracketed IANA timeZone without brackets. When the reply names its presentation zone, copy that phrase into offerZoneQuote and match its zone; otherwise use an empty quote. An unavailable/incompatible zone means explore even if another zone's clock matches. Copy selectionQuote from the CURRENT message: its exact clock, ordinal, or collective instruction. For ordinal/collective choices give the one-based position in the actual delivered list. Candidate indices are lookup keys, never the human-facing order. Use the slot date, distinguish a later reply deadline, and return explore for a conflicting requested day, missing offer or unclear choice. Windows: ${JSON.stringify(holdCandidates.map((slot, candidateIndex) => ({ candidateIndex, displays: [slot.display, ...(slot.localDisplays ?? [])] })))}` : ''}
 
 MEETING PARTICIPANTS (meeting_people) — set this ONLY when ${senderName} is giving a NEW instruction to set up, schedule, move, or book a MEETING WITH someone. List the people that meeting is WITH, exactly as each is named in the message (first name, full name, nickname, @handle — however written; any language or script).
 - Include everyone named as a participant EXCEPT ${assistantName} (you) and ${senderName} (the person writing this message).
@@ -300,6 +478,8 @@ MEETING CONTINUATION (meeting_continuation, context_meeting_people):
   const renderedContext = params.meetingContextMessages
     ? params.meetingContextMessages.map((m, i) => `[${i}] ${m.role}: ${m.content}`).join('\n')
     : recentContext;
+  const missingOffer = holdCandidates.length && !renderedContext?.includes(params.holdOfferText!)
+    ? `\nLatest delivered offer text: ${JSON.stringify(params.holdOfferText)}\n` : '';
   const priorIndex = (params.meetingContextMessages?.length ?? 0) - 1;
   const priorMessage = params.meetingContextMessages?.[priorIndex];
   const inspectIndependentCreate = params.inspectIndependentOrdinaryCreate === true && params.senderRole === 'owner'
@@ -320,7 +500,7 @@ Candidates (zero-based indices): ${JSON.stringify(params.approvalCandidates.map(
   const systemPrompt = `You classify a single message from ${senderName} (${isOwner ? `${ownerFirst} — the executive who owns this account` : `a colleague talking to ${assistantName}`}) to ${assistantName}.
 
 Output EXACTLY ONE call to classify_turn. No prose.
-${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${independentCreateSection}${renderedContext ? `\nRecent conversation (classify the LAST message from ${senderName}):\n${renderedContext}\n` : ''}`;
+${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${independentCreateSection}${missingOffer}${renderedContext ? `\nRecent conversation (classify the LAST message from ${senderName}):\n${renderedContext}\n` : ''}`;
 
   // ── Build the tool schema — include only the requested fields ──
   const properties: Record<string, any> = {};
@@ -391,8 +571,23 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${indepe
   if (needMeetingPeople) {
     properties.meeting_action = {
       type: 'string',
-      enum: ['execute', 'explore', 'none'],
+      enum: isOwner ? ['execute', 'explore', 'none'] : ['execute', 'hold', 'explore', 'none'],
     };
+    if (!isOwner) required.push('meeting_action');
+    if (holdCandidates.length) {
+      const selection = { type: 'object', properties: {
+        candidateIndex: { type: 'integer' }, selectedDate: { type: 'string' }, offeredClock: { type: 'string' },
+        timeZone: { type: 'string' }, offerZoneQuote: { type: 'string' },
+        selectionQuote: { type: 'string' }, position: { type: 'integer', minimum: 1 },
+      }, required: ['candidateIndex', 'selectedDate', 'offeredClock', 'timeZone', 'offerZoneQuote', 'selectionQuote'], additionalProperties: false };
+      properties.selected_holds = { type: 'object', properties: {
+        mode: { type: 'string', enum: ['single', 'each', 'all_offered'],
+          description: 'each requires one direct instruction with an additive list. For all_offered copy the whole unenumerated collective object after the action word into selectionQuote for every position. Alternatives, corrections, negations and uncertainty remain explore.' },
+        selections: { type: 'array', items: selection },
+        listLocale: { type:'string', description:"For each, the BCP 47 language tag of the colleague's current conjunction list." },
+        incidentalNumberClauses: { type: 'array', items: { type:'string' }, description:'Only for a subsequent explicitly numbered choice: quote an entire earlier background-count clause (excluding terminal punctuation) if its number could look like an option. Never exclude a choice, correction, later clause or unresolved number.' },
+      }, required: ['mode', 'selections'], additionalProperties: false };
+    }
     properties.meeting_people = {
       type: 'array',
       description: 'People named as participants in a scheduling request, copied as written. Empty array when this is not a scheduling request or nobody is named.',
@@ -489,9 +684,16 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${indepe
           .slice(0, 12)
       : [];
     const rawMeetingAction = raw?.meeting_action;
-    const meetingAction = needMeetingPeople
-      && (rawMeetingAction === 'execute' || rawMeetingAction === 'explore' || rawMeetingAction === 'none')
-      ? rawMeetingAction : undefined;
+    const completeToolCall = resp.stop_reason === 'tool_use'
+      && toolUse?.name === 'classify_turn' && resp.content.filter(block => block.type === 'tool_use').length === 1;
+    const selectedHoldCandidateIndices = rawMeetingAction === 'hold' && completeToolCall && holdCandidates.length
+      ? bindHoldSelections(toolUse.input?.selected_holds, holdCandidates, params.holdOfferText!, params.holdSelectionText!) : undefined;
+    let meetingAction: ClassifyTurnResult['meetingAction'];
+    if (needMeetingPeople && !isOwner && rawMeetingAction === 'hold') {
+      meetingAction = selectedHoldCandidateIndices ? 'hold' : 'explore';
+    } else if (needMeetingPeople && (rawMeetingAction === 'execute' || rawMeetingAction === 'explore' || rawMeetingAction === 'none')) {
+      meetingAction = rawMeetingAction;
+    }
     const meetingContinuation = needMeetingPeople && !!params.meetingContextMessages
       && raw?.meeting_continuation === true;
     const contextMeetingPeople: Array<{ name: string; sourceMessageIndex: number }> = [];
@@ -554,8 +756,6 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${indepe
       && !meetingContinuation && !meetingPeople.length && !approvalDecisions.length && !freeTimeInquiry;
     // A partial tool call, conflicting decision or quote from truncated input
     // cannot establish what the owner authorized with the complete reply.
-    const completeToolCall = resp.stop_reason === 'tool_use'
-      && toolUse?.name === 'classify_turn' && resp.content.filter(block => block.type === 'tool_use').length === 1;
     const standaloneApprovalQuote = classifyStandaloneApproval && completeToolCall
       && message.length <= 4000 && raw?.standalone_approval_quote === message
       && raw.standalone_courtesy === false && meetingAction === 'execute'
@@ -575,7 +775,7 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${indepe
       && message.includes(proposed.subjectQuote) && priorMessage.content.includes(proposed.priorSubjectQuote)
       && proposed.subjectQuote.trim().normalize('NFKC').toLowerCase() !== proposed.priorSubjectQuote.trim().normalize('NFKC').toLowerCase()
       ? { subjectQuote: proposed.subjectQuote, priorSubjectQuote: proposed.priorSubjectQuote, sourceMessageIndex: priorIndex } : undefined;
-    return { standaloneCourtesy, standaloneApprovalQuote, independentOrdinaryCreate, intent, scope, freeTimeInquiry, meetingPeople, meetingPeopleGroups, meetingAction, meetingContinuation, contextMeetingPeople, approvalDecisions };
+    return { standaloneCourtesy, standaloneApprovalQuote, independentOrdinaryCreate, intent, scope, freeTimeInquiry, meetingPeople, meetingPeopleGroups, meetingAction, selectedHoldCandidateIndices, meetingContinuation, contextMeetingPeople, approvalDecisions };
   } catch (err) {
     logger.warn('classifyTurn threw — defaulting to other / general', { err: String(err).slice(0, 300) });
     return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false, meetingPeople: [] };
