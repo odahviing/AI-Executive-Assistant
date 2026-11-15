@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
 **5 product decisions await you** — 6 open items; 0 captured, 0 ready for an authorized lane batch, 1 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (3):** nov13-boston-office-location · colleague-tentative-slot-capability · dm-thread-broadcast-booking-confirmation
+**Independently verified, awaiting wrap (1):** nov13-boston-office-location
 
 ### Needs a product decision (5)
 
