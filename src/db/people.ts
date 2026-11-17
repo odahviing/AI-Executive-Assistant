@@ -1639,11 +1639,11 @@ export function searchPeopleMemory(query: string): PersonMemory[] {
   // (falsy) in SQL, which would silently drop every external from name search.
   return db.prepare(`
     SELECT * FROM people_memory
-    WHERE (lower(name) LIKE ? OR lower(email) LIKE ?)
+    WHERE (lower(name) LIKE ? OR lower(email) LIKE ? OR lower(name_he) LIKE ?)
       AND kind != 'self'
     ORDER BY last_seen DESC
     LIMIT 10
-  `).all(q, q) as PersonMemory[];
+  `).all(q, q, q) as PersonMemory[];
 }
 
 /** Complete canonical cohort for internal scheduling calculations, not a tool

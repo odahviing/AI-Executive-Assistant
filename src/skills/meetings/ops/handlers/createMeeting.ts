@@ -536,6 +536,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // Still-missing emails fall through to the refusal below
         // ('attendee_missing_email') so Sonnet asks instead of papering over.
         const attendeeEmailNotes: string[] = [];
+        const addressConflicts: Array<{ name: string; proposed: string }> = [];
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { resolveAttendeeEmail } = require('../../../../memory/resolveAttendeeEmails') as
@@ -565,15 +566,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                   );
                   a.email = supplied;
                 } else {
-                  // Queryable trail (M18) — every directory override of a
-                  // model-typed email is visible in the logs.
-                  logger.info('create_meeting — directory match overrode the model-supplied email', {
-                    name: a.name, supplied, resolved: resolved.email,
-                  });
-                  attendeeEmailNotes.push(
-                    `${a.name ?? resolved.email} is invited at ${resolved.email} (the address on file), NOT at ${supplied}. If ${supplied} is actually the right address, the requester must state it explicitly and the invite will be corrected.`,
-                  );
-                  a.email = resolved.email;
+                  addressConflicts.push({ name: a.name ?? supplied, proposed: supplied });
                 }
               } else {
                 a.email = resolved.email;
@@ -586,6 +579,11 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             err: String(err).slice(0, 200),
           });
         }
+        if (addressConflicts.length) return {
+          success: false, error: 'attendee_address_conflict', attendees: addressConflicts,
+          message: 'Ask once for confirmation of the proposed addresses for these attendees. No invitation has been sent.',
+        };
+
 
         // v3.7.2 (#137b) — email is required to SEND an invite, on EVERY path.
         // This was colleague-path-only (old Guard A), so the owner-approved

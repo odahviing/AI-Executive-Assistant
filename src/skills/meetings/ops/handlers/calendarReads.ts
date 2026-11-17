@@ -59,7 +59,9 @@ export async function handleHoldSlot(args: Record<string, unknown>, ctx: OpCtx):
 
         if (action === 'release') {
           if (typeof args.hold_id === 'string' && args.hold_id) {
-            const ok = sh.releaseSlotHold(args.hold_id, isOwner ? 'owner_cancelled' : 'colleague_released');
+            const hold = sh.getActiveSlotHolds(ownerUserId).find(row => row.id === args.hold_id);
+            const ok = !!hold && (isOwner || hold.holder_slack_id === context.userId)
+              && sh.releaseSlotHold(hold.id, isOwner ? 'owner_cancelled' : 'colleague_released');
             return { success: ok, released: ok ? 1 : 0 };
           }
           const released = isOwner
@@ -91,7 +93,7 @@ export async function handleHoldSlot(args: Record<string, unknown>, ctx: OpCtx):
             reason: args.reason as string | undefined,
             expiresAt,
           });
-          return { success: true, hold_id: hold.id, expires_at: expiresAt };
+          return { success: true, hold_id: hold.id, start_iso: startIso, end_iso: endIso, expires_at: expiresAt };
         }
 
         // Colleague path — validate the slot was offered here, enforce the cap.
@@ -294,7 +296,7 @@ export async function handleGetCalendar(args: Record<string, unknown>, ctx: OpCt
           return {
             events: sharedProcessed,
             _colleague_view: true,
-            _scope_note: `COLLEAGUE VIEW — this list contains ONLY the meetings this colleague is on (their shared meetings with the owner). The rest of the owner's calendar is not visible here and must never be described or enumerated. This is NOT an availability source: whether the owner is free/busy at any time comes ONLY from find_available_slots (or check_join_availability for joining an existing meeting) — never from the absence or presence of events in this list. v3.7.x (#141): if this colleague asks about or to CHANGE a meeting that is NOT in this list, do NOT explain why you can't see it and do NOT speculate about how the owner got it (e.g. "he may have received the invite directly"). If it's one THEY requested (see "MEETINGS YOU REQUESTED"), act on it by its event_id — a move/cancel routes to ${context.profile.user.name.split(' ')[0]}'s approval. Otherwise, simply say you can't action that one for them and they should ask ${context.profile.user.name.split(' ')[0]} directly.`,
+            _scope_note: "Only shared events are visible. An empty result does not establish that a previously reported booking is missing. Do not recreate it from this result. For availability use find_available_slots or check_join_availability. For a change use a verified shared event or a verified event the requester requested. If identification is ambiguous ask for the invitation. If the owner must decide, route the request through the approval tool. Keep other events private.",
           };
         }
 

@@ -251,10 +251,10 @@ function inferIntentFromTool(toolName: string): BookingIntent {
 export function emailStatedByHuman(email: string, context: SkillContext): boolean {
   const needle = (email ?? '').trim().toLowerCase();
   if (!needle.includes('@')) return false;
-  if ((context.currentUserMessage ?? '').toLowerCase().includes(needle)) return true;
-  return (context.conversationHistory ?? []).some(
-    m => m.role === 'user' && (m.content ?? '').toLowerCase().includes(needle),
-  );
+  const containsAddress = (text: string) => (text.match(/[A-Z0-9.!#$%&'*+/=?^_{}|~-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)+/gi) ?? [])
+    .some(address => address.toLowerCase() === needle);
+  return containsAddress(context.currentUserMessage ?? '') || (context.conversationHistory ?? [])
+    .some(message => message.role === 'user' && containsAddress(message.content ?? ''));
 }
 
 async function buildParticipants(
@@ -271,32 +271,8 @@ async function buildParticipants(
     let name = a.name?.trim();
     const slackId = a.slack_id?.trim();
 
-    // v3.1.4 — email auto-fill via the shared resolver (one function all
-    // booking paths use: create / move / update).
-    //
-    // jim-douglass-fabricated-email-across-repeat-bookings (2026-08-30) — this
-    // used to run ONLY when the raw email was missing or malformed, which
-    // meant a model-SUPPLIED email — right or wrong — always won outright,
-    // never checked against the directory. create_meeting's own compact
-    // history summary never carries attendee emails forward (turnHelpers.ts),
-    // so a KNOWN external person resolved correctly once has nothing anchoring
-    // that fact for a later booking in the same conversation: the next call
-    // re-derives him from scratch, and with no internal-domain match possible
-    // for an external, the model just typed a fresh guess each time (a
-    // plausible-looking wrong domain, then an outright example.com
-    // placeholder — a real, live incident, not a hypothetical). A fresh
-    // model-supplied address with a name runs the same whole-name-matched,
-    // ambiguity-refusing check internal colleagues already get — a confident
-    // directory match wins over whatever the model typed; only when nothing
-    // matches does the model-supplied (or now-resolved) email stand. A
-    // genuinely new/unknown external is unaffected: no match, no override.
-    //
-    // On a live turn the exception is decided by
-    // emailStatedByHuman above — an address a human actually typed in this
-    // conversation outranks the stored row (stale-email correction; new
-    // same-named external). A model-fabricated address never appears in
-    // human text, so it still loses to the directory. Same tie-break as the
-    // write path (createMeeting.ts) so plan and write can't disagree (M1).
+    // Match the send path: the approved roster or the human's exact address
+    // survives a namesake. A missing address may be filled by a unique lookup.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { resolveAttendeeEmail } = require('../../memory/resolveAttendeeEmails') as
       typeof import('../../memory/resolveAttendeeEmails');
@@ -313,13 +289,10 @@ async function buildParticipants(
               name, stated: email, directory: resolved.email,
             });
           } else {
-            // Queryable trail (M18): every directory override of a model-typed
-            // email is visible in the logs — this is exactly the signal that
-            // would have surfaced the incident on booking #2 instead of #3.
-            logger.info('buildParticipants — directory match overrode the model-supplied email', {
-              name, supplied: email, resolved: resolved.email,
-            });
-            email = resolved.email;
+            // Keep the named participant unresolved. Planning must never
+            // turn an address conflict into a different person's invitation.
+            email = '';
+
           }
         } else {
           email = resolved.email;

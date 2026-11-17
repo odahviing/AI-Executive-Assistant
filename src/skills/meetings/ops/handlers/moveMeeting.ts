@@ -956,6 +956,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { resolveAttendeeEmail } = require('../../../../memory/resolveAttendeeEmails') as
             typeof import('../../../../memory/resolveAttendeeEmails');
+          const conflictingNames: string[] = [];
           const addList = rawAdd
             .map(a => {
               // jim-douglass-fabricated-email-across-repeat-bookings (2026-08-30) —
@@ -987,17 +988,14 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
                     `${a.name ?? supplied} is invited at ${supplied} (the address stated in this conversation). The directory has a different address on file (${resolved.email}) — if that stored address is stale, say so and it should be corrected.`,
                   );
                 } else {
-                  logger.info('update_meeting add_attendees — directory match overrode the model-supplied email', {
-                    name: a.name, supplied, resolved: resolved.email,
-                  });
-                  attendeeEmailNotes.push(
-                    `${a.name ?? resolved.email} is invited at ${resolved.email} (the address on file), NOT at ${supplied}. If ${supplied} is actually the right address, the requester must state it explicitly and the invite will be corrected.`,
-                  );
+                  conflictingNames.push(a.name ?? supplied);
                 }
               }
               return { name: resolved.name, email, optional: a.optional === true };
             })
             .filter(a => a.email.includes('@'));
+          if (conflictingNames.length) return { success: false, error: 'attendee_address_conflict', attendees: conflictingNames,
+            message: 'The proposed address and the directory identify different inboxes. Ask which address to invite before changing the event.' };
           resolvedAddedEmails = [...new Set(addList.map(a => a.email))];
           const removeList = rawRemove
             .map(e => (e ?? '').trim().toLowerCase())
@@ -1859,7 +1857,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
               return {
                 success: false,
                 error: 'not_your_meeting',
-                message: `That's not a meeting you're in or one you set up, so I can't move it for you — best to ask ${ownerFirst} directly.`,
+                message: 'I can move a meeting you attend or arranged. If you meant another invitation, share its title and date so I can find it.',
               };
             }
             logger.info('move_meeting — asker is the requester (not an attendee) → escalate to owner approval', {

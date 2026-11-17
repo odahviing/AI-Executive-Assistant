@@ -187,7 +187,11 @@ function bindHoldSelection(proposed: unknown, candidates: HoldCandidate[], offer
     || typeof selectedDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(selectedDate)
     || typeof timeZone !== 'string' || !timeZone.trim() || typeof offerZoneQuote !== 'string'
     || !offer.includes(offerZoneQuote)) return;
-  const displayed = clocks(offer);
+  // A delivered numeric interval offers its start. Its end may itself be a
+  // start from the search pool which the assistant never offered.
+  const intervals = Array.from(offer.matchAll(/(?<![\d:])([01]?\d|2[0-3]):([0-5]\d)(?![\d:])(?:\s*[-–—]\s*([01]?\d|2[0-3]):([0-5]\d)(?![\d:]))?/g),
+    m => ({ start: m[1].padStart(2, '0') + ':' + m[2], end: m[3] && m[3].padStart(2, '0') + ':' + m[4] }));
+  const displayed = intervals.map(interval => interval.start);
   if (!displayed.includes(offeredClock)) return;
   const numericQuote = /^\p{Nd}+$/u.test(selectionQuote) ? ordinalNumbers(selectionQuote)[0] : undefined;
   const selectedClauses = actionClauses.filter(clause => clause.includes(selectionQuote)
@@ -203,6 +207,14 @@ function bindHoldSelection(proposed: unknown, candidates: HoldCandidate[], offer
   const selected = candidates[candidateIndex];
   if (matches.length !== 1 || matches[0] !== candidateIndex || !(Date.parse(selected.endIso) > Date.parse(selected.startIso))
     || !labels[candidateIndex].some(form => form.endsWith(`${selectedDate} ${offeredClock} [${timeZone}]`))) return;
+  const displayedEnds = intervals.filter(interval => interval.start === offeredClock && interval.end);
+  if (displayedEnds.length) {
+    try {
+      const end = new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+        .format(Date.parse(selected.endIso));
+      if (displayedEnds.some(interval => interval.end !== end)) return;
+    } catch { return; }
+  }
   const zoneContext = actionClauses.filter(clause => clause === selectionClause || clocks(clause).length === 0).join(' ');
   if (!zonesMatchInstant(zoneContext, selected.startIso, selectedDate, offeredClock)) return;
   // An explicit date/time pair binds this clock's day. A separate reply
@@ -266,6 +278,20 @@ function bindHoldSelections(input: unknown, candidates: HoldCandidate[], offer: 
   const { selections, mode, listLocale = 'en', incidentalNumberClauses = [] } = input as Record<string, unknown>;
   if (!Array.isArray(selections) || !selections.length || selections.length > candidates.length
     || !['single', 'each', 'all_offered'].includes(String(mode)) || (mode === 'single') !== (selections.length === 1)) return;
+  // An ordinal is evidence in the delivered order even when the model
+  // omitted its redundant numeric position. Reject conflicting word choices.
+  if (mode === 'single' && selections.length === 1 && typeof selections[0]?.selectionQuote === 'string') {
+    const ranks = [['first', 'ראשון', 'ראשונה'], ['second', 'שני', 'שנייה'], ['third', 'שלישי', 'שלישית']];
+    const words = (value: string) => value.toLowerCase().match(/\p{L}+/gu) ?? [];
+    const rank = (word: string) => ranks.findIndex(group => group.includes(word)
+      || (word.startsWith('ה') && group.includes(word.slice(1)))) + 1;
+    const mentioned = words(message).map(rank).filter(Boolean);
+    const quoted = words(selections[0].selectionQuote).map(rank).filter(Boolean);
+    if (mentioned.length === 1 && quoted.length === 1 && !clocks(message).length) {
+      if (selections[0].position !== undefined && selections[0].position !== quoted[0]) return;
+      selections[0] = { ...selections[0], position: quoted[0] };
+    }
+  }
   const selected = new Set<number>(), quotes = new Set<string>();
   const positions = new Set<number>(mode === 'all_offered' ? [selections.length] : selections.map(slot => slot?.position));
   const clauses = message.split(/[\p{Sentence_Terminal};；\r\n]+/u).map(clause => clause.trim()).filter(Boolean);

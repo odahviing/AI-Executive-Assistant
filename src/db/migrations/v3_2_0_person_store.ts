@@ -105,6 +105,9 @@ export function runPersonStoreMigration(db: Database.Database, dbPath: string): 
         name                TEXT NOT NULL,
         name_he             TEXT,
         name_he_set_by      TEXT,
+        name_set_by TEXT,
+        email_set_by TEXT,
+        timezone_temp TEXT,
         timezone            TEXT,
         gender              TEXT NOT NULL DEFAULT 'unknown',
         gender_confirmed    INTEGER NOT NULL DEFAULT 0,
@@ -139,7 +142,7 @@ export function runPersonStoreMigration(db: Database.Database, dbPath: string): 
     const insert = db.prepare(`
       INSERT INTO people_memory_new (
         person_id, slack_id, email, kind, org, source,
-        name, name_he, name_he_set_by, timezone, gender, gender_confirmed,
+        name, name_he, name_he_set_by, name_set_by, email_set_by, timezone_temp, timezone, gender, gender_confirmed,
         notes, interaction_log, profile_json,
         state, state_set_by, timezone_set_by, gender_set_by, working_hours_auto,
         engagement_rank, last_seen, last_social_at, last_initiated_at,
@@ -147,7 +150,7 @@ export function runPersonStoreMigration(db: Database.Database, dbPath: string): 
         created_at, updated_at
       ) VALUES (
         @person_id, @slack_id, @email, @kind, @org, @source,
-        @name, @name_he, @name_he_set_by, @timezone, @gender, @gender_confirmed,
+        @name, @name_he, @name_he_set_by, @name_set_by, @email_set_by, @timezone_temp, @timezone, @gender, @gender_confirmed,
         @notes, @interaction_log, @profile_json,
         @state, @state_set_by, @timezone_set_by, @gender_set_by, @working_hours_auto,
         @engagement_rank, @last_seen, @last_social_at, @last_initiated_at,
@@ -169,6 +172,9 @@ export function runPersonStoreMigration(db: Database.Database, dbPath: string): 
         name:                r.name ?? '',
         name_he:             r.name_he ?? null,
         name_he_set_by:      r.name_he_set_by ?? null,
+        name_set_by: r.name_set_by ?? null,
+        email_set_by: r.email_set_by ?? null,
+        timezone_temp: r.timezone_temp ?? null,
         timezone:            r.timezone ?? null,
         gender:              r.gender ?? 'unknown',
         gender_confirmed:    r.gender_confirmed ?? 0,

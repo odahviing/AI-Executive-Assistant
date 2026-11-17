@@ -66,7 +66,7 @@ export function resolveAttendeeEmail(input: AttendeeContactInput): ResolvedAtten
       // plausible name in the narration. One matching rule for the whole file.
       const query = name;   // const so the closure below narrows off `let name`
       const genuine = searchPeopleMemory(query).filter(m =>
-        m.email && m.email.includes('@') && nameGenuinelyMatches(m.name, m.email, query),
+        m.email && m.email.includes('@') && (nameGenuinelyMatches(m.name, m.email, query) || nameGenuinelyMatches(m.name_he ?? undefined, undefined, query)),
       );
       // Collapse duplicate ROWS for one human (a calendar-sourced email-only row
       // plus the later Slack row share an address) before the ambiguity test —
@@ -178,7 +178,7 @@ export function resolveNamedInternalAttendees(params: {
       // The owner himself (named as the meeting subject, e.g. "meeting with
       // Idan and Simon") is the search base — never an attendee, never external.
       if (ownerName && nameGenuinelyMatches(ownerName, ownerEmail, name)) continue;
-      let matches: Array<{ name?: string; email?: string }>;
+      let matches: Array<{ name?: string; name_he?: string | null; email?: string }>;
       try {
         matches = searchPeopleMemory(name) ?? [];
       } catch {
@@ -189,7 +189,7 @@ export function resolveNamedInternalAttendees(params: {
       // whole-name match (not a loose LIKE substring — no Lori→Gloria binds).
       const internal = matches.filter(m =>
         m.email && m.email.includes('@') && m.email.toLowerCase().endsWith('@' + ownerDomain)
-        && nameGenuinelyMatches(m.name, m.email, name),
+        && (nameGenuinelyMatches(m.name, m.email, name) || nameGenuinelyMatches(m.name_he ?? undefined, undefined, name)),
       );
       // Collapse duplicate rows for the SAME person before the ambiguity test.
       // Legacy data can still hold duplicate rows for one human — a

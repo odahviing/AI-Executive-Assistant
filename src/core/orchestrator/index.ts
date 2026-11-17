@@ -496,49 +496,13 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       throw new Error(`Required first tool ${input.forceToolOnFirstTurn.name} was not returned completely; no tools executed.`);
     }
 
-    // v2.9.4 follow-up — ALWAYS capture text from this iteration into
-    // finalReply, regardless of whether tool calls also fired. Pre-fix
-    // (v2.2.4) only captured text on the FINAL iteration (toolBlocks empty),
-    // so when Sonnet emitted natural conversational text alongside a tool
-    // call in iteration N, the text was silently dropped — the next
-    // iteration would `end_turn` with no text (because Sonnet had already
-    // "said it" in iteration N from her POV), finalReply stayed empty, and
-    // the verbMap fallback fired "Done, handled a few things". Root of the
-    // 2026-05-20 note_about_self silent-after-teach class.
-    //
-    // Behavior: most-recent non-empty iteration wins (later iterations
-    // overwrite earlier — natural since text further along is more current).
-    // If the final iteration produces no text, finalReply keeps the most
-    // recent earlier text.
-    //
-    // v2.2.4's original concern (deliberation chain leakage —
-    // "Actually wait —", "Let me think.") is mitigated by:
-    //   (a) the existing base-prompt rule "NO INTERNAL DELIBERATION IN
-    //       OUTPUT TEXT" stops Sonnet from emitting deliberation blocks
-    //       in the first place
-    //   (b) we still take only the LAST text block from each iteration
-    //       (within-iteration deliberation still gets dropped)
-    //   (c) later iterations naturally overwrite earlier
-    // Net trade-off: previously every iter-N-with-tool text was dropped
-    // (broke owner's chat). Now occasionally a deliberation block from an
-    // early iter could leak if Sonnet doesn't follow with later text.
-    // Strictly better failure mode.
+    // Deliver the complete final answer, including questions in earlier text blocks.
+    // Intermediate tool narration is a fallback for a later empty model turn.
     const textBlocks = response.content.filter(b => b.type === 'text') as Anthropic.TextBlock[];
-    const lastTextBlock = textBlocks[textBlocks.length - 1];
-    if (lastTextBlock && lastTextBlock.text.trim().length > 0) {
-      finalReply = lastTextBlock.text.trim();
-    }
-    if (textBlocks.length > 1) {
-      logger.warn('Sonnet emitted multiple text blocks — kept last only', {
-        iteration,
-        blocks: textBlocks.length,
-        droppedPreview: textBlocks
-          .slice(0, -1)
-          .map(b => b.text.slice(0, 80).replace(/\s+/g, ' '))
-          .join(' | ')
-          .slice(0, 400),
-      });
-    }
+    const lastTextBlock = textBlocks.at(-1);
+    const visibleText = toolBlocks.length ? lastTextBlock?.text.trim()
+      : textBlocks.map(block => block.text.trim()).filter(Boolean).join('\n\n');
+    if (visibleText) finalReply = visibleText;
 
     // v3.5.x (#1.3) — diagnostic for the truncated-reply class (the "Now the
     // private block:" cut-off, 2026-06-24): when the model hits the output cap
@@ -1173,6 +1137,9 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         }
       }
 
+      if (result && typeof result === 'object' && 'error' in result && result.error === 'attendee_address_conflict') {
+        for (const tool of ['create_meeting','update_meeting','move_meeting','create_approval']) blockedWriteTools?.add(tool);
+      }
       toolResults.push({
         type: 'tool_result',
         tool_use_id: toolUse.id,

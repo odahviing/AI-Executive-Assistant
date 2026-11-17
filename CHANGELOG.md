@@ -1,3 +1,12 @@
+## 5.4.6 — Preserve scheduling questions, invite addresses and selected holds
+
+- Deliver the full final response when the model splits it into text blocks, including a question preceding a booking summary.
+- Ask for clarification when a proposed invite address conflicts with the directory. Keep the exact address supplied by the requester or approved by the owner.
+- Preserve contact provenance and temporary time zones when rebuilding the people table so an approved booking can read its participants.
+- Recognize verified native-script names in the contact directory.
+- Match a hold to the interval actually shown, including a request for the first option. Check the holder’s identity before releasing it.
+- For a rejected time, offer up to two nearby alternatives and keep shared calendar searches within the requester’s view.
+
 ## 5.4.5 — Hold the selected meeting time and receive Slack broadcast replies
 
 When a colleague asks Maelle to hold a time she offered in Slack, she can reserve the selected interval internally. An explicit request to send a calendar invitation is a separate action.

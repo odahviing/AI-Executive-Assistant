@@ -316,6 +316,12 @@ export async function blockedSlotAlternativesBlock(params: {
     return none;
   }
 
+  // A counterproposal to a specific time is different from a request for
+  // an availability list. Prefer the requested day, and keep the reserve
+  // choices the assistant can bind to the ones it has actually presented.
+  const singleDay = new Set(verdicts.map(v => v.date)).size === 1;
+  const onAnchorDays = singleDay ? result.onAnchorDays.slice(0,2) : result.onAnchorDays;
+  const beyond = !singleDay ? result.beyond : onAnchorDays.length ? [] : result.beyond.slice(0,2);
   // These times are about to be said aloud, so a pick from either list has to
   // bind to its exact instant on the next turn. ONE recorder, shared with
   // planMeeting's propose_alternative — including its deliberate omission of
@@ -328,14 +334,14 @@ export async function blockedSlotAlternativesBlock(params: {
     channelId: params.channelId,
     threadTs: params.threadTs,
     timezone: profile.user.timezone,
-    alternatives: result.onAnchorDays,
-    widenedAlternatives: result.beyond,
+    alternatives: onAnchorDays,
+    widenedAlternatives: beyond,
   });
 
   logger.info('blockedSlotAlternativesBlock — injected alternatives for an all-blocked point-check', {
     tested: verdicts.length,
-    onAnchorDays: result.onAnchorDays.length,
-    beyond: result.beyond.length,
+    onAnchorDays: onAnchorDays.length,
+    beyond: beyond.length,
   });
 
   const ownerFirst = profile.user.name.split(' ')[0];
@@ -346,9 +352,9 @@ export async function blockedSlotAlternativesBlock(params: {
   const line = (a: NearbyAlternative): string =>
     `  - ${a.label}${a.overOptional ? ' — take this one only if the others do not work' : ''}`;
   const sections = [
-    result.onAnchorDays.length > 0 ? result.onAnchorDays.map(line).join('\n') : '',
-    result.beyond.length > 0
-      ? `  Further out, if none of the above suit:\n${result.beyond.map(line).join('\n')}`
+    onAnchorDays.length > 0 ? onAnchorDays.map(line).join('\n') : '',
+    beyond.length > 0
+      ? `  Further out, if none of the above suit:\n${beyond.map(line).join('\n')}`
       : '',
   ].filter(Boolean);
 
@@ -358,8 +364,8 @@ Not one of the times I checked above came back bookable, so I ran the real searc
 
 ${sections.join('\n')}
 
-OFFER THESE TIMES IN THIS REPLY. Do NOT ask whether to go and look for other options — the looking is already done, and asking spends a round on an answer that is always yes. Quote each time exactly as written above; do not re-derive, re-word or convert it.
+Use these verified times when a counterproposal helps. For a direct question about approval or a hold, give its status. For a booking needing the owner’s decision, take that step. For a flexible request, offer the nearest useful alternative. Keep each clock in its labelled time zone.
 What to do about the times that did NOT work is decided by their OWN lines above, one by one — follow each line, including where it tells you the time is ${ownerFirst}'s to override and to raise it for his decision if they want that exact slot. This list changes none of that; it only means you are never left with nothing to offer.
 Never state or imply a COUNT of what did not work ("none of your three", "all of them are booked", "your whole week"): the lines above cover the times I TESTED, which is not necessarily every time mentioned in this thread.`;
-  return { block, alternatives: [...result.onAnchorDays, ...result.beyond] };
+  return { block, alternatives: [...onAnchorDays, ...beyond] };
 }

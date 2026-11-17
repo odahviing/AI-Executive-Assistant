@@ -347,6 +347,13 @@ function attendeeCheckSource(toolName: string, result: unknown): 'slots' | 'note
 
 function summarizeToolCall(toolName: string, input: Record<string, unknown>, result: unknown, ownerTz: string): string {
   let summary = renderToolSummary(toolName, input, result, ownerTz);
+  if (toolName === 'hold_slot' && result && typeof result === 'object') {
+    const hold = result as Record<string,unknown>;
+    if (hold.success === true && typeof hold.hold_id === 'string' && typeof hold.start_iso === 'string'
+      && typeof hold.end_iso === 'string' && typeof hold.expires_at === 'string') {
+      summary = '[hold_slot OK reserved=' + hold.start_iso + ' until=' + hold.end_iso + ' expires=' + hold.expires_at + ' invitation_sent=false]';
+    }
+  }
   // Decision/action completion and requester delivery are independent facts.
   // Carry every receipt, including failed/early-return and per-event results;
   // never infer delivery from ok, a closed decision, or requester_notified.

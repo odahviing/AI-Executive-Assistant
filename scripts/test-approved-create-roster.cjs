@@ -89,8 +89,8 @@ function harness({ ambiguous = false, postFails = false } = {}) {
   });
   const preflight = compile('module.exports = function(rawAttendees,context){const attendees=rawAttendees;\n'+
     approvedRosterGuard+'\n};', {}, {});
-  const run = compile('module.exports = async function(args,context){const attendees=args.attendees; const attendeeEmailNotes=[];\n' +
-    resolveBlock.getText() + '\n' + missingBlock.getText() + '\nconst roomEmail=context.profile.meetings?.room_email;\n' + requestedRoom.getText() + '\nreturn ' + writeCall.getText() + ';};',
+  const run = compile('module.exports = async function(args,context){const attendees=args.attendees; const attendeeEmailNotes=[]; const addressConflicts=[];\n' +
+    resolveBlock.getText() + '\n' + one(handler, n => ts.isIfStatement(n) && n.expression.getText() === 'addressConflicts.length').getText() + '\n' + missingBlock.getText() + '\nconst roomEmail=context.profile.meetings?.room_email;\n' + requestedRoom.getText() + '\nreturn ' + writeCall.getText() + ';};',
     { logger, createMeeting: graph.createMeeting, HANDLER_ERROR_CODE: { ATTENDEE_MISSING_EMAIL: 'attendee_missing_email' },
       timezone: 'UTC', userEmail: profile.user.email, skipLocationField: true, resolvedLocationParts: [], effectiveIsOnline: true },
     { '../../../../memory/resolveAttendeeEmails': contact, '../../bookingRequest': plan,
@@ -141,11 +141,13 @@ test('human-stated-current-address-and-history-win', async () => {
     conversationHistory: [{ role: 'user', content: 'tal@gmail.test' }] });
   assert.deepEqual(h.posts, [allEmails]); assert.deepEqual(h.plans(), allEmails);
 });
-test('directory-corrects-untrusted-model-and-assistant-addresses', async () => {
+test('conflicting model or assistant addresses require confirmation before sending', async () => {
   const h = harness();
-  await h.ordinary(roster, { conversationHistory: [{ role: 'assistant', content: allEmails.join(' ') }] },
+  const outcome = await h.ordinary(roster, { conversationHistory: [{ role: 'assistant', content: allEmails.join(' ') }] },
     { approvedBookingAttendeeEmails: allEmails, _fulfilling_request_id: 'req_untrusted' });
-  const expected = Object.values(named); assert.deepEqual(h.posts, [expected]); assert.deepEqual(h.plans(), expected);
+  assert.equal(outcome.result.error, 'attendee_address_conflict');
+  assert.deepEqual(plain(outcome.result.attendees).map(a => a.name), ['Alex', 'Tal']);
+  assert.deepEqual(h.posts, []);
 });
 test('approved-unknown-external-and-directory-agreement', async () => {
   const h = harness(); const rows = [{ name: 'New person', email: 'new@outside.test' }, roster[2]];
