@@ -213,7 +213,7 @@ export function pendingApprovalNotice(message: string, owner: string, action: 'c
  * rewrite had this carve-out hand-typed inline while the owner-fact path,
  * where it fired, had none.
  */
-const SEARCH_SCOPE = 'For a selection=non_exhaustive search, distinguish “the only option returned” from “the only possible time”. Flag a claim of exclusive feasibility based solely on that selection, even when the offered clock matches. Preserve the returned option, any conflicts and the request for permission. strict=0; relaxed_recovery means no strict slot was found and the returned options are conditional. A proposal that states those conditions and describes the only option returned is grounded.';
+const SEARCH_SCOPE = 'For a selection=non_exhaustive search, distinguish “the only option returned” from “the only possible time”. Flag a claim of exclusive feasibility based solely on that selection, even when the offered clock matches. Preserve the returned option, any conflicts and the request for permission. strict=0; relaxed_recovery means no strict slot was found and the returned options are conditional. A proposal that states those conditions and describes the only option returned is grounded. Availability is person-specific. availability_precheck checks the owner. owner_available=true confirms the owner’s availability even when a joint candidate is unavailable because an attendee is busy. Reporting the owner free and the named attendee busy accurately preserves both results. An annotated attendee conflict can be offered for the booker’s decision. “Both are free at these times” describes those returned times and does not claim exclusivity.';
 
 const NO_TZ_ARITHMETIC = 'Never compute a timezone conversion yourself. Where a tool line carries a pre-rendered local string (`[local: Wed 16 Sep 10:00 EDT]`), match the draft\'s time against that TEXT; where it carries none, the conversion cannot be judged here — treat the draft\'s time as consistent with the line and do not flag it.';
 
@@ -403,6 +403,7 @@ export interface ClaimCheckInput {
   };
   /** Minimal request-specific decision/action receipts for the final text. */
   finalOutcomeContext?: string;
+  availabilityAudience?: { owner:string; reader:string; readerEmail?:string };
   // v2.3.2 (2B) — second mode. Default 'action' = existing behavior (false
   // action claims). 'coda' = check a generated social coda for invented facts
   // or gossipy commentary about a third party. Same JSON shape; caller checks
@@ -743,6 +744,7 @@ Reminder: JSON only. Start with { end with }. No prose.`
     ? `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
 
 You audit a draft reply an executive assistant is about to send. Check whether the specific offered time, availability verdict and any exclusivity claim are supported by the real search.
+AUDIENCE: ${JSON.stringify(input.availabilityAudience ?? {owner:input.ownerFirstName})}. “You” refers to the reader. Keep the calendar owner and the reader’s calendar distinct.
 
 REAL AVAILABILITY RESULTS (find_available_slots / check_join_availability / availability_precheck — this turn's lines first; a line marked \`(earlier turn)\` is a real search from earlier in this thread, and a time it lists as available is STILL GROUNDED now):
 ${input.slotGroundingContext.groundedToolLines.map(l => `  ${l}`).join('\n')}
@@ -1169,6 +1171,7 @@ export async function rewriteOwningTheMiss(opts: {
   // of the colleague-facing "confirm it with him directly" default.
   isOwnerAudience?: boolean;
   deletionOnly?: boolean;
+  availabilityAudience?: { owner:string; reader:string; readerEmail?:string };
 }): Promise<string | null> {
   const isDeniedCalendarRead = opts.actionType === 'denied_calendar_read';
   const isInventedOwnerFact = opts.actionType === 'invented_fact';
@@ -1226,6 +1229,7 @@ export async function rewriteOwningTheMiss(opts: {
     : '';
 
   const slotClaimPrompt = isUngroundedSlotClaim ? `You are reviewing a message an assistant already drafted. An upstream checker flagged the draft for an unsupported time, availability verdict or claim of exclusivity — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the real search result yourself before acting. Report your decision by calling the \`verdict\` tool exactly once — do not write any prose outside the tool call.
+AUDIENCE: ${JSON.stringify(opts.availabilityAudience ?? {owner:opts.ownerFirstName,reader:opts.isOwnerAudience ? opts.ownerFirstName : 'a colleague'})}. “You” refers to the reader. Preserve who each calendar statement concerns.
 
 REAL AVAILABILITY RESULTS (this turn's, plus any \`(earlier turn)\` search from this thread — the ONLY times/verdicts actually confirmed; settled, do not re-judge):
 ${groundedSlotBlock}

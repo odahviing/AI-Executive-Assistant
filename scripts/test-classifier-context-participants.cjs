@@ -428,7 +428,9 @@ for (const message of ['Sí', 'Да', 'Ja', 'نعم', 'Yes, please.']) {
     const {result,captured,calls} = await run(acceptance(message),{...currentBooking,message});
     assert.equal(calls,1);
     assert.equal(result.standaloneApprovalQuote,message);
-    assert.equal(captured.tools[0].input_schema.properties.standalone_approval_quote.type,'string');
+    assert.deepEqual(Array.from(captured.tools[0].input_schema.properties.standalone_approval_quote.type),['string','null']);
+    assert.ok(captured.tools[0].input_schema.required.includes('standalone_approval_quote'));
+    assert.ok(captured.tools[0].input_schema.required.includes('meeting_action'));
     assert.equal(result.standaloneCourtesy,false);
     assert.deepEqual(result.approvalDecisions,[]);
   });
@@ -526,4 +528,23 @@ for(const patch of [{group:1},{from:'Other'},{to:'Alex'},{quote:'not in message'
   const {result}=await run({meeting_action:'execute',participant_corrections:[correction]},
     {message:'2. Ayala is better',priorMeetingRequest:{participantGroups:[['Ayalla','Idan'],['Alex','Idan']]}});
   assert.deepEqual(result.participantCorrections,[]);
+});
+test('directory spellings include a literal participant of the continuing request', async () => {
+  const {result,captured}=await run({meeting_action:'explore',directory_spellings:[{name:'סימון',spelling:'Simon'}]},
+    {message:'Thursday please',priorMeetingRequest:{original:'פגישה עם סימון',updates:[],participantGroups:[['סימון']]}});
+  assert.deepEqual(result.directorySpellings,[{name:'סימון',spelling:'Simon'}]);
+  assert.ok(captured.tools[0].input_schema.required.includes('directory_spellings'));
+});
+test('explicit source clock is normalized without a timezone conversion', async () => {
+  const clock={clock:'19:00',zone:'Asia/Jerusalem',quote:'Book at 7pm Israel time'};
+  const {result}=await run({meeting_action:'execute',exact_request_clock:clock},{message:clock.quote});
+  assert.deepEqual(result.exactRequestClock,clock);
+});
+for (const clock of [
+  {clock:'19:00',zone:'Asia/Jerusalem',quote:'Different message'},
+  {clock:'25:00',zone:'Asia/Jerusalem',quote:'Book at 7pm Israel time'},
+  {clock:'19:00',zone:'Invalid/Zone',quote:'Book at 7pm Israel time'},
+]) test('ungrounded exact clock is discarded '+JSON.stringify(clock), async () => {
+  const {result}=await run({meeting_action:'execute',exact_request_clock:clock},{message:'Book at 7pm Israel time'});
+  assert.equal(result.exactRequestClock,undefined);
 });

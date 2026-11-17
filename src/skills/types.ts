@@ -104,6 +104,8 @@ export interface SkillContext {
   requestDurationMinutes?: number;
   requiredMeetingDay?: {date:string; zone:string; quote:string};
   requestZone?: string;
+  /** Explicit current human start clock, extracted independently of tool arguments. */
+  exactRequestClock?: {clock:string; zone:string; quote:string};
   requestedSearchWindow?: RequestedSearchWindow;
   /** Turn-level ban on incidental calendar mutations, including during availability reads. */
   calendarReadOnly?: boolean;

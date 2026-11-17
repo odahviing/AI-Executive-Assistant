@@ -21,6 +21,18 @@ test('regression exact target receipt required despite false classifier flag',as
 test('regression multilingual instructions and bounded deletion use actual checker',async()=>{const h=harness();await h.gates.__fact(ctx(),draft);const prompt=h.calls[0].messages[0].content;assert.ok(prompt.includes('ANY language'));for(const p of ['later outage','unknown/external','different date/window','disputing suggested times'])assert.ok(prompt.includes(p));});
 test('preserved owner private does not invoke colleague fact mode',async()=>{const h=harness({keep:true});assert.equal(await h.gates.runOutputGates(draft,ctx({senderId:'UOWNER',role:'owner',channelId:'DOWNER'})),draft);assert.ok(!h.calls.some(c=>c.messages[0].content.includes('Additional class:')));});
 for(const [id,status] of [['read','free'],['outage','unknown']])test('preserved producer '+id+' summary carries only confirmed calendars',()=>{const line=turn.summarizeToolCall('find_available_slots',{duration_minutes:15},{slots:[{start:'2026-09-14T10:00:00+03:00',end:'2026-09-14T10:15:00+03:00',attendee_status:[{email:'levana.b@example.com',status}]}]},'Asia/Jerusalem');assert.equal(line.includes('calendars_read=levana.b@example.com'),status==='free');});
+test('owner decision candidates retain checked attendees and their individual conflicts', () => {
+ const summary = turn.summarizeToolCall('find_available_slots', {duration_minutes:25}, {
+  slots: [], owner_approval_candidates: [{start:'2026-10-19T13:30:00+03:00', end:'2026-10-19T13:55:00+03:00',
+   attendee_status:[{email:'einav@example.com',status:'free'},{email:'requester@example.com',status:'busy'},{email:'external@example.com',status:'unknown'}],
+   attendee_conflicts:[{email:'requester@example.com',reason:'busy',assumed:false}]}],
+ }, 'Asia/Jerusalem');
+ assert.ok(summary.includes('owner_decision_required (unapproved)'));
+ assert.ok(summary.includes('attendee_status=einav@example.com:free+requester@example.com:busy+external@example.com:unknown'));
+ assert.ok(summary.includes('attendee_conflicts=requester@example.com:busy'));
+ assert.ok(summary.includes('calendars_read=einav@example.com+requester@example.com'));
+ assert.ok(!summary.includes('calendars_read=external@example.com'));
+});
 for(const [lang,whole,remaining] of [['Hebrew','את צודקת. לא יכולתי לקרוא את הלוח של לבנה בחיפוש ההוא.','את צודקת.'],['Russian','Вы правы. Я не смогла прочитать календарь Леваны в том поиске.','Вы правы.'],['Spanish','Tienes razón. No pude consultar el calendario de Levana en esa búsqueda.','Tienes razón.']])test('regression '+lang+' controlled verdict deletes only clause',async()=>{const h=harness({rewrite:{verdict:'rewrite',minimalRedaction:remaining,minimalRedactionPreservesRest:true}});assert.equal(await h.gates.__fact(ctx(),whole),remaining);});
 for(const [id,text] of [['current-outage','I read Levana’s calendar earlier, but I cannot access it now.'],['different-window','I could not confirm Levana’s calendar for next month.'],['disputed-slot','Those times still do not work for Levana.'],['external','I could not check the external attendee’s calendar.']])test('preserved false detector '+id+' existing veto keeps truthful reply',async()=>{const h=harness({verdict:{claimed_action:true,action_type:'denied_calendar_read',target_name:'levana.b@example.com',action_summary:'scripted false detector'},rewrite:{verdict:'keep'}});assert.equal(await h.gates.__fact(ctx(),text),text);assert.equal(h.calls.filter(c=>c.tools).length,1);});
 test('regression persisted history replay is read-only and repeatable',async()=>{const context=ctx(),saved=JSON.stringify(context);for(let i=0;i<2;i++){const h=harness();assert.equal(await h.gates.__fact(context,draft),clean);}assert.equal(JSON.stringify(context),saved);});

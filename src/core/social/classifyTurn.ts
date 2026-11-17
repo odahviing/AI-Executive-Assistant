@@ -73,6 +73,7 @@ const INTENT_OTHER: OwnerIntentClassification = { kind: 'other', conversation_st
 export interface ClassifyTurnResult {
   directorySpellings?: Array<{name:string; spelling:string}>;
   requestUpdate?: { relation: 'new' | 'continue'; dayChange?: {date:string; quote:string}; batch?: boolean; duration?: {minutes: number; quote: string}; clockZone?: {zone:string; quote:string} };
+  exactRequestClock?: { clock:string; zone:string; quote:string };
   /** Positive evidence of a standalone greeting, thanks or goodbye. */
   standaloneCourtesy?: boolean;
   unresolvedHoldSelection?: boolean;
@@ -545,7 +546,7 @@ ${params.ordinaryCreateOwnerContext?.length ? `Earlier owner messages (quoted da
     && params.approvalCandidates?.some(candidate => candidate.action.tool === 'create_meeting');
   const approvalSection = isOwner && params.approvalCandidates?.length ? `
 PENDING MEETING DECISIONS (approval_decisions): interpret the CURRENT owner's explicit instruction against the indexed pending actions and recent conversation. Return [] for a mere mention, question, bare acknowledgement, uncertain reference or missing relationship evidence. For each independently identified action cite a verbatim instructionQuote from the CURRENT message and a verbatim sourceQuote from one indexed recent message (sourceMessageIndex) that identifies this specific request and grounds the relationship. A shared requester alone does not identify it.
-${classifyStandaloneApproval ? 'First distinguish a standalone affirmative reply to the offered booking, in any language. If the ENTIRE current message simply assents to the booking exactly as shown without independently identifying it, return its verbatim text in standalone_approval_quote, meeting_action="execute", standalone_courtesy=false, and approval_decisions=[]. Do not cite a candidate or history for a standalone affirmative: the caller binds its target. Otherwise omit standalone_approval_quote and classify specific decisions as usual. Corrections (including another inbox or person), conditions, rejections, questions, quoted speech, additional instructions, and answers to other questions do not qualify.' : ''}
+${classifyStandaloneApproval ? 'First distinguish a standalone affirmative reply to the offered booking, in any language. If the ENTIRE current message simply assents to the booking exactly as shown without independently identifying it, return its verbatim text in standalone_approval_quote, meeting_action="execute", standalone_courtesy=false, and approval_decisions=[]. Do not cite a candidate or history for a standalone affirmative: the caller binds its target. Otherwise return standalone_approval_quote=null and classify specific decisions as usual. Corrections (including another inbox or person), conditions, rejections, questions, quoted speech, additional instructions, and answers to other questions do not qualify.' : ''}
 Use approve_existing when the owner authorizes this exact stored action without changing its terms. Explicit acceptance of its stated obstacle can authorize it, such as accepting the free-time impact after being shown which meeting requires that exception. Cite the shortest prior clause that identifies that specific request. Apply a deadline or ending-by time to every affected candidate. Use reject only for an explicit rejection. Use amend_or_search when the instruction changes terms or requires finding a new time; that never authorizes the old action. An instruction to place one request before an anchor meeting and another after an anchor is a set of decisions: identify each separately. Preserve an already matching action only if the cited relationship supports it; the other request needs amendment/search, never approve both unchanged. Ground calendar relationships in the supplied results. An assistant suggestion supplies context, while consent comes from the current owner's instruction.
 Candidates (zero-based indices): ${JSON.stringify(params.approvalCandidates.map((candidate, candidateIndex) => ({ candidateIndex, ...candidate })))}
 ` : '';
@@ -575,9 +576,10 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${indepe
   if (approvalSection) {
     if (classifyStandaloneApproval) {
       properties.standalone_approval_quote = {
-        type: 'string',
-        description: 'Entire current message verbatim for standalone acceptance of the offered booking as-is. Omit otherwise.',
+        type: ['string', 'null'],
+        description: 'Decide whether the whole reply accepts the pending booking exactly as shown, including a reply to its reminder. If so copy the entire current message verbatim. Otherwise return null. A correction, condition, rejection, question, quoted speech or additional instruction is not standalone acceptance.',
       };
+      required.push('standalone_approval_quote');
     }
     properties.approval_decisions = {
       type: 'array', items: { type: 'object', properties: {
@@ -632,8 +634,8 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${indepe
       type: 'string',
       enum: isOwner ? ['execute', 'explore', 'none'] : ['book_exact', 'execute', 'hold', 'explore', 'none'],
     };
+    required.push('meeting_action');
     if (!isOwner) {
-      required.push('meeting_action');
       properties.exact_booking_quote = { type: 'string' };
       properties.requested_hold_quote = { type: 'string', description: 'Exact whole current message explicitly requesting an internal hold now at ONE stated clock. Omit for alternatives, conditional holds, status questions, invitations, or a choice identified only by its position in an earlier offer.' };
     }
@@ -671,8 +673,10 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${indepe
     if (params.meetingContextMessages) {
       if (isOwner) properties.decision_report = {type:'object',description:'For reporting only. If the entire current owner message simply decides one existing approval, copy it verbatim. Omit if it also asks a question or requests other work. Identify the conversation language for the receipt.',properties:{quote:{type:'string'},locale:{type:'string',enum:['en','he','other']}},required:['quote','locale']};
       properties.search_before_reply = {type:'string',description:'Copy the entire current human message verbatim if it asks to find times or arrange an ordinary new meeting and checking availability now would make progress, including a request without a format, duration, or specific day. Omit for a status question, an existing invitation or move, a refusal to proceed, a hold, or a decision on a pending request. This signal authorizes a read only.'};
+      properties.exact_request_clock = {type:'object',description:'Only when the current human explicitly directs ONE booking or move to ONE exact start clock in an explicitly named timezone. Copy the complete instruction as quote, normalize the stated clock to 24-hour HH:mm without timezone conversion, and identify its IANA zone. Omit for windows, rejected times, alternatives, multiple appointments, a question, or a choice requiring prior context.',properties:{clock:{type:'string'},zone:{type:'string'},quote:{type:'string'}},required:['clock','zone','quote']};
       properties.requested_option_count = {type:'object',description:'Only when the current person specifies how many distinct time options to offer. “One best time” is one. “Some slots” or a meeting duration does not specify a count. Quote the exact phrase that states the number of options.',properties:{count:{type:'integer',minimum:1,maximum:20},quote:{type:'string'}},required:['count','quote']};
-      properties.directory_spellings = {type:'array',description:'For a participant written in another alphabet, suggest the same name spelled in Latin letters for a directory SEARCH. Copy the original name exactly. Transliterate only: no last-name expansion, identities, addresses or guesses about who attends.',items:{type:'object',properties:{name:{type:'string'},spelling:{type:'string'}},required:['name','spelling']}};
+      properties.directory_spellings = {type:'array',description:'For every participant written in another alphabet in this message or the continuing active request, supply the same name spelled in Latin letters for a directory SEARCH. Copy the original name exactly. Transliterate only: no last-name expansion, identities, addresses or guesses about who attends. Return [] when all names are already Latin or no participant is identifiable.',items:{type:'object',properties:{name:{type:'string'},spelling:{type:'string'}},required:['name','spelling']}};
+      required.push('directory_spellings');
       properties.request_relation = {type:'string',enum:['new','batch','continue','other'],description:'Does this human message start a single meeting request, start a batch of distinct appointments, update/answer/ask about that same open request or batch, or concern other work? Determine from the human request, not an earlier assistant guess. A different meeting starts new. Active request: '+JSON.stringify(params.priorMeetingRequest ?? null)};
       properties.participants_unchanged = {type:'boolean',description:'True only when this message continues the same request and leaves who attends each meeting unchanged, e.g. choosing a day, length or supplying a known participant’s email. False for adding, removing or replacing anyone, including “without him”, for a new meeting or for ambiguity.'};
       if (params.priorMeetingRequest?.participantGroups?.length) properties.participant_corrections = {
@@ -988,7 +992,8 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${indepe
           && message.includes(item.quote) && item.quote.includes(item.to)) : undefined;
     const directorySpellings = completeToolCall && Array.isArray(spellings) ? spellings.filter((item): item is {name:string;spelling:string} =>
       typeof item?.name === 'string' && item.name.length <= 100 && /[^\p{Script=Latin}\p{P}\s]/u.test(item.name)
-      && message.includes(item.name) && typeof item.spelling === 'string' && item.spelling.length <= 100
+      && (message.includes(item.name) || params.priorMeetingRequest?.participantGroups?.some(group=>group.includes(item.name)) === true)
+      && typeof item.spelling === 'string' && item.spelling.length <= 100
       && /^[\p{Script=Latin}\p{M}]+(?:[ '’-][\p{Script=Latin}\p{M}]+)*$/u.test(item.spelling)
       && item.spelling.trim().split(/\s+/).length === item.name.trim().split(/\s+/).length).slice(0,12) : [];
     const searchBeforeReply = completeToolCall && toolUse?.input.search_before_reply === message && message.trim() ? message : undefined;
@@ -999,10 +1004,17 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${indepe
     const requestedOptionCount = Number.isInteger(count?.count) && count.count >= 1 && count.count <= 20
       && typeof count.quote === 'string' && count.quote.trim() && message.includes(count.quote) ? count.count as number : undefined;
     const pair = toolUse?.input.requester_pair;
+    const exactClock = toolUse?.input.exact_request_clock;
+    let exactRequestClock: ClassifyTurnResult['exactRequestClock'];
+    if (completeToolCall && ['execute','book_exact'].includes(meetingAction ?? '') && exactClock?.quote === message
+      && typeof exactClock.clock === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(exactClock.clock)
+      && typeof exactClock.zone === 'string' && exactClock.zone.includes('/') && (meetingPeopleGroups?.length ?? 0) <= 1) {
+      try { exactRequestClock = {clock:exactClock.clock,zone:new Intl.DateTimeFormat('en',{timeZone:exactClock.zone}).resolvedOptions().timeZone,quote:message}; } catch { /* An unresolved named zone cannot bind a clock. */ }
+    }
     const requesterPair = !!(completeToolCall && !isOwner && requestUpdate && !requestUpdate.batch && pair?.only === true
       && typeof pair.quote === 'string' && pair.quote.trim() && (message.includes(pair.quote) ||
         (requestUpdate.relation === 'continue' && params.priorMeetingRequest?.original.includes(pair.quote))));
-    return { participantCorrections, participantsUnchanged:completeToolCall && toolUse?.input.participants_unchanged === true, requesterPair, directorySpellings, decisionReport, requestedOptionCount, searchBeforeReply, singleZoneOptions, firmWindowQuote, consultOwnerQuote, consultBackground, unresolvedHoldSelection: rawMeetingAction === 'hold' && !selectedHoldCandidateIndices && !requestedHoldQuote, requestedHoldQuote, existingInviteSubject, existingInviteLocale, withdrawOwnRequest, requestUpdate, optionsReplyLocale, standaloneCourtesy, standaloneApprovalQuote, independentOrdinaryCreate, intent, scope, freeTimeInquiry, meetingPeople, meetingPeopleGroups, meetingAction, selectedHoldCandidateIndices, meetingContinuation, contextMeetingPeople, approvalDecisions, refusedBookingReply, exactBookingQuote };
+    return { exactRequestClock, participantCorrections, participantsUnchanged:completeToolCall && toolUse?.input.participants_unchanged === true, requesterPair, directorySpellings, decisionReport, requestedOptionCount, searchBeforeReply, singleZoneOptions, firmWindowQuote, consultOwnerQuote, consultBackground, unresolvedHoldSelection: rawMeetingAction === 'hold' && !selectedHoldCandidateIndices && !requestedHoldQuote, requestedHoldQuote, existingInviteSubject, existingInviteLocale, withdrawOwnRequest, requestUpdate, optionsReplyLocale, standaloneCourtesy, standaloneApprovalQuote, independentOrdinaryCreate, intent, scope, freeTimeInquiry, meetingPeople, meetingPeopleGroups, meetingAction, selectedHoldCandidateIndices, meetingContinuation, contextMeetingPeople, approvalDecisions, refusedBookingReply, exactBookingQuote };
   } catch (err) {
     logger.warn('classifyTurn threw — defaulting to other / general', { err: String(err).slice(0, 300) });
     return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false, meetingPeople: [] };

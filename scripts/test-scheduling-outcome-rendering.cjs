@@ -27,6 +27,36 @@ const evidence = [{ tool: 'find_available_slots', slots: [
 ] }];
 const { options } = rendering.schedulingOptions(evidence, 'America/New_York', false);
 
+function compose(content, readTools = []) {
+  const composer = load('src/core/orchestrator/composeSchedulingOutcome.ts', {
+    luxon: require('luxon'), '../../llm/models': require('./load-test-models.cjs'),
+    './turnHelpers': {callClaude: async () => ({stop_reason:'tool_use',content})},
+    './schedulingOptions': rendering,
+    '../../db/slotHolds': {MAX_HOLDS_PER_HOLDER:3,MAX_HOLDS_PER_MEETING:2},
+  });
+  return composer.composeSchedulingOutcome({message:'Find a time with Chris and move Yael as suggested.',
+    history:[],receipts:[],draft:'Draft',evidence,readTools,remainingTools:[],owner:'Idan',
+    ownerZone:'America/New_York',isOwner:false,offeredSlotCount:8,allowedDurations:[10,25,40,55]});
+}
+
+test('options and the status of another requested task both reach the human', async () => {
+  const result = await compose([
+    {type:'tool_use',name:'offer_times',input:{parts:[{text:'Chris has these openings.',options:[1,2]}]}},
+    {type:'tool_use',name:'finish_turn',input:{reply:'I need the title of the Yael meeting to locate it.'}},
+  ]);
+  assert.equal(result.reply,'Chris has these openings.\nThu 19 Nov (GMT+2) · 17:15, 17:45\nI need the title of the Yael meeting to locate it.');
+});
+
+test('every authorized read in a composed response remains executable', async () => {
+  const reads = [
+    {type:'tool_use',name:'get_calendar',input:{start_date:'2026-11-19',end_date:'2026-11-19'}},
+    {type:'tool_use',name:'get_person_memory',input:{person:'Yael'}},
+  ];
+  const result = await compose(reads,reads.map(block=>({name:block.name,input_schema:{type:'object'}})));
+  assert.deepEqual(JSON.parse(JSON.stringify(result.reads)),reads);
+  assert.equal(result.reply,undefined);
+});
+
 test('a schema-valid introduction and options in one part retains the compact answer', () => {
   assert.equal(rendering.renderSchedulingParts([{ text: 'Two 25-minute openings.', options: [1] }], options),
     'Two 25-minute openings.\nThu 19 Nov (GMT+2) · 17:15, 17:45');
@@ -41,6 +71,15 @@ test('invalid option identities and malformed fields produce no partially valid 
   for (const parts of [[{ options: [99] }], [{ text: 5, options: [1] }], [{}], [{ options: [] }]]) {
     assert.equal(rendering.renderSchedulingParts(parts, options), undefined);
   }
+});
+
+test('model day groups retain each verified option once without duplicate date headings', () => {
+  const result = rendering.renderSchedulingParts([
+    { text: 'Two openings.', options: [1] },
+    { text: 'Thu 19 Nov (GMT+2)' },
+    { options: [2] },
+  ], options);
+  assert.equal(result, 'Two openings.\nThu 19 Nov (GMT+2) · 17:15, 17:45');
 });
 
 test('reply composition accepts the actual combined text and options response', async () => {

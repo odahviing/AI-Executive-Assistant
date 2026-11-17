@@ -38,6 +38,11 @@ function harness(responses = [verdict(true)], overrides = {}) {
     'src/db/index.ts': { getPersonMemory: () => ({ email: 'yael@example.com' }) },
   };
   Object.assign(stubs, overrides);
+  stubs['src/utils/claimChecker.ts'] = {
+    confirmedBookingNotice: () => undefined,
+    pendingApprovalNotice: () => undefined,
+    ...stubs['src/utils/claimChecker.ts'],
+  };
   const actual = new Set(['src/core/orchestrator/turnHelpers.ts', 'src/utils/humanGate.ts', 'src/utils/securityGate.ts', 'src/utils/guards/runOutputGates.ts', 'src/utils/textScrubber.ts', 'src/utils/extractJson.ts']);
   function load(rel) {
     if (Object.hasOwn(stubs, rel)) return stubs[rel];

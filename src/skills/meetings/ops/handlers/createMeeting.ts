@@ -146,6 +146,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               endIso: typeof args.end === 'string' ? args.end : undefined,
               statedZone, travel, homeTz: timezone, profile: context.profile,
               emailRoute: context.channel === 'email',
+              exactRequestClock:context.exactRequestClock,
               ...(['CST', 'IST'].includes(statedZone?.toUpperCase() ?? '') ? { personTimezone: statedClockPersonContext(args, context.profile, args.start) } : {}),
             });
             travel = getTravelContextForInstant(resolved.startIso, context.profile);

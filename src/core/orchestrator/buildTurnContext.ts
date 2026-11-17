@@ -176,6 +176,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   let resolvedMeetingAttendeeGroups: SkillContext['resolvedMeetingAttendeeGroups'];
   let contextualApprovalDecisions: SkillContext['contextualApprovalDecisions'];
   let standaloneBookingApproval: SkillContext['standaloneBookingApproval'];
+  let exactRequestClock: SkillContext['exactRequestClock'];
   // gh#158 residual — `resolvedMeetingAttendees` serves two purposes that need
   // different scopes: WHO to auto-add to the search (everyone genuinely on the
   // meeting, including addresses extracted from a forwarded email header below)
@@ -513,6 +514,10 @@ export async function buildTurnContext(input: OrchestratorInput) {
         standaloneBookingApproval = { requestId: boundBooking.row.id,
           requestDetailsJson: boundBooking.row.details_json, quote: userMessage };
       }
+      if (isPrivateSlackDm && turnResult.exactRequestClock?.quote === input.typedUserMessage
+        && input.typedUserMessage === userMessage && !input.images?.length && !input.proseOnly && !input.forceToolOnFirstTurn) {
+        exactRequestClock = turnResult.exactRequestClock;
+      }
       // A positively identified standalone courtesy needs just the current human
       // message. Keep operational history, tools and prechecks out of this draft.
       if (turnResult.standaloneCourtesy === true && isPrivateSlackDm
@@ -843,9 +848,15 @@ export async function buildTurnContext(input: OrchestratorInput) {
               continue;
             }
             const domain = profile.user.email.toLowerCase().split('@')[1];
-            const matches = result.matches.filter(m => typeof m?.email === 'string' && typeof m.name === 'string'
+            let matches = result.matches.filter(m => typeof m?.email === 'string' && typeof m.name === 'string'
               && m.email.toLowerCase().endsWith('@' + domain)
               && nameGenuinelyMatches(m.name, m.email, name));
+            const spelling = directorySpellings.find(item => item.name === name)?.spelling;
+            if (!matches.length && spelling) {
+              const lookup = await connection?.executeToolCall?.('find_slack_user', {name:spelling}, {surface:input.surface}) as typeof result;
+              matches = lookup?.matches?.filter(person => typeof person.name === 'string' && typeof person.email === 'string'
+                && person.email.toLowerCase().endsWith('@' + domain) && nameGenuinelyMatches(person.name,person.email,spelling)) ?? [];
+            }
             const distinct = new Map(matches.map(m => [m.email!.toLowerCase(), { name: m.name!, email: m.email!.toLowerCase() }]));
             if (distinct.size === 1) {
               const contact = [...distinct.values()][0];
@@ -860,16 +871,6 @@ export async function buildTurnContext(input: OrchestratorInput) {
               }
               unresolved.splice(unresolved.indexOf(name), 1);
             } else {
-              const spelling = directorySpellings.find(item => item.name === name)?.spelling;
-              if (!distinct.size && spelling) {
-                const lookup = await connection?.executeToolCall?.('find_slack_user', {name:spelling}, {surface:input.surface}) as typeof result;
-                const matches = lookup?.matches?.filter(person => typeof person.name === 'string' && typeof person.email === 'string'
-                  && person.email.toLowerCase().endsWith('@' + domain) && nameGenuinelyMatches(person.name,person.email,spelling)) ?? [];
-                if (matches.length) {
-                  directoryStates.push({name,status:'possible alternate spelling; confirm the name before inviting',names:[...new Set(matches.map(person=>person.name!))]});
-                  continue;
-                }
-              }
               directoryStates.push({name,status:distinct.size > 1 ? 'multiple_internal_matches' : 'no_scoped_internal_contact',
                 ...(distinct.size > 1 ? {names:[...distinct.values()].map(contact=>contact.name)} : {})});
             }
@@ -2002,6 +2003,7 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     ordinaryCreateAfterOtherMeeting,
     contextualApprovalDecisions,
     standaloneBookingApproval,
+    exactRequestClock,
     requestedSearchWindow,
     meetingRequest,
     availabilityQuestionDetected,

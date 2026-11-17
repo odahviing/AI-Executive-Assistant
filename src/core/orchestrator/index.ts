@@ -386,6 +386,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     ordinaryCreateAfterOtherMeeting,
     contextualApprovalDecisions,
     standaloneBookingApproval,
+    exactRequestClock,
     availabilityQuestionDetected,
     availabilityPrecheckToolSummaries,
     availabilityChecks,
@@ -551,7 +552,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   let hasWindowException = false;
   let scheduledOutcomeReviewed = false;
   let outcomeRequestedAction = false;
-  let outstandingRead: Anthropic.ToolUseBlock | undefined;
+  let outstandingReads: Anthropic.ToolUseBlock[] | undefined;
   const requestSearchAddresses = meetingRequest && (await import('../../skills/meetings/bookingRequest')).requestSearchAddresses(meetingRequest);
   while (iteration < MAX_ITERATIONS) {
     // v2.4.3 (A1) — check abort signal at the iteration boundary. The
@@ -586,7 +587,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           attendees: ask.action.args.attendees, category: ask.action.args.category, is_online: ask.action.args.is_online,
           location: ask.action.args.location, body: ask.action.args.body, rule: ask.reason,
           context: input.typedUserMessage, deferred_action: ask.action } },
-    }] } : outstandingRead ? {stop_reason:'tool_use', content:[outstandingRead]} : await callClaude({
+    }] } : outstandingReads ? {stop_reason:'tool_use', content:outstandingReads} : await callClaude({
       model,
       max_tokens: maxTokens,
       // Preserve the agentic adaptive/high policy. Effort is guidance, not a
@@ -599,7 +600,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       messages,
     });
 
-    if (!consult && !ask) outstandingRead = undefined;
+    if (!consult && !ask) outstandingReads = undefined;
     logger.debug('Claude response', { stopReason: response.stop_reason, iteration });
 
     const toolBlocks = response.content.filter(b => b.type === 'tool_use');
@@ -677,8 +678,8 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
               : undefined,readerName:input.senderName,
             readTools,supportedOperations,availableOperations:tools.map(tool=>tool.name),remainingTools:available.filter(name => !readTools.some(tool => tool.name === name)),owner:profile.user.name,ownerZone:profile.user.timezone,isOwner:input.authority === 'owner',offeredSlotCount:profile.meetings.offered_slot_count,
             allowedDurations:profile.meetings.allowed_durations});
-          if (outcome.read) {
-            outstandingRead = outcome.read;
+          if (outcome.reads?.length) {
+            outstandingReads = outcome.reads;
             outcomeRequestedAction = true;
             scheduledOutcomeReviewed = false;
             continue;
@@ -743,6 +744,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       requestDurationMinutes:meetingRequest?.duration?.minutes,
       requestedOptionCount,
       requestZone:meetingRequest?.clockZone?.zone,
+      exactRequestClock,
       meetingRequestId:meetingRequest?.batch ? undefined : meetingRequest?.requestId,
       requesterPair:meetingRequest?.requesterPair,
       individualSearchEmails:meetingRequest?.individualSearchEmails,

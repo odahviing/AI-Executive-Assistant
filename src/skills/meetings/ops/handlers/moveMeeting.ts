@@ -1607,6 +1607,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
               endIso: typeof args.new_end === 'string' ? args.new_end : undefined,
               statedZone, travel, homeTz: timezone, profile: context.profile,
               emailRoute: context.channel === 'email',
+              exactRequestClock:context.exactRequestClock,
               ...(['CST', 'IST'].includes(statedZone?.toUpperCase() ?? '') ? { personTimezone: statedClockPersonContext(args, context.profile, args.new_start) } : {}),
             });
             travel = getTravelContextForInstant(resolved.startIso, context.profile);

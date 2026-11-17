@@ -29,7 +29,7 @@ interface SchedulingOutcome {
 
 // Planning sees the entire operational prompt. The person reading the reply
 // needs the outcome of their own request and, sometimes, a single decision.
-export async function composeSchedulingOutcome(input: SchedulingOutcome): Promise<{reply?:string; nextTool?:string; read?:Anthropic.ToolUseBlock}> {
+export async function composeSchedulingOutcome(input: SchedulingOutcome): Promise<{reply?:string; nextTool?:string; reads?:Anthropic.ToolUseBlock[]}> {
   const {options,evidence} = schedulingOptions(input.evidence,input.ownerZone,input.isOwner);
   const offerTools: Anthropic.Tool[] = options.size ? [{name:'offer_times',description:'Present verified options as a short note and compact lists. Keep each meeting and each conflict qualification in its own group.',input_schema:{
     type:'object',properties:{parts:{type:'array',items:{type:'object',properties:{
@@ -82,11 +82,20 @@ export async function composeSchedulingOutcome(input: SchedulingOutcome): Promis
     return reply ? {reply} : {};
   }
   if (response.stop_reason !== 'tool_use' || !blocks.length) return {};
-  const block = blocks.find(b=>input.readTools.some(tool=>tool.name===b.name)) ?? blocks.find(b=>b.name==='request_operation') ?? blocks[0];
-  if (block.name === 'offer_times') return {reply:renderSchedulingParts((block.input as {parts?:unknown}).parts,options)};
-  if (input.readTools.some(tool => tool.name === block.name)) return {read:block};
-  const answer = block.input as {reply?:string; name?:string};
-  if (block.name === 'request_operation' && answer.name && input.remainingTools.includes(answer.name)) return {nextTool:answer.name};
-  if (block.name === 'finish_turn' && typeof answer.reply === 'string' && answer.reply.trim()) return {reply:answer.reply.trim()};
-  return {};
+  const reads = blocks.filter(block=>input.readTools.some(tool=>tool.name===block.name));
+  if (reads.length) return {reads};
+  const operation = blocks.find(block=>block.name==='request_operation');
+  const nextTool = (operation?.input as {name?:string} | undefined)?.name;
+  if (nextTool && input.remainingTools.includes(nextTool)) return {nextTool};
+  // The model can return options for one appointment and a final status for
+  // other requested work in the same response. Preserve both delivered parts.
+  const replies: string[] = [];
+  for (const block of blocks) {
+    const answer = block.input as {reply?:string; parts?:unknown};
+    const reply = block.name === 'offer_times' ? renderSchedulingParts(answer.parts,options)
+      : block.name === 'finish_turn' && typeof answer.reply === 'string' ? answer.reply.trim() : undefined;
+    if (!reply) return {};
+    if (!replies.includes(reply)) replies.push(reply);
+  }
+  return {reply:replies.join('\n')};
 }

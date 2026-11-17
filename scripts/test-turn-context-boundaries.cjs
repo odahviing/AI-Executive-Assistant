@@ -123,7 +123,9 @@ test('observed thread roster reaches actual prompt without copying idle room mem
 test('owner DM gets freshly scoped private memory through real turn builder', async t => {
   const f = fixture(t); const r = await f.run();
   for (const sentinel of ['OWNER-GENERAL-PREFERENCE','OWNER-SUMMARY-PREFERENCE','OWNER-DB-SECRET','OWNER-PEOPLE-SECRET']) assert.ok(r.prompt.includes(sentinel), sentinel);
-  assert.equal(f.state.toolCalls.filter(args => args.length === 5).length, 2);
+  // Base capabilities, intent-filtered tools and the final tool selection all
+  // retain the authenticated private-owner scope.
+  assert.equal(f.state.toolCalls.filter(args => args.length === 5).length, 3);
   assert.ok(f.state.toolCalls.filter(args => args.length === 5).every(args => args[1] === 'owner' && args[4] === 'owner'));
 });
 

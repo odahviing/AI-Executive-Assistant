@@ -43,13 +43,13 @@ export function schedulingOptions(results: Array<Record<string, unknown>>, owner
 export function renderSchedulingParts(parts:unknown, options:Map<number,Option>): string | undefined {
   if (!Array.isArray(parts) || !parts.length) return;
   const output:string[] = [];
+  const emitted = new Set<number>();
+  const dayHeadings = new Set([...options.values()].map(option=>option.day));
   for (const part of parts) {
     if (part?.text !== undefined && typeof part.text !== 'string') return;
-    if (typeof part?.text === 'string' && part.text.trim()) {
-      output.push(part.text.trim());
-    }
     if (part?.options === undefined) {
       if (!part?.text?.trim()) return;
+      if (!dayHeadings.has(part.text.trim())) output.push(part.text.trim());
       continue;
     }
     if (!Array.isArray(part.options) || !part.options.length) return;
@@ -65,8 +65,12 @@ export function renderSchedulingParts(parts:unknown, options:Map<number,Option>)
       if (row.search===rows[0].search && row.qualifications===rows[0].qualifications
         && !rows.some(selected=>selected.id===row.id)) rows.push(row);
     }
+    if (rows.every(row=>emitted.has(row.id))) continue;
+    if (part.text?.trim() && !dayHeadings.has(part.text.trim())) output.push(part.text.trim());
     const groups = new Map<string, string[]>();
     for (const row of rows.sort((a,b)=>a.start-b.start)) {
+      if (emitted.has(row.id)) continue;
+      emitted.add(row.id);
       const clocks = groups.get(row.day) ?? [];
       const value = row.clock + (row.alternate ? ' (' + row.alternate + ')' : '');
       if (!clocks.includes(value)) clocks.push(value);

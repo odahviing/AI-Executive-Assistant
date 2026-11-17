@@ -56,7 +56,7 @@ function harness() {
   const outcome = load('src/utils/verifyScheduledOutcome.ts', { luxon, './workHours':wh,
     './floatingBlocks': { getFloatingBlocks:()=>[] } });
   const context = { profile };
-  async function normalizeHandler(kind, args) {
+  async function normalizeHandler(kind, args, extraContext = {}) {
     const file = `src/skills/meetings/ops/handlers/${kind === 'create' ? 'createMeeting' : 'moveMeeting'}.ts`;
     const tree = ast(file);
     const marker = kind === 'create' ? 'tripDisplay' : 'moveTripDisplay';
@@ -67,7 +67,7 @@ function harness() {
     assert(ts.isIfStatement(branch));
     const deps = { '../../../../utils/workingElsewhere':travel };
     return compile(`export async function run() { ${decl.getText()}\n${branch.getText()}\nreturn {args,display:${marker}}; }`,
-      { args, context, timezone:zone, logger, ...resolver }, deps).run();
+      { args, context:{...context,...extraContext}, timezone:zone, logger, ...resolver }, deps).run();
   }
   async function clipSearch(args, predecessorEnd) {
     const tree = ast('src/skills/meetings/ops/handlers/findAvailableSlots.ts');
@@ -88,6 +88,20 @@ function harness() {
 }
 function freeze(iso) { const ms=DateTime.fromISO(iso).toMillis(); Settings.now=()=>ms; }
 function instant(iso) { return DateTime.fromISO(iso, {setZone:true}); }
+for (const kind of ['create','move']) {
+  test(kind + ' rejects an offset-tagged tool clock that contradicts the explicit human clock', async () => {
+    const h = harness();
+    const key = kind === 'create' ? 'start' : 'new_start';
+    const exactRequestClock = {clock:'19:00',zone:'Asia/Jerusalem',quote:'7pm Israel time'};
+    const wrong = await h.normalizeHandler(kind,{[key]:'2026-11-09T19:00:00-05:00',stated_zone:'home'}, {exactRequestClock});
+    assert.equal(wrong.reason,'requested_clock_mismatch');
+    assert.ok(wrong.message.includes('19:00'));
+    const correct = await h.normalizeHandler(kind,{[key]:'2026-11-09T12:00:00-05:00',stated_zone:'home'}, {exactRequestClock});
+    assert.equal(correct.args[key],'2026-11-09T12:00:00-05:00');
+    const ordinary = await h.normalizeHandler(kind,{[key]:'2026-11-09T19:00:00-05:00',stated_zone:'home'});
+    assert.equal(ordinary.args[key],'2026-11-09T19:00:00-05:00');
+  });
+}
 function graphInstant(pair) { return DateTime.fromISO(pair.dateTime,{zone:pair.timeZone}).toMillis(); }
 
 test('owner contact timing follows western trip through home midnight', () => {

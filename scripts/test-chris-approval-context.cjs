@@ -37,8 +37,7 @@ vm.runInNewContext('(function(require,module,exports){'+matcherCode+'\n})',{})(n
 // Identity fields and full source reply are retained evidence; callbacks below
 // are isolated action fixtures, not a claimed production database export.
 const rows = ['Adam','Paul'].map((name,i)=>({id:'req_'+name,kind:'approval',state:'awaiting_owner',owner_user_id:'UOWNER',requester_name:'Chris Kelly',subject:'Idan, Chris and '+name,details_json:JSON.stringify({callbacks:{on_approve:{tool:'create_meeting',args:{subject:'Idan, Chris and '+name,start:i?'2026-11-16T16:30:00':'2026-11-16T15:40:00'}}}})}));
-const log=fs.readFileSync(path.join(root,'artifacts/workshop-verification/chris-20261103/live-owner-window.txt'),'utf8').split(/\r?\n/);
-const sourceReply=JSON.parse(log[88].slice(log[88].indexOf('{'))).replyPreview;
+const sourceReply=JSON.parse(fs.readFileSync(path.join(root,'scripts/fixtures/chris-approval-source-reply.json'),'utf8')).reply;
 const adamQuote=sourceReply.slice(sourceReply.indexOf('"Lori'),sourceReply.indexOf(' Your last'));
 assert.equal(adamQuote,'"Lori & Idan, Weekly" ends at 15:40, just as the Adam meeting would start.');
 const conversation=[{role:'user',content:'Can you check these two requests?'},{role:'assistant',content:sourceReply}];
@@ -132,4 +131,25 @@ test('punctuation joined shared and distinctive subject names remain attributabl
 test('later competing requester survives long literal quote',async t=>{
  const candidates=structuredClone(rows);candidates.forEach((r,i)=>{r.subject='Coordination meeting';r.requester_name=i?'Paul':'Anne-Marie';});
  const quote='Anne-Marie '+('x,'.repeat(3000))+' Paul';const f=approvalFixture(t,{approval_decisions:[decision(1,'approve_existing',quote)]},{rows:candidates});const r=await f.run({userMessage:message,conversationHistory:[conversation[0],{role:'assistant',content:quote}]});assert.ok(!r.contextualApprovalDecisions?.length);
+});
+
+for (const [label,matches,expected] of [
+ ['unique internal spelling',[{name:'Simon Arazi',email:'simon@example.test'}],['simon@example.test']],
+ ['ambiguous internal spelling',[{name:'Simon Arazi',email:'simon@example.test'},{name:'Simon Other',email:'other@example.test'}],[]],
+ ['external spelling',[{name:'Simon External',email:'simon@outside.test'}],[]],
+]) test('current directory resolves '+label+' through the actual turn builder', async t => {
+ const resolver={exports:{}};
+ const source=ts.transpileModule(fs.readFileSync(path.join(root,'src/memory/resolveAttendeeEmails.ts'),'utf8'),
+  {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;
+ vm.runInNewContext('(function(require,module,exports){'+source+'\n})',{})(name=>name==='../utils/logger'?logger:{},resolver,resolver.exports);
+ const queries=[];
+ const f=fixtureModule.exports.fixture(t,{
+  'src/core/social/classifyTurn.ts':{classifyTurn:async()=>({scope:{scopes:['general']},meetingPeople:['סימון'],meetingPeopleGroups:[['סימון']],
+   directorySpellings:[{name:'סימון',spelling:'Simon'}],meetingAction:'explore'})},
+  'src/memory/resolveAttendeeEmails.ts':{...resolver.exports,resolveNamedInternalAttendees:({names})=>({resolved:[],unresolved:names})},
+  'src/connections/registry.ts':{listConnections:()=>[],getConnection:()=>({executeToolCall:async(name,args)=>{queries.push(args.name);return {matches:args.name==='Simon'?matches:[]};}})},
+ });
+ const result=await f.run({userMessage:'Find time with סימון',typedUserMessage:'Find time with סימון',rawUserMessage:'Find time with סימון'});
+ assert.deepEqual(queries,['סימון','Simon']);
+ assert.deepEqual(Array.from(result.resolvedMeetingAttendees),expected);
 });

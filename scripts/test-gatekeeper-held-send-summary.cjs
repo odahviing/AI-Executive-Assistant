@@ -79,6 +79,7 @@ function loadGate(verdict) {
     '../usageLog': { logLlmUsage() {} },
     '../claimChecker': {
       checkReplyClaims: async () => verdict,
+      genericHonestHedge: () => "I don't have confirmed information about that.",
       rewriteOwningTheMiss: async () => { calls.rewrite++; return 'REWRITTEN'; },
     },
     '../../db/requests': { buildIdempotencyKey: () => 'k', getRequestByIdempotencyKey: () => null },

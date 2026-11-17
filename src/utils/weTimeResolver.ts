@@ -82,18 +82,21 @@ export interface StatedTimeInput {
   personTimezone?: string | null;
   /** M12's email zone fallback is retained; it does not choose a DST occurrence. */
   emailRoute?: boolean;
+  exactRequestClock?: {clock:string; zone:string; quote:string};
 }
 
 /** An unresolved requested clock is actionable, never a guessed instant. */
 export class StatedTimeClarificationError extends Error {
   readonly code = 'stated_time_clarification';
   constructor(
-    readonly reason: 'ambiguous_local_time' | 'nonexistent_local_time' | 'ambiguous_timezone',
+    readonly reason: 'ambiguous_local_time' | 'nonexistent_local_time' | 'ambiguous_timezone' | 'requested_clock_mismatch',
     readonly wallClock: string,
     readonly sourceZone: string,
     readonly choices: string[] = [],
   ) {
-    super(reason === 'ambiguous_timezone'
+    super(reason === 'requested_clock_mismatch'
+      ? `The supplied start is ${wallClock} in ${sourceZone}, but the human explicitly requested ${choices[0]} in that zone. Correct the tool timestamp using that stated clock and the requested date before retrying.`
+      : reason === 'ambiguous_timezone'
       ? `Which timezone does ${sourceZone} refer to for ${wallClock}?`
       : reason === 'nonexistent_local_time'
         ? `${wallClock} does not occur in ${sourceZone} because the clocks move forward. What time should I use?`
@@ -181,11 +184,19 @@ export function resolveStatedSourceZone(input: StatedTimeInput): string {
  * occurrence. Explicit-offset inputs stay byte-for-byte fixed instants. */
 export function resolveStatedInstant(input: StatedTimeInput): ResolvedStatedTime {
   const { startIso, endIso, statedZone, homeTz } = input;
+  const checkRequestedClock = (instant: string): void => {
+    if (!input.exactRequestClock) return;
+    const {clock,zone} = input.exactRequestClock;
+    const local = DateTime.fromISO(instant,{zone:homeTz}).setZone(zone);
+    if (local.isValid && local.toFormat('HH:mm') !== clock)
+      throw new StatedTimeClarificationError('requested_clock_mismatch',local.toFormat('yyyy-MM-dd HH:mm ZZZZ'),zone,[clock]);
+  };
   // An already explicit interval needs no source-zone choice at all.
   if (isoHasExplicitZone(startIso) && (!endIso || isoHasExplicitZone(endIso))) {
     const sourceZone = ['CST', 'IST'].includes(statedZone?.toUpperCase() ?? '')
       ? DateTime.fromISO(startIso, { setZone: true }).zoneName ?? homeTz
       : resolveStatedSourceZone(input);
+    checkRequestedClock(startIso);
     return { startIso, endIso, sourceZone, reinterpreted: false };
   }
   const src = resolveStatedSourceZone(input);
@@ -204,6 +215,7 @@ export function resolveStatedInstant(input: StatedTimeInput): ResolvedStatedTime
     return reinterpretClockInZone(iso, src, homeTz);
   };
   const startOut = resolveOne(startIso);
+  checkRequestedClock(startOut);
   return {
     startIso: startOut,
     endIso: typeof endIso === 'string' ? resolveOne(endIso) : undefined,

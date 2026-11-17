@@ -699,17 +699,21 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           return `[find_available_slots candidate_validation dur=${durCV}m: ${parts.join(', ')}${scopeNote}]`;
         }
 
-        const slots: Array<{ start?: string; end?: string; attendee_status?: Array<{ email?: string; status?: string }>; attendee_conflicts?: Array<{ email?: string; reason?: string; assumed?: boolean }> }> =
+        type SummarySlot = { start?: string; end?: string; attendee_status?: Array<{ email?: string; status?: string }>; attendee_conflicts?: Array<{ email?: string; reason?: string; assumed?: boolean }> };
+        const slots: SummarySlot[] =
           Array.isArray(result) ? result :
           (result && typeof result === 'object' && Array.isArray((result as any).slots)) ? (result as any).slots :
           [];
         // Only a finding attached to this offer establishes its attendee status.
         // Day-level rejection tallies describe other candidates in the search.
-        const slotList = slots.map(s => {
+        const formatSlot = (s: SummarySlot): string => {
           const conflicts = (s.attendee_conflicts ?? []).map(a => `${a.email}:${a.reason}${a.assumed ? '(assumed)' : ''}`);
           const statuses = (s.attendee_status ?? []).map(a => `${a.email}:${a.status}`);
           return `${fmt(s)}${conflicts.length ? ` attendee_conflicts=${conflicts.join('+')}` : ''}${statuses.length ? ` attendee_status=${statuses.join('+')}` : ''}`;
-        }).join(', ');
+        };
+        const slotList = slots.map(formatSlot).join(', ');
+        const candidates = (result as { owner_approval_candidates?: SummarySlot[] })?.owner_approval_candidates;
+        const pending = Array.isArray(candidates) ? candidates : [];
         const lengths = new Set(slots.map(slot => (Date.parse(slot.end ?? '') - Date.parse(slot.start ?? '')) / 60000));
         const measured = lengths.size === 1 ? [...lengths][0] : undefined;
         const dur = measured && Number.isSafeInteger(measured) && measured > 0 ? measured : (input as any).duration_minutes;
@@ -817,7 +821,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // its own state, never a pass), and claiming it here would manufacture
         // the mirror-image lie.
         const readCalendars = new Set<string>();
-        for (const s of slots) {
+        for (const s of [...slots, ...pending]) {
           for (const a of s.attendee_status ?? []) {
             if (typeof a.email === 'string' && a.email && typeof a.status === 'string' && a.status !== 'unknown') {
               readCalendars.add(a.email.toLowerCase());
@@ -848,11 +852,10 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
               reasonPart = ` reason=${topReason}${oofUntil ? ` (until ${oofUntil})` : ''}`;
             }
           }
-          const pending = (result as {owner_approval_candidates?:Array<{start:string;end:string;presentation_local?:string}>})?.owner_approval_candidates;
-          const decisionPart = Array.isArray(pending) && pending.length
-            ? ' owner_decision_required (unapproved): ' + pending.map(slot => fmt(slot)).join(', ')
+          const decisionPart = pending.length
+            ? ' owner_decision_required (unapproved): ' + pending.map(formatSlot).join(', ')
             : '';
-          return `[find_available_slots${window} dur=${dur}m: 0 slots${scopeNote}${reasonPart}${offDaysPart}${preferredPart}${decisionPart}]`;
+          return `[find_available_slots${window} dur=${dur}m: 0 slots${scopeNote}${reasonPart}${offDaysPart}${preferredPart}${attendeesReadPart}${decisionPart}]`;
         }
         const recovery = (result as { _relaxed_recovery?: unknown } | null)?._relaxed_recovery === true
           ? '; strict=0; relaxed_recovery' : '';

@@ -1253,7 +1253,7 @@ async function runOwnerFactCheckAndMaybeRewrite(
       : [];
     const requestEvidence = await requestOutcomeEvidence(ctx);
     let readerEmail:string | undefined;
-    try { readerEmail = (await import('../../db/people')).getPersonMemory(ctx.senderId)?.email ?? undefined; }
+    try { readerEmail = (await import('../../db')).getPersonMemory(ctx.senderId)?.email ?? undefined; }
     catch { /* The check can still use the authenticated reader's name and receipts. */ }
     const finalOutcomeContext = `Reader: ${ctx.colleagueName ?? ctx.senderId}, email=${readerEmail ?? 'unknown'}. Owner: ${profile.user.name}, email=${profile.user.email}. Requests: ${requestEvidence.context}. Earlier tool receipts: ${JSON.stringify(latestSummaries)}`;
     const verdict = await checkReplyClaims({
@@ -1669,6 +1669,11 @@ async function runSlotGroundingCheckAndMaybeRewrite(ctx: OutputGateContext, init
   let cleanReply = initialReply;
   try {
     const { checkReplyClaims, rewriteOwningTheMiss } = await import('../claimChecker');
+    const reader = isOwnerDirectAudience(ctx) ? profile.user.name : ctx.colleagueName ?? ctx.senderId;
+    let readerEmail:string|undefined;
+    try { readerEmail = (await import('../../db')).getPersonMemory(ctx.senderId)?.email ?? undefined; }
+    catch { /* Reader identity still follows the authenticated audience. */ }
+    const availabilityAudience = {owner:profile.user.name,reader,readerEmail};
 
     const verdict = await checkReplyClaims({
       reply: cleanReply,
@@ -1676,6 +1681,7 @@ async function runSlotGroundingCheckAndMaybeRewrite(ctx: OutputGateContext, init
       bookingOccurred: result.bookingOccurred ?? false,
       ownerFirstName: profile.user.name.split(' ')[0],
       mode: 'slot_grounding',
+      availabilityAudience,
       slotGroundingContext: { groundedToolLines },
     });
 
@@ -1708,6 +1714,7 @@ async function runSlotGroundingCheckAndMaybeRewrite(ctx: OutputGateContext, init
       toolSummaries: result.toolSummaries ?? [],
       groundedToolLines,
       isOwnerAudience: isOwnerDirectAudience(ctx),
+      availabilityAudience,
     });
     if (rewritten && rewritten.trim().length > 0) {
       cleanReply = normalizeForTransport(ctx, rewritten);
