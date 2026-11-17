@@ -1,3 +1,5 @@
+import crypto from 'node:crypto';
+import { isClockReply } from '../../utils/schedulingClockReply';
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../../llm/client';
 import { MODEL_SONNET } from '../../llm/models';
@@ -12,6 +14,7 @@ import logger from '../../utils/logger';
 import { trimHistory, extractActionTape, stampHistoryTime } from './turnHelpers';
 import type { OrchestratorInput } from './index';
 import type { SkillContext } from '../../skills/types';
+import type { RefusedBooking } from '../../db/conversations';
 
 const anthropic = getAnthropicClient();
 
@@ -86,7 +89,24 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // edit takes effect on the next message (no caching).
   let socialDirective: SocialDirective = noDirective();
   let socialClassification: OwnerIntentClassification | null = null;
+  let meetingRequest: import('../../db/conversations').MeetingRequestState | undefined;
   let meetingExplorationOnly = false;
+  let unresolvedHoldSelection = false;
+  let firmWindowBooking = false;
+  let searchBeforeReply = false;
+  let decisionReportLocale:'en'|'he'|undefined;
+  let requestedOptionCount:number|null|undefined;
+  let consultOwnerQuote: string | undefined;
+  let consultBackground: string | undefined;
+  let optionsReplyLocale: 'en' | 'he' | undefined;
+  let singleZoneOptions = false;
+  let continuedRefusal: RefusedBooking | undefined;
+  let existingInviteSubject: string | undefined;
+  let existingInviteStart: string | undefined;
+  let existingInviteLocale: string | undefined;
+  let withdrawalId: string | undefined;
+  let exactBookingRequested = false;
+  let requestedException: RefusedBooking | undefined;
   // Defined only for a colleague's request to hold selected prior offers. An empty
   // map means no eligible offer (including after a restart or stash failure).
   let holdOnlyWindows: Map<number, number> | undefined;
@@ -151,6 +171,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   let meetingPeopleGroups: string[][] | undefined;
   let ordinaryCreateSubject: string | undefined;
   let ordinaryCreateAfterOtherMeeting: SkillContext['ordinaryCreateAfterOtherMeeting'];
+  let directorySpellings: Array<{name:string; spelling:string}> = [];
   let resolvedMeetingAttendeeGroups: SkillContext['resolvedMeetingAttendeeGroups'];
   let contextualApprovalDecisions: SkillContext['contextualApprovalDecisions'];
   let standaloneBookingApproval: SkillContext['standaloneBookingApproval'];
@@ -275,6 +296,20 @@ export async function buildTurnContext(input: OrchestratorInput) {
       // Only a delivered runtime receipt may anchor this transition. A synthetic
       // history row, a model-authored receipt, or an ambiguous group of mutations cannot.
       const prior = recentMessages.at(-1);
+      const priorRefusal = prior?.role === 'assistant' && Array.isArray(prior.toolSummaries) ? prior.refusedBooking : undefined;
+      const refusedArgs = priorRefusal?.action?.args;
+      const requesterText = input.typedUserMessage?.trim();
+      const refusedBooking = priorRefusal && refusedArgs && priorRefusal.action.tool === 'create_meeting'
+        && priorRefusal.ownerId === profile.user.slack_user_id && priorRefusal.requesterId === input.userId
+        && priorRefusal.channelId === input.channelId && priorRefusal.threadTs === threadTs
+        && input.authority === 'colleague' && turnSenderRole === 'colleague' && isPrivateSlackDm
+        && input.surface === 'colleague_dm' && input.userId !== profile.user.slack_user_id
+        && input.interactive !== false && !input.extraInstruction && !input.forceToolOnFirstTurn && !input.proseOnly
+        && !input.images?.length && requesterText && userMessage.includes(requesterText)
+        && typeof refusedArgs.subject === 'string' && typeof refusedArgs.start === 'string' && typeof refusedArgs.end === 'string'
+        && DateTime.fromISO(refusedArgs.start, { zone: profile.user.timezone }).toMillis() > Date.now()
+        ? { subject: refusedArgs.subject, start: refusedArgs.start, end: refusedArgs.end, reason: priorRefusal.reason, requesterText }
+        : undefined;
       const receipts = prior?.toolSummaries;
       const prefix = receipts?.length ? receipts.join(' ') + '\n' : '';
       const writes = receipts?.filter(line => line.startsWith('[move_meeting ') || line.startsWith('[create_meeting '));
@@ -321,10 +356,16 @@ export async function buildTurnContext(input: OrchestratorInput) {
               const end = DateTime.fromISO(slot.endIso!, { zone: profile.user.timezone });
               if (!start.isValid || !(end > start)) return [];
               const zone = requester && attendeeKnownTimezoneForDay(requester, slot.startIso);
-              const local = zone && zone !== profile.user.timezone ? start.setZone(zone) : undefined;
+              const localZones = new Set([slot.presentationZone, zone]);
+              localZones.delete(profile.user.timezone);
               const label = (dt: DateTime) => `${dt.toFormat('yyyy-MM-dd HH:mm')} [${dt.zoneName}]`;
               return [{ startIso:slot.startIso, endIso:slot.endIso!, display:label(start),
-                ...(local?.isValid ? { localDisplays:[label(local)] } : {}) }];
+                presentationZone:slot.presentationZone ?? zone ?? profile.user.timezone,
+                localDisplays: [...localZones].flatMap(tz => {
+                  if (!tz) return [];
+                  const local = start.setZone(tz);
+                  return local.isValid ? [label(local)] : [];
+                }) }];
             });
           }
         } catch (err) {
@@ -333,23 +374,126 @@ export async function buildTurnContext(input: OrchestratorInput) {
       }
       // A classifier outage while resolving a concrete offer cannot grant a
       // write. A normal execute result still permits confirmed invitations.
-      if (holdCandidates.length) meetingExplorationOnly = true;
+      if (holdCandidates.length || refusedBooking) meetingExplorationOnly = true;
+      const previousRequest = prior?.role === 'assistant' && Array.isArray(prior.toolSummaries) ? prior.meetingRequest : undefined;
+      const requestScope = isPrivateSlackDm && !input.proseOnly && !input.extraInstruction && input.interactive !== false
+        && input.typedUserMessage?.trim() && input.userId && userMessage.includes(input.typedUserMessage);
+      const activeRequest = requestScope && previousRequest?.requesterId === input.userId
+        && previousRequest.ownerId === profile.user.slack_user_id && previousRequest.threadTs === threadTs
+        && previousRequest.channelId === input.channelId ? previousRequest : undefined;
+      if (activeRequest && !isOwnerTyping) {
+        // The directory extractor must be able to cite the original roster
+        // even after several turns selecting dates or correcting an address.
+        const priorHuman = [activeRequest.original, ...activeRequest.updates];
+        const recentHuman = new Set(recentMessages.filter(row => row.role === 'user').map(row => row.content.trim()));
+        meetingContextMessages.unshift(...priorHuman.filter(content => !recentHuman.has(content.trim()))
+          .map(content => ({role:'user' as const,content})));
+      }
+      let requesterDayZone: string | undefined;
+      if (requestScope && input.authority === 'colleague' && input.userId !== profile.user.slack_user_id) {
+        try {
+          const {getPersonMemory} = await import('../../db');
+          const {loadAttendeeAvailabilityForPerson, attendeeKnownTimezoneForDay} = await import('../../utils/attendeeAvailability');
+          const person = loadAttendeeAvailabilityForPerson(getPersonMemory(input.userId) ?? undefined, profile.user.timezone);
+          if (person) requesterDayZone = attendeeKnownTimezoneForDay(person, new Date().toISOString()) ?? undefined;
+        } catch { /* No established requester clock. */ }
+      }
       const turnResult = await classifyTurn({
         anthropic,
+        requesterDayZone,
         message: userMessage,
         profile,
         needIntent,
         needScopes,
         needMeetingPeople,
+        refusedBooking,
         senderRole: turnSenderRole,
         senderName: input.senderName,
         recentContext: recentContext || undefined,
+        priorMeetingRequest: activeRequest && {original:activeRequest.original,updates:activeRequest.updates,requiredDay:activeRequest.requiredDay,bookingInstruction:activeRequest.bookingInstruction?.localDate === DateTime.now().setZone(profile.user.timezone).toISODate() ? activeRequest.bookingInstruction : undefined},
         meetingContextMessages: isPrivateSlackDm ? meetingContextMessages : undefined,
         ...(holdCandidates.length ? { holdCandidates, holdOfferText:priorProse, holdSelectionText:input.typedUserMessage } : {}),
         inspectIndependentOrdinaryCreate,
         ordinaryCreateOwnerContext: inspectIndependentOrdinaryCreate ? privateOwnerContext : undefined,
         approvalCandidates: classifierCandidates.length ? classifierCandidates.map(({ row, action }) => ({ subject: row.subject ?? '', action })) : undefined,
       });
+      const followsOffer = !!activeRequest && !activeRequest.batch && !!receipts?.some(line => line.startsWith('[find_available_slots ') && line.includes(' slots:'))
+        && !!input.typedUserMessage && isClockReply(input.typedUserMessage);
+      const requestUpdate = followsOffer ? { relation: 'continue' as const, duration: undefined, clockZone:undefined, batch:false } : turnResult.requestUpdate;
+      if (requestScope && input.surface === 'owner_dm' && input.userId === profile.user.slack_user_id
+        && turnResult.decisionReport?.quote === input.typedUserMessage) decisionReportLocale = turnResult.decisionReport?.locale;
+      if (requestScope) requestedOptionCount = turnResult.requestedOptionCount ?? null;
+      searchBeforeReply = !!(requestScope && turnResult.searchBeforeReply && turnResult.searchBeforeReply === input.typedUserMessage
+        && !input.proseOnly && !input.extraInstruction && !input.images?.length && !input.forceToolOnFirstTurn);
+      if (requestScope && requestUpdate && input.typedUserMessage) {
+        const update = requestUpdate;
+        const text = input.typedUserMessage.trim().slice(0, 4000);
+        const previous = update.relation === 'continue' ? activeRequest : undefined;
+        const batch = !!(update.batch || previous?.batch);
+        meetingRequest = {
+          batch, requestId:previous?.requestId ?? crypto.randomUUID(),
+          ownerId:profile.user.slack_user_id, requesterId:input.userId, channelId:input.channelId, threadTs,
+          original: previous?.original ?? text, updates: previous
+            ? [...previous.updates.filter(item => item !== text), text].slice(-12) : [],
+          requiredDay:previous?.requiredDay,
+          bookingInstruction:previous?.bookingInstruction,
+          individualSearchEmails:previous?.individualSearchEmails,
+          clockZone:batch ? undefined : update.clockZone && text.includes(update.clockZone.quote) ? update.clockZone : previous?.clockZone,
+          duration: batch ? undefined : update.duration && text.includes(update.duration.quote) ? update.duration : previous?.duration,
+        };
+      }
+      if (meetingRequest && !meetingRequest.batch && requestUpdate && 'dayChange' in requestUpdate && requestUpdate.dayChange
+        && input.typedUserMessage?.includes(requestUpdate.dayChange.quote)) {
+        const {date:expression, quote} = requestUpdate.dayChange;
+        if (expression === 'flexible') {
+          delete meetingRequest.requiredDay;
+          delete meetingRequest.bookingInstruction;
+        }
+        else {
+          const zone = meetingRequest.clockZone?.zone ?? requesterDayZone ?? profile.user.timezone;
+          const offset = ['today','tomorrow','day_after_tomorrow'].indexOf(expression);
+          let date = expression;
+          if (offset >= 0) {
+            const anchor = isOwnerTyping && zone === profile.user.timezone
+              ? (await import('../../utils/effectiveToday')).getEffectiveToday(profile) : DateTime.now().setZone(zone);
+            date = anchor.plus({days:offset}).toISODate() ?? '';
+          }
+          if (date && DateTime.fromISO(date,{zone}).toISODate() === date) meetingRequest.requiredDay = {date, zone, quote};
+        }
+      }
+      if (refusedBooking && turnResult.refusedBookingReply === 'ask_owner') requestedException = priorRefusal;
+      if (refusedBooking && turnResult.refusedBookingReply === 'continue') continuedRefusal = priorRefusal;
+      exactBookingRequested = !!turnResult.exactBookingQuote && input.authority === 'colleague'
+        && input.userId !== profile.user.slack_user_id && input.channel === 'slack' && !!input.typedUserMessage?.includes(turnResult.exactBookingQuote)
+        && !input.extraInstruction && !input.proseOnly && !input.forceToolOnFirstTurn;
+      if (isPrivateSlackDm && input.surface === 'colleague_dm' && input.authority === 'colleague'
+        && turnSenderRole === 'colleague' && input.interactive !== false && !refusedBooking
+        && !input.proseOnly && !input.extraInstruction && !input.forceToolOnFirstTurn && !input.images?.length
+        && userMessage === input.typedUserMessage) {
+        optionsReplyLocale = turnResult.optionsReplyLocale;
+        singleZoneOptions = turnResult.singleZoneOptions === true;
+      }
+      if (requestScope && input.authority === 'colleague' && input.surface === 'colleague_dm'
+        && turnSenderRole === 'colleague' && !refusedBooking && !input.forceToolOnFirstTurn && !input.images?.length
+        && userMessage === input.typedUserMessage && input.userId !== profile.user.slack_user_id) {
+        firmWindowBooking = !!turnResult.firmWindowQuote && turnResult.firmWindowQuote === input.typedUserMessage
+          && !input.proseOnly && !input.extraInstruction;
+        if (meetingRequest && !meetingRequest.batch && (exactBookingRequested || firmWindowBooking)) {
+          meetingRequest.bookingInstruction ??= {kind:exactBookingRequested ? 'exact' : 'window',
+            text:input.typedUserMessage!, localDate:DateTime.now().setZone(profile.user.timezone).toISODate()!};
+        }
+        if (turnResult.consultOwnerQuote === input.typedUserMessage && !input.proseOnly && !input.extraInstruction)
+          { consultOwnerQuote = turnResult.consultOwnerQuote; consultBackground = turnResult.consultBackground; }
+        existingInviteSubject = turnResult.existingInviteSubject;
+        existingInviteLocale = turnResult.existingInviteLocale;
+        if (turnResult.withdrawOwnRequest) {
+          const { getOpenRequestsForThread } = await import('../../db/requests');
+          const pending = getOpenRequestsForThread(profile.user.slack_user_id,threadTs)
+            .filter(row => row.kind === 'approval' && row.requester_slack_id === input.userId && row.origin_channel === input.channelId);
+          if (pending.length === 1 && pending[0].state === 'awaiting_owner' && pending[0].subkind === 'freeform'
+            && JSON.parse(pending[0].details_json ?? '{}').organizer_invitation === true) withdrawalId = pending[0].id;
+        }
+      }
       const fresh = turnResult.independentOrdinaryCreate;
       if (inspectIndependentOrdinaryCreate && fresh && fresh.sourceMessageIndex === meetingContextMessages.length - 1
         && input.typedUserMessage!.includes(fresh.subjectQuote) && priorProse.includes(fresh.priorSubjectQuote) && fresh.subjectQuote.trim().length > 0
@@ -371,11 +515,11 @@ export async function buildTurnContext(input: OrchestratorInput) {
         && !input.proseOnly && !turnResult.approvalDecisions?.length) {
         const messages: Anthropic.MessageParam[] = [{ role: 'user', content: input.rawUserMessage ?? userMessage }];
         const systemBlocks: Anthropic.TextBlockParam[] = [{ type: 'text',
-          text: `You are ${profile.assistant.name}. Respond briefly and warmly in the sender's language to this greeting or acknowledgment.` }];
+          text: `You are ${profile.assistant.name}. Reply in the sender's language. For thanks, acknowledge it naturally and let the exchange end. For a greeting, greet them back. One short sentence.` }];
         return { messages, systemBlocks, tools: [], blockedWriteTools: new Set<string>(),
           model, maxTokens, turnSenderRole, turnPersonSlackId, socialActive,
           socialClassification: turnResult.intent, resolvedMeetingAttendees, resolvedMeetingAttendeeGroups,
-          contextualApprovalDecisions, availabilityQuestionDetected: false, availabilityPrecheckToolSummaries: [] };
+          contextualApprovalDecisions, meetingRequest: undefined, requestedSearchWindow: undefined, availabilityQuestionDetected: false, availabilityPrecheckToolSummaries: [] };
       }
       if (ownerDecisionPath && approvalCandidates.length && turnResult.approvalDecisions?.length) {
         const { getMatchingRequestReferences } = require('../../utils/closeLoopOnOwnerHandled') as typeof import('../../utils/closeLoopOnOwnerHandled');
@@ -414,8 +558,9 @@ export async function buildTurnContext(input: OrchestratorInput) {
       if (needScopes) toolScopes = turnResult.scope.scopes;
       if (isOwnerPath) isFreeTimeInquiry = turnResult.freeTimeInquiry === true;
       if (needMeetingPeople) {
+        unresolvedHoldSelection = turnResult.unresolvedHoldSelection === true;
         meetingExplorationOnly = turnResult.meetingAction === 'explore'
-          || (!turnResult.meetingAction && holdCandidates.length > 0);
+          || (!turnResult.meetingAction && (!!refusedBooking || holdCandidates.length > 0));
         if (turnResult.meetingAction === 'hold') {
           holdOnlyWindows = new Map();
           const indices = turnResult.selectedHoldCandidateIndices;
@@ -427,6 +572,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
             }
           }
         }
+        directorySpellings = turnResult.directorySpellings ?? [];
         const rawMeetingPeople = turnResult.meetingPeople ?? [];
         // gh#158-a — classifyTurn is fed both THIS turn's message and up to 4
         // turns of recentContext so it can read conversational state, but its
@@ -459,7 +605,8 @@ export async function buildTurnContext(input: OrchestratorInput) {
         // A separate, explicitly classified continuation may retain people
         // grounded in an indexed human request. Never relax the current-name
         // guard above or accept an assistant-invented/historical union roster.
-        if (isPrivateSlackDm && turnResult.meetingContinuation === true) {
+        if (isPrivateSlackDm && turnResult.meetingContinuation === true
+          && (!activeRequest || turnResult.requestUpdate?.relation === 'continue')) {
           const contextual = (turnResult.contextMeetingPeople ?? []).filter(entry => {
             if (!Number.isInteger(entry.sourceMessageIndex) || typeof entry.name !== 'string' || !entry.name.trim()) return false;
             const source = meetingContextMessages[entry.sourceMessageIndex];
@@ -472,8 +619,19 @@ export async function buildTurnContext(input: OrchestratorInput) {
         // explicitly ambiguous rather than silently dropping a known person.
         if (Array.isArray(turnResult.meetingPeopleGroups)) {
           const accepted = new Set(turnMeetingPeople.map(normalize));
+          const mentions = turnMeetingPeople.filter(name=>name.startsWith('<@')).flatMap(name=>{
+            const {resolveNamedInternalAttendees} = require('../../memory/resolveAttendeeEmails') as typeof import('../../memory/resolveAttendeeEmails');
+            const person = resolveNamedInternalAttendees({names:[name],ownerEmail:profile.user.email}).resolved[0];
+            return person ? [{literal:name,person}] : [];
+          });
+          const groupName = (name:string):string[] => {
+            if (accepted.has(normalize(name))) return [name];
+            const {nameGenuinelyMatches} = require('../../memory/resolveAttendeeEmails') as typeof import('../../memory/resolveAttendeeEmails');
+            const candidates = mentions.filter(({person})=>nameGenuinelyMatches(person.name,person.email,name));
+            return candidates.length === 1 ? [candidates[0].literal] : [];
+          };
           const groups = turnResult.meetingPeopleGroups.map(group => [...new Set(
-            group.filter(name => accepted.has(normalize(name))),
+            group.flatMap(groupName),
           )]).filter(group => group.length > 0);
           const covered = new Set(groups.flat().map(normalize));
           meetingPeopleGroups = [...accepted].every(name => covered.has(name)) ? groups : [];
@@ -604,13 +762,14 @@ export async function buildTurnContext(input: OrchestratorInput) {
         names: turnMeetingPeople,
         ownerEmail: profile.user.email,
         ownerName: profile.user.name,
+        ownerLocalName: profile.user.name_he,
       });
       resolvedMeetingAttendees = resolved.map(r => r.email);
       if (meetingPeopleGroups !== undefined) {
         // Resolution may return a canonical display name. Resolve group names
         // with the same deterministic resolver rather than guessing identity.
         resolvedMeetingAttendeeGroups = meetingPeopleGroups.map(names => {
-          const group = resolveNamedInternalAttendees({ names, ownerEmail: profile.user.email, ownerName: profile.user.name });
+          const group = resolveNamedInternalAttendees({ names, ownerEmail: profile.user.email, ownerName: profile.user.name, ownerLocalName:profile.user.name_he });
           // An unresolved participant still belongs to this meeting. Dropping
           // an external-only group turns a different meeting into the sole
           // roster and wrongly invites/checks its internal colleagues.
@@ -642,13 +801,14 @@ export async function buildTurnContext(input: OrchestratorInput) {
           names: currentMessageMeetingPeople,
           ownerEmail: profile.user.email,
           ownerName: profile.user.name,
+            ownerLocalName:profile.user.name_he,
         }).resolved.map(r => r.email);
       // Memory ambiguity is not current directory ambiguity. Use the existing
       // surface-scoped lookup before asking the human for a known identity.
       // Identity alone does not establish required participation: these contacts
       // are context, never automatically added to required availability.
       const directoryContacts: Array<{ name: string; email: string }> = [];
-      const directoryStates: Array<{ name: string; status: string }> = [];
+      const directoryStates: Array<{ name: string; status: string; names?:string[] }> = [];
       if (unresolved.length > 0) {
         const { getConnection } = require('../../connections/registry') as typeof import('../../connections/registry');
         const connection = getConnection(profile.user.slack_user_id, 'slack');
@@ -666,15 +826,39 @@ export async function buildTurnContext(input: OrchestratorInput) {
               && nameGenuinelyMatches(m.name, m.email, name));
             const distinct = new Map(matches.map(m => [m.email!.toLowerCase(), { name: m.name!, email: m.email!.toLowerCase() }]));
             if (distinct.size === 1) {
-              directoryContacts.push([...distinct.values()][0]);
+              const contact = [...distinct.values()][0];
+              directoryContacts.push(contact);
+              // The directory establishes identity. Only a name already in a
+              // specific meeting roster establishes required participation.
+              for (const roster of resolvedMeetingAttendeeGroups ?? []) {
+                if (!roster.unresolvedNames.includes(name)) continue;
+                roster.unresolvedNames = roster.unresolvedNames.filter(member => member !== name);
+                if (!roster.emails.includes(contact.email)) roster.emails.push(contact.email);
+                if (!resolvedMeetingAttendees.includes(contact.email)) resolvedMeetingAttendees.push(contact.email);
+              }
               unresolved.splice(unresolved.indexOf(name), 1);
             } else {
-              directoryStates.push({ name, status: distinct.size > 1 ? 'multiple_internal_matches' : 'no_scoped_internal_contact' });
+              const spelling = directorySpellings.find(item => item.name === name)?.spelling;
+              if (!distinct.size && spelling) {
+                const lookup = await connection?.executeToolCall?.('find_slack_user', {name:spelling}, {surface:input.surface}) as typeof result;
+                const matches = lookup?.matches?.filter(person => typeof person.name === 'string' && typeof person.email === 'string'
+                  && person.email.toLowerCase().endsWith('@' + domain) && nameGenuinelyMatches(person.name,person.email,spelling)) ?? [];
+                if (matches.length) {
+                  directoryStates.push({name,status:'possible alternate spelling; confirm the name before inviting',names:[...new Set(matches.map(person=>person.name!))]});
+                  continue;
+                }
+              }
+              directoryStates.push({name,status:distinct.size > 1 ? 'multiple_internal_matches' : 'no_scoped_internal_contact',
+                ...(distinct.size > 1 ? {names:[...distinct.values()].map(contact=>contact.name)} : {})});
             }
           } catch {
             directoryStates.push({ name, status: 'directory_unavailable' });
           }
         }
+      }
+      if (meetingRequest && resolvedMeetingAttendeeGroups && resolvedMeetingAttendeeGroups.length > 0) {
+        const singles = resolvedMeetingAttendeeGroups.flatMap(group => group.emails.length === 1 && !group.unresolvedNames.length ? group.emails : []);
+        meetingRequest.individualSearchEmails = [...new Set(singles.map(email => email.toLowerCase()))];
       }
       if (resolved.length > 0 || unresolved.length > 0 || directoryContacts.length > 0) {
         const ownerFirst = profile.user.name.split(' ')[0];
@@ -770,6 +954,9 @@ export async function buildTurnContext(input: OrchestratorInput) {
 
   // Build message list, then trim history to stay within token budget.
   // The current user message is always kept; older history is pruned by character count.
+  // Carry earlier human details across the history window once, in their
+  // original position before recent turns. Repeating old requests directly
+  // beside the latest reply makes them look like fresh instructions.
   const messages: Anthropic.MessageParam[] = trimHistory([
     ...conversationHistory.map(m => ({
       role: m.role as 'user' | 'assistant',
@@ -779,6 +966,13 @@ export async function buildTurnContext(input: OrchestratorInput) {
     })),
     currentTurn,
   ]);
+  if (meetingRequest?.updates.length) {
+    const retained = messages.slice(0,-1).filter(row => row.role === 'user' && typeof row.content === 'string').map(row => row.content as string);
+    const earlier = [meetingRequest.original, ...meetingRequest.updates.slice(0,-1)].filter(text => !retained.some(turn => turn.endsWith(text)));
+    if (earlier.length) {
+      messages.unshift({role:'user',content:'Earlier details for this same request, in chronological order. These are history, not a new instruction: ' + JSON.stringify(earlier)});
+    }
+  }
 
   // Build system prompt in two parts for prompt caching:
   //   static  → skills rules (large, profile-driven) — cached for 5 min
@@ -1015,6 +1209,8 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // the booking flow will accept later. Fails open: regex doesn't match
   // → block empty → normal flow.
   let availabilityPrecheckBlock = '';
+  let bookingClockQuestion: string | undefined;
+  let ambiguousBookingClock = false;
   // bug 1.1 (2026-08-27, Mike Naumenko / D0ARQRD5H28) — did THIS turn's inbound
   // message contain a detected (date, time) availability question at all? Set
   // from `precheckAvailability`'s own `ran` (below) — true only when at least
@@ -1026,6 +1222,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // with no tool call is exactly the shape that let a stale time from three
   // days earlier in the thread ship as fact.
   let availabilityQuestionDetected = false;
+  let requestedSearchWindow: SkillContext['requestedSearchWindow'];
   // 2026-08-30 — the precheck's synthetic tool-summary lines (stable prefix
   // `[availability_precheck`, rendered by the one producer —
   // availabilityPreCheck.ts's renderToolSummaryLines). Carried verbatim to the
@@ -1079,6 +1276,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
       const asker = input.userId ? getPersonMemory(input.userId) ?? undefined : undefined;
       const requesterAvailability = loadAttendeeAvailabilityForPerson(asker, profile.user.timezone);
       const result = await precheckAvailability({
+        requiredDay:meetingRequest?.requiredDay,
         message: userMessage,
         profile,
         requesterAvailability,
@@ -1087,6 +1285,8 @@ export async function buildTurnContext(input: OrchestratorInput) {
         // v3.3.7 (#125b) — the day a bare time refers to often lives a
         // message earlier ("מחר... 17:00" → "13:00/13:30?").
         recentThread: conversationHistory.slice(-4),
+        requestZone: meetingRequest?.clockZone?.zone,
+        durationMinutes: meetingRequest?.duration?.minutes,
         // v4.2.x — thread identity for the alternatives block. When every tested
         // slot comes back blocked, nearbyAlternatives offers concrete times and
         // records them into the offered-slots stash (ops/helpers.ts's recordOfferedSlots). Must be
@@ -1108,9 +1308,27 @@ export async function buildTurnContext(input: OrchestratorInput) {
         // whether the question was actually about a third party's calendar.
         namedAttendeeEmails: namedInternalAttendeeEmails,
       });
-      if (result.ran && result.promptBlock) {
+      if (existingInviteSubject && result.verdicts.length === 1 && !result.verdicts[0].other) {
+        existingInviteStart = result.verdicts[0].instantIso;
+      }
+      if (!existingInviteSubject && result.ran && result.promptBlock) {
         availabilityPrecheckBlock = result.promptBlock;
       }
+      const ambiguous = result.verdicts.length === 1 && result.verdicts[0].other ? result.verdicts[0] : undefined;
+      ambiguousBookingClock = !!(exactBookingRequested && ambiguous?.other && !existingInviteSubject && !requestedException);
+      if (ambiguousBookingClock && ambiguous?.statedClock && ambiguous.other && (ambiguous.bookable || ambiguous.other.bookable)) {
+        const local = ambiguous.other.zone;
+        const home = profile.user.timezone;
+        const label = (zone: string) => zone.split('/').at(-1)!.replace(/_/g,' ');
+        const clock = ambiguous.statedClock;
+        if (existingInviteLocale === 'he') {
+          const city = (zone: string) => zone === 'America/New_York' ? 'ניו יורק' : zone === 'Asia/Jerusalem' ? 'ישראל' : label(zone);
+          bookingClockQuestion = 'התכוונת ל־' + clock + ' לפי שעון ' + city(local) + ' או שעון ' + city(home) + '?';
+        } else if (existingInviteLocale === 'en') {
+          bookingClockQuestion = 'Did you mean ' + clock + ' in ' + label(local) + ' or ' + label(home) + '?';
+        }
+      }
+      requestedSearchWindow = result.searchWindow;
       availabilityQuestionDetected = result.ran;
       availabilityPrecheckToolSummaries = result.toolSummaryLines;
       // A slot the colleague ASKED about that we confirmed bookable IS a slot
@@ -1121,7 +1339,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
       // pre-fix only the search did, so a point-check confirmation couldn't be held.
       if (result.ran && input.channelId && result.verdicts.length > 0) {
         const bookableSlots = result.verdicts
-          .filter(v => v.bookable)
+          .filter(v => v.bookable && !v.other)
           .flatMap(v => {
             // Keep the exact checked occurrence when the owner's clock repeats.
             const dt = DateTime.fromISO(v.instantIso ?? `${v.date}T${v.time}`, { zone: profile.user.timezone });
@@ -1446,6 +1664,7 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
   const systemBlocksDynamic = [
     languageDirectiveBlock,
     priorOutboundBlock,
+    meetingRequest?.requiredDay ? 'Required meeting date: '+JSON.stringify(meetingRequest.requiredDay)+'. Keep the search and any counterproposal within this date unless the person changes it.' : undefined,
     availabilityPrecheckBlock,
     resolvedAttendeesBlock,
     offeredSlotsBlock,
@@ -1462,9 +1681,14 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     socialDirectiveBlock,
   ].filter(Boolean).join('\n\n');
 
-  const systemBlocks: Anthropic.TextBlockParam[] = promptParts.static
+  const schedulingDm = !!meetingRequest && input.channel === 'slack' && !input.isChannel && !input.isMpim && input.authority === 'colleague'
+    && input.surface === 'colleague_dm' && !input.images?.length && !input.forceToolOnFirstTurn;
+  const staticInstructions = schedulingDm
+    ? (await import('./colleagueSchedulingPrompt')).colleagueSchedulingPrompt(profile.user.name, profile.assistant.name, profile.meetings?.default_meeting_duration ?? 25) + '\n\n' + promptParts.audienceRules
+    : promptParts.static;
+  const systemBlocks: Anthropic.TextBlockParam[] = staticInstructions
     ? [
-        { type: 'text', text: promptParts.static, cache_control: { type: 'ephemeral' } } as Anthropic.TextBlockParam,
+        { type: 'text', text: staticInstructions, cache_control: { type: 'ephemeral' } } as Anthropic.TextBlockParam,
         { type: 'text', text: systemBlocksDynamic } as Anthropic.TextBlockParam,
       ]
     : [{ type: 'text', text: systemBlocksDynamic } as Anthropic.TextBlockParam];
@@ -1487,6 +1711,13 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
   // Carry the same per-turn write boundary into dispatch. Tool descriptions
   // alone cannot prevent a stale or invented tool_use from reaching a handler.
   const blockedWriteTools = new Set<string>();
+  if (ambiguousBookingClock) {
+    blockedWriteTools.add('create_meeting');
+    tools = tools.filter(tool => tool.name !== 'create_meeting');
+  }
+  if (exactBookingRequested && !ambiguousBookingClock && !meetingExplorationOnly) {
+    systemBlocks.push({type:'text',text:'The requester asked for this booking. After resolving its time and participants, use create_meeting for the requested slot. A search result alone neither books the meeting nor sends an approval. The booking handler checks current conflicts and supplies the actionable approval when needed.'});
+  }
   const negativeReaction = socialClassification?.kind === 'social'
     && socialClassification.social?.direction === 'reaction'
     && socialClassification.social?.sentiment === 'negative';
@@ -1499,11 +1730,29 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
   // calendar mutation. Reads (get_calendar / find_available_slots /
   // get_my_tasks / recall_*) stay available so Sonnet can re-verify state
   // while she rewrites the wording.
-  const readOnly = input.proseOnly === true || meetingExplorationOnly || negativeReaction;
+  if (negativeReaction || !tools.some(t => t.name === 'create_approval') || !tools.some(t => t.name === 'check_join_availability')) existingInviteSubject = undefined;
+  if (existingInviteSubject) logger.info('Checking organizer invitation', { threadTs });
+  if (existingInviteSubject) systemBlocks.push({type:'text',text:'The requester wants the owner to join their existing invitation. Check the stated meeting with check_join_availability using the original subject. The organizer keeps the invitation. The check can route a needed attendance decision. Report its actual result in one or two sentences.'});
+  if (negativeReaction || !tools.some(t => t.name === 'create_approval')) consultOwnerQuote = undefined;
+  const readOnly = !!consultOwnerQuote || !!existingInviteSubject || input.proseOnly === true || meetingExplorationOnly || !!requestedException || negativeReaction;
   if (readOnly || holdOnlyWindows) {
     const canHold = !readOnly && !!holdOnlyWindows?.size && tools.some(t => t.name === 'hold_slot');
+    // The tools on a status/selection turn describe what can happen NOW.
+    // Expose the actual route from an expired offer to a new, verified choice.
+    const priorOfferReceipt = conversationHistory.at(-1)?.toolSummaries?.some(line => line.startsWith('[find_available_slots '));
+    if (!existingInviteSubject && (unresolvedHoldSelection || priorOfferReceipt) && meetingExplorationOnly && !input.proseOnly && !negativeReaction
+      && input.channel === 'slack' && input.authority === 'colleague' && input.userId !== profile.user.slack_user_id
+      && tools.some(t => t.name === 'hold_slot') && tools.some(t => t.name === 'find_available_slots')) {
+      if (unresolvedHoldSelection) {
+        const {MAX_HOLDS_PER_MEETING} = await import('../../db/slotHolds');
+        systemBlocks.push({type:'text',text:`A colleague may hold up to ${MAX_HOLDS_PER_MEETING} choices for one meeting. When they request more, ask which times to keep, within that limit.`});
+      }
+      systemBlocks.push({ type: 'text', text: `If the requester asks about a previous hold or invitation, use its actual status. If they reported sending an invitation themselves, first use get_calendar to check for that shared invitation on the discussed date. A busy interval alone cannot identify it. A matching shared invite may already reserve this time; report its actual duration and leave it in place. For a status question report only confirmed actions. If they request a tentative hold and an earlier choice has gone stale or is unclear, use find_available_slots with candidate_slots to recheck the discussed date, start and duration. If two durations or choices are plausible, clarify that detail. Offer the verified interval in their clock and ask them to select it for an internal hold. You can place that hold on their selection without an Outlook invitation.${tools.some(t => t.name === 'create_meeting') ? ' You can also send an invitation when they authorize an actual booking.' : ''}` });
+    }
+    const canAsk = (!!consultOwnerQuote || !!requestedException) && !input.proseOnly && !negativeReaction && tools.some(t => t.name === 'create_approval');
+    if (!canAsk) requestedException = undefined;
     for (const name of WRITE_TOOLS) {
-      if (!(canHold && name === 'hold_slot')) blockedWriteTools.add(name);
+      if (!(canHold && name === 'hold_slot') && !(canAsk && name === 'create_approval')) blockedWriteTools.add(name);
     }
     const before = tools.length;
     tools = tools.filter(t => !blockedWriteTools.has(t.name));
@@ -1659,6 +1908,21 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     tools,
     blockedWriteTools,
     holdOnlyWindows,
+    continuedRefusal,
+    existingInviteSubject,
+    existingInviteStart,
+    existingInviteLocale,
+    withdrawalId,
+    firmWindowBooking,
+    searchBeforeReply,
+    decisionReportLocale,
+    requestedOptionCount,
+    consultOwnerQuote,
+    consultBackground,
+    optionsReplyLocale,
+    singleZoneOptions,
+    exactBookingRequested,
+    requestedException,
     model,
     maxTokens,
     turnSenderRole,
@@ -1670,7 +1934,10 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     ordinaryCreateAfterOtherMeeting,
     contextualApprovalDecisions,
     standaloneBookingApproval,
+    requestedSearchWindow,
+    meetingRequest,
     availabilityQuestionDetected,
     availabilityPrecheckToolSummaries,
+    bookingClockQuestion,
   };
 }

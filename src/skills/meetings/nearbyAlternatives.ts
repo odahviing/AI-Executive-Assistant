@@ -74,6 +74,7 @@ import {
 import { bookingLeadTimeHours, offeredSlotCount } from '../../utils/scheduleRules';
 import { getEffectiveWorkDay } from '../../utils/workHours';
 import { profileDualClock } from '../../utils/weTimeResolver';
+import { renderClockInZone } from '../../utils/timezoneConvert';
 import type { SubjectViewer } from '../../utils/displaySubject';
 import logger from '../../utils/logger';
 
@@ -84,8 +85,9 @@ const FORWARD_WORKDAYS = 2;
 export interface NearbyAlternative {
   start: string;
   end: string;
-  /** The dual clock, rendered ONCE by the producer (M13) — quote it verbatim. */
+  /** The interval in its presentation frame, rendered once for the reply. */
   label: string;
+  presentationZone?: string;
   /**
    * M2 — set when this slot is only free because a SKIPPABLE Working-Elsewhere
    * commitment is treated as optional. It is bookable, but it is the fallback
@@ -136,6 +138,7 @@ export async function findNearbyAlternatives(params: {
   excludeEventIds?: string[];
   /** FRAMING of the rendered label only — never forwarded to the search. */
   viewer?: SubjectViewer;
+  presentationZoneForInstant?: (instant: string) => string;
   /**
    * v4.4.9 (#154) — UNLIKE `viewer` above, this DOES reach the search: it's
    * the attendee-aware half of the mask on `over_optional`'s subject (a
@@ -217,10 +220,13 @@ export async function findNearbyAlternatives(params: {
     for (const start of picks) {
       const slot = byStart.get(start);
       if (!slot) continue;
+      const presentationZone = params.presentationZoneForInstant?.(start);
+      const rendered = presentationZone && renderClockInZone(start, tz, presentationZone, slot.end);
       const alt: NearbyAlternative = {
         start: slot.start,
         end: slot.end,
-        label: whenText(slot.start, slot.end),
+        label: rendered || whenText(slot.start, slot.end),
+        ...(rendered ? { presentationZone } : {}),
         ...(slot.over_optional ? { overOptional: slot.over_optional } : {}),
       };
       // slotLocalDay is the spreader's OWN day predicate — the same one that
@@ -279,6 +285,8 @@ interface TestedSlot {
  */
 export async function blockedSlotAlternativesBlock(params: {
   profile: UserProfile;
+  requiredDay?: {date:string;zone:string};
+  presentationZoneForInstant?: (instant: string) => string;
   /** Every verdict the point-check produced this turn — TESTED slots only. */
   verdicts: TestedSlot[];
   /** The meeting length the point-check validated, so the options are the length
@@ -307,7 +315,15 @@ export async function blockedSlotAlternativesBlock(params: {
     // The point-check is the colleague surface; the label takes the named
     // third-person framing, and the search keeps its colleague-safe default.
     viewer: 'other',
+    presentationZoneForInstant: params.presentationZoneForInstant,
   });
+  if (params.requiredDay) {
+    const {date,zone} = params.requiredDay;
+    const fits = (slot:NearbyAlternative) => DateTime.fromISO(slot.start,{zone}).toISODate() === date
+      && DateTime.fromISO(slot.end,{zone}).minus({milliseconds:1}).toISODate() === date;
+    result.onAnchorDays = result.onAnchorDays.filter(fits);
+    result.beyond = result.beyond.filter(fits);
+  }
   const total = result.onAnchorDays.length + result.beyond.length;
   if (total === 0) {
     logger.info('blockedSlotAlternativesBlock — every tested slot blocked, but the search found no alternative either', {

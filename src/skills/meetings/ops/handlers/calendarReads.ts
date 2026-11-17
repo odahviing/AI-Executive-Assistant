@@ -800,21 +800,15 @@ export async function handleAnalyzeCalendar(args: Record<string, unknown>, ctx: 
 export async function handleGetFreeBusy(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context, userEmail, timezone } = ctx;
         try {
-          // `notChecked` = the read never happened (malformed window / Graph
-          // rejected it). Pre-fix this tool returned `{}`, which is the literal
-          // wire shape of "nobody has a single busy block" — so the answer to "is
-          // he free?" was an unqualified yes, from a call that never reached his
-          // calendar. Reported as an explicit refusal-to-answer below, not as data.
+          // A mailbox needs a complete provider read before its gaps mean free.
           const fbDiag: { notChecked?: string[]; unresolved?: string[] } = {};
           let raw = await getFreeBusy(userEmail, args.emails as string[], args.start_date as string, args.end_date as string, timezone, args.force_refresh === true ? 'force' : 'cached', fbDiag);
-          if ((fbDiag.notChecked ?? []).length > 0) {
-            logger.warn('get_free_busy — the free/busy read never happened; refusing to report anyone as free', {
-              emails: args.emails, start_date: args.start_date, end_date: args.end_date,
-            });
+          const missing = new Set([...(fbDiag.notChecked ?? []), ...(fbDiag.unresolved ?? [])]);
+          if (fbDiag.notChecked?.length && Object.keys(raw).every(email => missing.has(email.toLowerCase()))) {
             return {
               error: 'freebusy_not_read',
-              not_checked: fbDiag.notChecked,
-              message: `I could not read free/busy for ${(fbDiag.notChecked ?? []).join(', ')} — the window I was given (${String(args.start_date)} → ${String(args.end_date)}) could not be queried, so NO calendar was actually looked at. This is NOT "they are free": say you could not check, or retry with a valid start_date/end_date where the end is after the start.`,
+              not_checked: [...missing],
+              message: `I could not confirm availability for ${[...missing].join(', ')} across the requested window (${String(args.start_date)} → ${String(args.end_date)}).`,
             };
           }
           // v2.1.5 — for colleague-context asks, synthesize out-of-work-hours
@@ -863,9 +857,8 @@ export async function handleGetFreeBusy(args: Record<string, unknown>, ctx: OpCt
           // description, which Sonnet ignored — this rides the result it just read.)
           const emailsArg = Array.isArray(args.emails) ? (args.emails as string[]) : [];
           const hasOtherAttendees = emailsArg.some(e => e && e.toLowerCase() !== userEmail.toLowerCase());
-          // Unresolved mailboxes carry no checked-free row. Build a response
+          // Incomplete mailboxes carry no checked-free row. Build a response
           // without mutating the provider result, which may be shared by cache.
-          const missing = new Set(fbDiag.unresolved ?? []);
           const checked = missing.size ? Object.fromEntries(Object.entries(raw).filter(([email]) => !missing.has(email.toLowerCase()))) : raw;
           const coverage = missing.size ? { not_checked: [...missing], _attendee_not_checked_warning: 'Availability could not be confirmed for the listed mailboxes.' } : {};
           if (hasOtherAttendees) {

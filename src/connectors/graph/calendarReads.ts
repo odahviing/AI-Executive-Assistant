@@ -1,6 +1,7 @@
 import { DateTime } from 'luxon';
 import logger from '../../utils/logger';
 import { getClient } from './graphClient';
+import type { GraphRequest } from '@microsoft/microsoft-graph-client';
 import type { CalendarEvent, FreeBusySlot, VerifyResult } from './calendarTypes';
 import type { UserProfile } from '../../config/userProfile';
 
@@ -12,17 +13,21 @@ import type { UserProfile } from '../../config/userProfile';
  * ISO string that includes the offset — so the TZ context is encoded
  * in the data itself, not lost in transit.
  */
-export function parseGraphFreeBusySlot(item: any, requestedTz: string): FreeBusySlot {
-  const start = DateTime.fromISO(item.start.dateTime, { zone: 'utc' })
-    .setZone(requestedTz);
-  const end = DateTime.fromISO(item.end.dateTime, { zone: 'utc' })
-    .setZone(requestedTz);
+export function parseGraphFreeBusySlot(item: any, requestedTz: string): FreeBusySlot | null {
+  const bounds = calendarInterval(item);
+  if (!bounds || !['free', 'busy', 'tentative', 'oof', 'workingElsewhere', 'unknown'].includes(item?.status)) return null;
   return {
-    start: start.isValid ? start.toISO()! : item.start.dateTime,
-    end: end.isValid ? end.toISO()! : item.end.dateTime,
+    start: bounds.start.setZone(requestedTz).toISO()!,
+    end: bounds.end.setZone(requestedTz).toISO()!,
     status: item.status,
     _timezone: requestedTz,
   };
+}
+
+function calendarInterval(event: { start?: CalendarEvent['start']; end?: CalendarEvent['end'] } | null | undefined) {
+  const start = DateTime.fromISO(event?.start?.dateTime ?? '', { zone: event?.start?.timeZone || 'UTC' });
+  const end = DateTime.fromISO(event?.end?.dateTime ?? '', { zone: event?.end?.timeZone || 'UTC' });
+  return start.isValid && end.isValid && end > start ? { start, end } : null;
 }
 
 // ── Calendar reads ────────────────────────────────────────────────────────────
@@ -38,16 +43,13 @@ export function parseGraphFreeBusySlot(item: any, requestedTz: string): FreeBusy
  * Fix: use Luxon to produce a full ISO string with offset, e.g. "2025-04-14T00:00:00+03:00"
  * so Graph uses the correct local midnight, not UTC midnight.
  */
-// The yyyy-MM-dd prefix of a date/ISO string. Guards a missing/blank arg:
-// an undefined start_date/end_date reaching here used to crash the WHOLE
-// calendar query (`undefined.split('T')` → TypeError, surfaced to the owner as
-// "trouble pulling up the calendar", 2026-07-13). A missing date now degrades
-// to "today" in the mailbox zone instead of throwing — so every caller of
-// getCalendarEvents / getFreeBusy is protected at this one chokepoint, not
-// per-handler.
+// A bare date belongs to the mailbox. An offset-qualified instant can fall on
+// a different mailbox date than the date printed beside its original offset.
 function datePart(dateStr: string | undefined | null, timezone: string): string {
   if (!dateStr || !dateStr.trim()) return DateTime.now().setZone(timezone).toISODate()!;
-  return dateStr.split('T')[0];
+  const localDate = DateTime.fromISO(dateStr.trim(), { zone: timezone }).toISODate();
+  if (!localDate) throw new Error('The calendar date could not be interpreted in the requested timezone.');
+  return localDate;
 }
 
 function toStartOfDayLocal(dateStr: string | undefined | null, timezone: string): string {
@@ -501,9 +503,8 @@ export async function getOwnerEventsForDecision(
 
 /**
  * findDuplicateEvent — the ONE idempotency primitive. Returns the owner's
- * existing event whose subject (trim + lowercase) matches and whose start is
- * within `toleranceMs` of the requested start, else undefined. Callers own
- * their own short-circuit shape — only the fetch + match lives here.
+ * exact owner-organized event, 'ambiguous' for an unverified collision,
+ * or undefined when there is no nearby title match.
  *
  * Why: date-verifier / claim-checker retries re-run the whole orchestrator on a
  * new turn, and a direct create_meeting can race a coord book. Graph is the
@@ -512,16 +513,17 @@ export async function getOwnerEventsForDecision(
  *
  * Naming the real conflicting event behind an owner_busy_collision refusal is
  * a DIFFERENT job (see createMeeting.ts's use of diagnostics.conflictingEvent,
- * sourced from checkSlot's own overCommitment) — this function only ever
- * matches on subject + start-proximity, for idempotency.
+ * sourced from checkSlot's own overCommitment).
  */
 export async function findDuplicateEvent(
   userEmail: string,
   subject: string,
   startIso: string,
   timezone: string,
+  intended: { endIso: string; attendees: Array<{ email?: string; optional?: boolean }>;
+    assistantEmail?: string; roomEmail?: string; requireRoom: boolean; allDay: boolean },
   toleranceMs = 2 * 60 * 1000,
-): Promise<CalendarEvent | undefined> {
+): Promise<CalendarEvent | 'ambiguous' | undefined> {
   const startDt = DateTime.fromISO(startIso, { zone: timezone });
   if (!startDt.isValid) return undefined;
   const wantSubject = subject.trim().toLowerCase();
@@ -530,12 +532,44 @@ export async function findDuplicateEvent(
   // A write retry may follow a POST whose response was lost. Neither the
   // cross-turn cache nor that turn's memoized absence proves no invite exists.
   const events = await getCalendarEvents(userEmail, probeDate, probeDate, timezone, 'force');
-  return events.find(ev => {
+  const nearby = events.filter(ev => {
     if (ev.isCancelled) return false;
     if ((ev.subject ?? '').trim().toLowerCase() !== wantSubject) return false;
     const evStartMs = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toMillis();
     return Math.abs(evStartMs - startMs) <= toleranceMs;
   });
+  if (!nearby.length) return undefined;
+  const address = (value?: string) => value?.trim().toLowerCase();
+  const owner = address(userEmail);
+  const room = address(intended.roomEmail);
+  const assistant = address(intended.assistantEmail);
+  const expected = new Map<string, string>();
+  let requireRoom = intended.requireRoom;
+  for (const attendee of intended.attendees) {
+    const email = address(attendee?.email);
+    if (!email) return 'ambiguous';
+    if (email === room) requireRoom = true;
+    else if (email !== owner && email !== assistant) expected.set(email, attendee.optional ? 'optional' : 'required');
+  }
+  const endMs = DateTime.fromISO(intended.endIso, { zone: timezone }).toMillis();
+  const matches = nearby.filter(ev => {
+    if (!ev.id || address(ev.organizer?.emailAddress?.address) !== owner || !Array.isArray(ev.attendees)
+      || ev.isAllDay !== intended.allDay || !ev.end?.dateTime
+      || DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toMillis() !== startMs
+      || DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' }).toMillis() !== endMs) return false;
+    const remaining = new Map(expected);
+    let hasRoom = false;
+    for (const attendee of ev.attendees) {
+      const email = address(attendee.emailAddress?.address);
+      if (!email) return false;
+      if (email === room) { hasRoom = true; continue; }
+      if (email === owner || attendee.type === 'resource') continue;
+      if (!remaining.has(email) || remaining.get(email) !== attendee.type) return false;
+      remaining.delete(email);
+    }
+    return remaining.size === 0 && (!requireRoom || hasRoom);
+  });
+  return matches.length === 1 ? matches[0] : 'ambiguous';
 }
 
 /**
@@ -639,18 +673,8 @@ async function getCalendarEventsImpl(
 
   logger.info('Querying calendar', { userEmail, start: cleanStart, end: cleanEnd });
 
-  // v2.1.6 — follow @odata.nextLink until exhausted (or a sane hard cap).
-  // Previous single-shot `.query({$top: 100})` silently truncated at 100
-  // events, leading to bugs like "the series doesn't seem to have instances
-  // beyond Jun 11" when the series in fact ran through July — Graph returned
-  // the first 100 chronologically, the LLM saw no nextLink handling, and the
-  // narration described a false terminal boundary. Hard cap of 1000 prevents
-  // runaway queries on accidentally-enormous ranges while comfortably
-  // covering realistic multi-month calendar views.
-  const HARD_CAP = 1000;
   try {
-    const events: CalendarEvent[] = [];
-    let request: any = client
+    const request = client
       .api(`/users/${userEmail}/calendarView`)
       .header('Prefer', `outlook.timezone="${timezone}"`)
       .query({
@@ -661,35 +685,36 @@ async function getCalendarEventsImpl(
         $top: 100,
       });
 
-    while (request && events.length < HARD_CAP) {
-      const response: any = await request.get();
-      const page: CalendarEvent[] = response.value ?? [];
-      events.push(...page);
-      const nextLink: string | undefined = response['@odata.nextLink'];
-      if (!nextLink) break;
-      // Graph SDK accepts the full nextLink as an api() URL. The cursor
-      // preserves the QUERY (filter/select/orderby) but NOT request HEADERS.
-      // v2.3.1 (#63) — re-attach Prefer so subsequent pages also come
-      // back in the owner's timezone instead of defaulting to UTC.
-      request = client.api(nextLink).header('Prefer', `outlook.timezone="${timezone}"`);
-    }
+    const events = await readCalendarViewPages<CalendarEvent>(request, timezone);
 
-    const truncated = events.length >= HARD_CAP;
     logger.info('Calendar events fetched', {
       count: events.length,
       start: cleanStart,
       end: cleanEnd,
-      truncated,
     });
-    if (truncated) {
-      logger.warn('Calendar fetch hit HARD_CAP — result may be incomplete', {
-        userEmail, start: cleanStart, end: cleanEnd, cap: HARD_CAP,
-      });
-    }
     return events;
   } catch (err) {
     logger.error('Failed to fetch calendar events', { err, userEmail, start: cleanStart, end: cleanEnd });
     throw err;
+  }
+}
+
+/** A calendarView is complete only at a terminal page. Continuations keep the
+ * query but omit request headers, so apply the same timezone on each page. */
+async function readCalendarViewPages<T>(request: GraphRequest, timezone: string): Promise<T[]> {
+  const events: T[] = [];
+  const continuations = new Set<string>();
+  while (true) {
+    const page = await request.get();
+    if (!Array.isArray(page?.value)) throw new Error('Calendar returned an incomplete event page.');
+    events.push(...page.value);
+    const next = page['@odata.nextLink'];
+    if (next == null) return events;
+    if (typeof next !== 'string' || !next.trim() || continuations.has(next)) {
+      throw new Error('Calendar returned an invalid continuation; the requested dates could not be read completely.');
+    }
+    continuations.add(next);
+    request = getClient().api(next).header('Prefer', `outlook.timezone="${timezone}"`);
   }
 }
 
@@ -730,12 +755,10 @@ type FbRead = {
 };
 
 /**
- * Graph's own getSchedule ceiling (62 days), stated ONCE and in ONE unit —
- * absolute minutes, the same unit the window is measured in. Two spellings of the
- * same limit is what the DST fixed point was: the test counted absolute minutes
- * and the clamp counted calendar days.
+ * Graph requires each getSchedule request to be shorter than 62 days.
+ * 61 elapsed days also fits across a change in local UTC offset.
  */
-const MAX_FREEBUSY_WINDOW_MINUTES = 62 * 24 * 60;
+const MAX_FREEBUSY_WINDOW_MINUTES = 61 * 24 * 60;
 
 export async function getFreeBusy(
   callerEmail: string,
@@ -752,20 +775,14 @@ export async function getFreeBusy(
   // as FULLY FREE — the "elinor.avny@" slots were offered without ever checking
   // the real Elinor.
   //
-  // `notChecked` — (v4.2.x). Addresses NOBODY asked Graph about, because the
-  // request could not be made at all (the two branches below, and the
-  // ErrorInvalidTimeInterval catch). Deliberately a SECOND list, not folded into
-  // `unresolved`: the consequence is the same ("no data — do not read as free")
-  // but the REASON is opposite, and `unresolved`'s consumers state that reason out
-  // loud ("these addresses do NOT exist in the company directory", create_meeting
-  // / find_available_slots). Saying that about a live mailbox because the window
-  // was malformed is a confidently wrong reason, which is the M9 failure this fix
-  // exists to remove — not a smaller version of it.
+  // `notChecked` — mailboxes without complete evidence for the requested
+  // interval. A rejected window or malformed schedule cannot establish free
+  // time. A valid busy item alongside malformed items remains evidence of busy.
   diagnostics?: { unresolved?: string[]; notChecked?: string[] },
 ): Promise<Record<string, FreeBusySlot[]>> {
   // v2.7.6 — guard against invalid time windows that crash Graph's
   // getSchedule with ErrorInvalidTimeInterval. Graph requires
-  // startTime < endTime AND a window between 1 hour and 62 days. Pre-fix,
+  // startTime < endTime and each POST must cover less than 62 days. Pre-fix,
   // the auto-expand loop in findAvailableSlots could produce equal or
   // inverted windows on edge cases (off-by-one when search_from was at the
   // boundary of an iteration).
@@ -784,10 +801,7 @@ export async function getFreeBusy(
   //     of "they are free".
   const parsedStart = DateTime.fromISO(startDate, { zone: timezone });
   let parsedEnd = DateTime.fromISO(endDate, { zone: timezone });
-  // The end that is actually QUERIED. Two pre-flight repairs move it in place — the
-  // whole-day widening below and the 62-day clamp further down — and everything
-  // downstream reads this one variable: the cache key, the log lines and the POST.
-  // The window we decided on and the window Graph is asked about cannot drift.
+  // Whole-day input includes the final day in both the provider read and cache key.
   let queryEnd = endDate;
   // The pre-flight branches below answer directly, so they write `diagnostics`
   // themselves. Graph's own window rejection cannot: it happens inside the
@@ -797,7 +811,10 @@ export async function getFreeBusy(
   // single exit at the bottom applies it.
   const nothingChecked = (why: string): Record<string, FreeBusySlot[]> => {
     const notChecked = logNothingChecked(why, startDate, queryEnd, emails);
-    if (diagnostics) diagnostics.notChecked = notChecked;
+    if (diagnostics) {
+      diagnostics.notChecked = notChecked;
+      diagnostics.unresolved = [];
+    }
     return {};
   };
   if (!parsedStart.isValid || !parsedEnd.isValid) {
@@ -833,7 +850,7 @@ export async function getFreeBusy(
   // window could not be queried" — would simply be false. Widened IN PLACE, not by
   // re-entry: nothing above this line depends on the end, every branch below reads
   // `parsedEnd`, and a self-call that re-derives its own argument is the exact
-  // shape of the 62-day bug fixed further down. An inverted date-only pair still
+  // shape of the former 62-day clamp. An inverted date-only pair still
   // lands on `nothingChecked` below — widening its end only makes it more inverted.
   // Tested on the ISO date shape — a structured string, never prose.
   const endIsWholeDay = /^\d{4}-\d{2}-\d{2}$/.test(endDate.trim())
@@ -843,7 +860,7 @@ export async function getFreeBusy(
     parsedEnd = parsedEnd.endOf('day');
     queryEnd = parsedEnd.toISO()!;
   }
-  let windowMinutes = parsedEnd.diff(parsedStart, 'minutes').minutes;
+  const windowMinutes = parsedEnd.diff(parsedStart, 'minutes').minutes;
   // An INSTANT, i.e. start === end. This is the branch with all the real
   // traffic: availabilityPreCheck normalizes a colleague's "יש משהו אחרי 17:00?"
   // to a single instant with no end and calls straight through, so a
@@ -879,46 +896,6 @@ export async function getFreeBusy(
     // repair: there is no way to tell whether the start or the end is the typo.
     return nothingChecked('inverted window (end before start)');
   }
-  if (windowMinutes > MAX_FREEBUSY_WINDOW_MINUTES) {
-    // The limit and the clamp have to be ONE arithmetic. `windowMinutes` is
-    // ABSOLUTE (`diff`), while the clamp was `plus({ days: 62 })` — CALENDAR days,
-    // which hold the wall clock across a DST transition. A clamped window
-    // containing a fall-back is therefore 89,340 real minutes against an 89,280
-    // limit: still over — and the clamp, re-derived from the UNCHANGED start, comes
-    // out byte-identical, so the old recursion re-entered on the same window
-    // forever. Synchronously, so the stack died with a RangeError behind a flood of
-    // warn lines rather than hanging. Measured, not reasoned: start
-    // 2026-09-01T09:00 → end 2026-12-31T17:00 in Asia/Jerusalem clamps to
-    // 2026-11-02T09:00+02:00 = 89,340 min, then to the identical value again. Live
-    // for START dates 2026-08-24 … 2026-10-24 there, every year, and on its own
-    // dates in every tenant zone with a fall-back; reachable from get_free_busy
-    // with any model-supplied range and from find_available_slots, which chunks
-    // nothing and rethrows non-outage faults, so it took the whole tool down.
-    //
-    // Clamping in MINUTES makes end − start exactly the ceiling by construction,
-    // and narrowing in place removes the re-entry altogether — which is also what
-    // retires #124h here: that recursion had to remember to forward `freshness` and
-    // `diagnostics` (it once didn't, and a typo'd attendee inside a long window
-    // reported as resolved-and-free), and now there is nothing to forward them to.
-    // And the ceiling is TWO windows, not one: "62 days" in Graph's language is
-    // calendar days, "89,280 minutes" in ours is absolute, and across a transition
-    // those differ by an hour in opposite directions. So clamp to whichever is
-    // TIGHTER and both readings hold at once — never more than 62 calendar days for
-    // Graph, never more than the limit we just tested for ourselves. Off a
-    // transition the two are the same instant, so this is byte-identical to the old
-    // clamp everywhere except the window that was broken.
-    const byCalendar = parsedStart.plus({ days: 62 });
-    const byMinutes = parsedStart.plus({ minutes: MAX_FREEBUSY_WINDOW_MINUTES });
-    const clampedEnd = byCalendar.toMillis() <= byMinutes.toMillis() ? byCalendar : byMinutes;
-    parsedEnd = clampedEnd;
-    queryEnd = parsedEnd.toISO()!;
-    logger.warn('getFreeBusy — window > 62 days, clamping to the 62-day ceiling', {
-      startDate, requestedEnd: endDate, requestedWindowMinutes: windowMinutes,
-      clampedEnd: queryEnd,
-    });
-    windowMinutes = parsedEnd.diff(parsedStart, 'minutes').minutes;
-  }
-
   // v3.2.x (#121) — cross-turn free/busy cache (others' calendars change like
   // ours → same write-invalidation + TTL). Key on the sorted attendee set + the
   // RESOLVED window instants, not the caller's spelling: '2026-07-28T10:00:00'
@@ -952,7 +929,37 @@ export async function getFreeBusy(
   // skips it too — a retry has to be able to escape a memoized rejection.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { memoize } = require('../../utils/turnCache') as typeof import('../../utils/turnCache');
-  const runRead = () => getFreeBusyImpl(callerEmail, emails, startDate, queryEnd, timezone, windowMinutes);
+  const runRead = async (): Promise<FbRead> => {
+    const count = Math.ceil(windowMinutes / MAX_FREEBUSY_WINDOW_MINUTES);
+    if (count === 1) return getFreeBusyImpl(callerEmail, emails, startDate, queryEnd, timezone, windowMinutes);
+    // Equal contiguous windows avoid a one-minute tail that Graph cannot query.
+    // An event spanning two windows can appear in both provider responses.
+    const result: Record<string, FreeBusySlot[]> = {};
+    const seen = new Map<string, Set<string>>();
+    const unresolved = new Set<string>(), notChecked = new Set<string>();
+    let from = parsedStart;
+    for (let index = 1; index <= count; index++) {
+      const to = index === count ? parsedEnd
+        : parsedStart.plus({ milliseconds: Math.round((parsedEnd.toMillis() - parsedStart.toMillis()) * (index / count)) });
+      const part = await getFreeBusyImpl(callerEmail, emails, from.toISO()!, to.toISO()!, timezone, to.diff(from, 'minutes').minutes);
+      for (const email of part.unresolved) unresolved.add(email);
+      for (const email of part.notChecked) notChecked.add(email);
+      for (const [email, slots] of Object.entries(part.result)) {
+        result[email] ??= [];
+        const keys = seen.get(email) ?? new Set<string>();
+        seen.set(email, keys);
+        for (const slot of slots) {
+          const key = `${slot.start}|${slot.end}|${slot.status}`;
+          if (!keys.has(key)) {
+            keys.add(key);
+            result[email].push(slot);
+          }
+        }
+      }
+      from = to;
+    }
+    return { result, unresolved: [...unresolved], notChecked: [...notChecked] };
+  };
   const read = freshness === 'force' ? await runRead() : await memoize(fbKey, runRead);
   // ONE exit, so `unresolved` / `notChecked` land identically whether this caller
   // made the call or is sharing another caller's memoized one.
@@ -997,9 +1004,7 @@ export async function getFreeBusyForDecision(
     const event = await client.api(`/users/${encodeURIComponent(callerEmail)}/events/${encodeURIComponent(id)}`)
       .header('Prefer', 'outlook.timezone="UTC"')
       .select('id,iCalUId,type,start,end,attendees,isCancelled').get();
-    if (!event || event.id !== id || event.type === 'seriesMaster' || event.isCancelled !== false
-      || !DateTime.fromISO(event.start?.dateTime ?? '', { zone: event.start?.timeZone ?? 'UTC' }).isValid
-      || !DateTime.fromISO(event.end?.dateTime ?? '', { zone: event.end?.timeZone ?? 'UTC' }).isValid) {
+    if (!event || event.id !== id || event.type === 'seriesMaster' || event.isCancelled !== false || !calendarInterval(event)) {
       throw new Error('Moving event identity is unresolved; refresh the identified occurrence before checking availability.');
     }
     sources.push(event);
@@ -1009,36 +1014,34 @@ export async function getFreeBusyForDecision(
     const ownSources = sources.filter(e => e.attendees?.some((a: any) => a.emailAddress?.address?.toLowerCase() === email.toLowerCase()));
     if (!ownSources.length) continue;
     const key = email.toLowerCase();
+    const ranges = ownSources.map(event => calendarInterval(event)!);
+    // A disjoint getSchedule item cannot belong to the moving occurrence,
+    // even if the other view omits it or cannot identify the event.
+    const disjoint = (busy[key] ?? []).filter(slot => !ranges.some(range =>
+      Date.parse(slot.start) < range.end.toMillis() && Date.parse(slot.end) > range.start.toMillis()));
     try {
       if (ownSources.some(e => !e.iCalUId)) throw new Error('Moving occurrence has no cross-calendar identity');
       const ids = new Set(ownSources.map(e => e.iCalUId));
       // Minimal identity-bearing read: no subject, body, location or other
       // private content enters this availability calculation or its result.
-      const events: any[] = [];
-      let request: any = client.api(`/users/${encodeURIComponent(email)}/calendarView`)
+      const request = client.api(`/users/${encodeURIComponent(email)}/calendarView`)
         .header('Prefer', 'outlook.timezone="UTC"')
         .query({ startDateTime: toStartOfDayLocal(startDate, timezone), endDateTime: toEndOfDayLocal(endDate, timezone),
           $select: 'id,iCalUId,type,start,end,showAs,isCancelled', $top: 100 });
-      while (request) {
-        const page = await request.get();
-        if (!Array.isArray(page?.value)) throw new Error('Unavailable attendee event identities');
-        events.push(...page.value);
-        request = page['@odata.nextLink'] ? client.api(page['@odata.nextLink']).header('Prefer', 'outlook.timezone="UTC"') : null;
+      const events = await readCalendarViewPages<CalendarEvent & { iCalUId: string }>(request, 'UTC');
+      const verified: FreeBusySlot[] = [];
+      for (const event of events) {
+        const slot = parseGraphFreeBusySlot({ start: event?.start, end: event?.end, status: event?.showAs }, 'UTC');
+        if (!event?.id || !event.iCalUId || typeof event.isCancelled !== 'boolean' || !slot) throw new Error('Incomplete attendee event evidence');
+        if (!event.isCancelled && !ids.has(event.iCalUId)) verified.push(slot);
       }
-      if (events.some(e => !e.id || !e.iCalUId || typeof e.isCancelled !== 'boolean' || !e.showAs
-        || !DateTime.fromISO(e.start?.dateTime ?? '', { zone: e.start?.timeZone ?? 'UTC' }).isValid
-        || !DateTime.fromISO(e.end?.dateTime ?? '', { zone: e.end?.timeZone ?? 'UTC' }).isValid)) throw new Error('Incomplete attendee event evidence');
-      busy[key] = events.filter(e => !e.isCancelled && !ids.has(e.iCalUId)).map(e => ({
-        start: DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? 'UTC' }).toISO()!,
-        end: DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone ?? 'UTC' }).toISO()!,
-        status: e.showAs, _timezone: 'UTC',
-      }));
+      busy[key] = [...verified, ...disjoint.filter(slot => !verified.some(other =>
+        other.status === slot.status && Date.parse(other.start) === Date.parse(slot.start) && Date.parse(other.end) === Date.parse(slot.end)))];
     } catch (err) {
       // No identity means unknown, never free or a proven self-conflict.
       // Preserve complete busy items disjoint from the old occurrences;
       // do not carve a merged interval or assert its remaining contents.
-      const ranges = ownSources.map(e => ({ start: DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? 'UTC' }).toMillis(), end: DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone ?? 'UTC' }).toMillis() }));
-      busy[key] = (busy[key] ?? []).filter(s => !ranges.some(r => Date.parse(s.start) < r.end && Date.parse(s.end) > r.start));
+      busy[key] = disjoint;
       if (diagnostics) diagnostics.notChecked = [...new Set([...(diagnostics.notChecked ?? []), key])];
       logger.warn('Moving attendee availability is unconfirmed — event identity read unavailable', { email, err: String(err).slice(0, 160) });
     }
@@ -1084,8 +1087,10 @@ async function getFreeBusyImpl(
 
     const result: Record<string, FreeBusySlot[]> = {};
     const unresolved: string[] = [];
-    for (const schedule of response.value || []) {
-      const key = String(schedule.scheduleId ?? '').trim().toLowerCase();
+    const notChecked = new Set<string>();
+    if (!Array.isArray(response?.value)) return { result, unresolved, notChecked: emails.map(e => e.toLowerCase()) };
+    for (const schedule of response.value) {
+      const key = String(schedule?.scheduleId ?? '').trim().toLowerCase();
       if (!key) continue;
       // v3.3.7 (#124h) — Graph marks a non-existent / unresolvable address
       // with a per-schedule `error` object instead of scheduleItems. Surface
@@ -1095,17 +1100,24 @@ async function getFreeBusyImpl(
         result[key] = [];
         continue;
       }
-      result[key] = (schedule.scheduleItems || []).map((item: any) =>
-        parseGraphFreeBusySlot(item, timezone),
-      );
+      if (!Array.isArray(schedule.scheduleItems)) {
+        notChecked.add(key);
+        continue;
+      }
+      result[key] = [];
+      for (const item of schedule.scheduleItems) {
+        const slot = parseGraphFreeBusySlot(item, timezone);
+        if (slot) result[key].push(slot);
+        else notChecked.add(key);
+      }
     }
     // Belt-and-suspenders: an address Graph dropped from the response entirely.
     for (const e of emails) {
       const lower = e.toLowerCase();
       const present = Object.hasOwn(result, lower);
-      if (!present && !unresolved.includes(lower)) unresolved.push(lower);
+      if (!present && !notChecked.has(lower) && !unresolved.includes(lower)) unresolved.push(lower);
     }
-    return { result, unresolved, notChecked: [] };
+    return { result, unresolved, notChecked: [...notChecked] };
   } catch (err: any) {
     logger.error('Failed to fetch free/busy', { err, emails });
 

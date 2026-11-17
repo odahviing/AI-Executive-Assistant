@@ -43,6 +43,7 @@
  * doesn't touch rules — it only normalizes the input.
  */
 
+import { meetingDuration } from '../../utils/meetingDuration';
 import type { UserProfile } from '../../config/userProfile';
 import type { SkillContext } from '../types';
 import { getPersonMemory } from '../../db/people';
@@ -365,26 +366,11 @@ export function resolveDuration(
   const endMs = Date.parse(endIso);
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return null;
   const requestedMin = Math.round((endMs - startMs) / 60000);
-  const allowed = profile.meetings.allowed_durations;
-  if (!Array.isArray(allowed) || allowed.length === 0 || allowed.includes(requestedMin)) {
-    return { endIso, durationMin: requestedMin, requestedMin, snappedMin: requestedMin, needsConfirm: false };
-  }
-  const snappedMin = allowed.reduce((best, c) =>
-    Math.abs(c - requestedMin) < Math.abs(best - requestedMin) ? c : best, allowed[0]);
-  const snapDelta = Math.abs(requestedMin - snappedMin);
-  if (snapDelta <= 5) {
-    return {
-      endIso: new Date(startMs + snappedMin * 60000).toISOString(),
-      durationMin: snappedMin, requestedMin, snappedMin, needsConfirm: false,
-    };
-  }
-  // >5 min off the nearest preset.
-  if (isOwner) {
-    // Owner stated the length — honor it, one step. No snap, no confirm.
-    return { endIso, durationMin: requestedMin, requestedMin, snappedMin, needsConfirm: false };
-  }
-  // Colleague proposing an off-preset long duration → surface a confirm upstream.
-  return { endIso, durationMin: requestedMin, requestedMin, snappedMin, needsConfirm: true };
+  const decision = meetingDuration(requestedMin, profile.meetings.allowed_durations ?? [], isOwner);
+  return {
+    ...decision,
+    endIso: decision.durationMin === requestedMin ? endIso : new Date(startMs + decision.durationMin * 60000).toISOString(),
+  };
 }
 
 function buildSlot(args: Record<string, unknown>, profile: UserProfile, initiator: 'owner' | 'colleague'): InternalSlot | undefined {

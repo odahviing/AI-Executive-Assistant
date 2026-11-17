@@ -1,3 +1,4 @@
+import { meetingDuration } from '../../../../utils/meetingDuration';
 /**
  * Tool handler for bounded availability search, candidate validation and
  * audience-scoped offers. The Graph finder/checkSlot own slot validity;
@@ -213,6 +214,28 @@ function renderAttendeeStatusLine(
   }
 }
 
+async function annotateMeetingOptions<T extends {start:string; end:string}>(
+  slots: T[], attendees: string[], ownerEmail: string, timezone: string, viewerEmail: string | null | undefined,
+) {
+  const { annotateSlotsWithAttendeeStatus } = await import('../../../../utils/annotateSlotsWithAttendeeStatus');
+  const owner = ownerEmail.toLowerCase();
+  const domain = owner.split('@')[1];
+  const calendars = await Promise.all(attendees.filter(email => email.toLowerCase() !== owner).map(async email => {
+    const kind = domain && email.toLowerCase().endsWith('@' + domain) ? 'internal' as const : 'external' as const;
+    const rows = kind === 'internal' ? await annotateSlotsWithAttendeeStatus({
+      slots, attendeeEmail:email, callerEmail:ownerEmail, timezone,
+    }) : [];
+    return { email, kind, statuses:new Map(rows.map(row => [row.slot.start, row.attendeeStatus])) };
+  }));
+  return slots.map(slot => ({
+    ...slot,
+    attendee_status: calendars.map(({email,kind,statuses}) => {
+      const status = statuses.get(slot.start) ?? 'unknown';
+      return {email,kind,status,line:renderAttendeeStatusLine(email,status,kind,viewerEmail)};
+    }),
+  }));
+}
+
 export async function handleFindAvailableSlots(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   if (args.coordinated_moves !== undefined) {
     const { checkCoordinatedMoves } = await import('./moveMeeting');
@@ -221,6 +244,14 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
     return result;
   }
   const { context, userEmail, timezone } = ctx;
+  const window = context.requestedSearchWindow;
+  if (window) {
+    args = {
+      ...args, search_from: window.start, search_to: window.end, search_window_timezone: window.zone,
+      time_window_is_hard: true,
+      duration_minutes: window.requestedMinutes ?? (context.meetingRequestId && !args.moving_event_ids ? context.requestDurationMinutes : args.duration_minutes),
+    };
+  }
   try {
   // v4.1.x — resolved ONCE per call from the authenticated sender.
   //   leadHours: owner 1h vs colleague 4h, previously a literal at four sites
@@ -262,7 +293,11 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
   // (surface==='room' → null); call it directly — a blanket ?? null here
   // also masked the email leg's forwarded subjects unconditionally.
   const viewerEmail = viewerEmailFor(context);
-  const offerCount = offeredSlotCount(context.profile);
+  const explicitCount = typeof args.option_count === 'number' && Number.isInteger(args.option_count)
+    && args.option_count >= 1 && args.option_count <= 20 ? args.option_count : undefined;
+  const offerCount = context.requestedOptionCount === undefined
+    ? explicitCount ?? offeredSlotCount(context.profile)
+    : context.requestedOptionCount ?? offeredSlotCount(context.profile);
         // v1.6.4 — meeting_mode is required from the LLM. Do NOT pre-pass
         // workDays from here: every work day is walked, and in_person on a
         // non-office day is checkSlot rule 1b (soft, owner-overridable) per slot.
@@ -276,14 +311,14 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // candidate event wrong against a value Sonnet never stated.
           const callerStatedDurationMinutes: number | undefined =
             typeof args.duration_minutes === 'number' ? args.duration_minutes : undefined;
-          // v3.1.6 — duration safety default — code backstop for when
-          // Sonnet omits duration entirely (the tool description tells her to
-          // default to default_meeting_duration when no length was stated).
-          if (args.duration_minutes == null) {
-            const allowed = context.profile.meetings.allowed_durations;
-            args.duration_minutes = context.profile.meetings.default_meeting_duration
-              ?? [...allowed].sort((a, b) => a - b)[0];
+          const allowed = context.profile.meetings.allowed_durations;
+          if (args.duration_minutes != null && (!Number.isSafeInteger(args.duration_minutes) || Number(args.duration_minutes) <= 0)) {
+            return { error: 'invalid_duration', message: 'Supply the requested meeting length in whole positive minutes.' };
           }
+          const carriedDuration = Array.isArray(args.moving_event_ids) && args.moving_event_ids.length ? undefined : context.requestDurationMinutes;
+          const requestedMinutes = carriedDuration ?? callerStatedDurationMinutes ?? context.profile.meetings.default_meeting_duration
+            ?? Math.min(...allowed);
+          args.duration_minutes = meetingDuration(requestedMinutes, allowed, isOwnerPath).durationMin;
           // v3.0.3 — entry log for diagnostic visibility. Shows exactly what
           // Sonnet passes — critical for debugging "did the time-of-day window
           // actually clip?" and "did she pass the attendee?" cases.
@@ -459,6 +494,17 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             }
           }
 
+          const requiredDay = context.requiredMeetingDay;
+          if (requiredDay && !args.moving_event_ids) {
+            const day = DateTime.fromISO(requiredDay.date, {zone:requiredDay.zone});
+            const start = DateTime.max(day.startOf('day'), DateTime.fromISO(effectiveSearchFrom,{zone:timezone}));
+            const end = DateTime.min(day.endOf('day'), DateTime.fromISO(effectiveSearchTo,{zone:timezone}));
+            if (!(end > start)) return {error:'outside_requested_day', required_day:requiredDay.date,
+              message:'The requester requires this meeting on '+requiredDay.date+'. Search that day before suggesting another.'};
+            effectiveSearchFrom = start.setZone(timezone).toISO()!;
+            effectiveSearchTo = end.setZone(timezone).toISO()!;
+            args = {...args, must_be:true};
+          }
           const mustBeAfterId = args.must_be_after_event_id as string | undefined;
           let predecessorEnd: DateTime | undefined;
           if (mustBeAfterId) {
@@ -481,9 +527,12 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             }
           }
 
-          const anchoredSlotFailure = (start: string, end: string) => {
-            if (!predecessorEnd) return undefined;
-            if (DateTime.fromISO(start, { zone: timezone }) < predecessorEnd) {
+          const searchBoundFailure = (start: string, end: string) => {
+            const hardBounds = args.time_window_is_hard === true
+              && typeof args.search_from === 'string' && args.search_from.includes('T')
+              && typeof args.search_to === 'string' && args.search_to.includes('T');
+            if (!predecessorEnd && !hardBounds) return undefined;
+            if (predecessorEnd && DateTime.fromISO(start, { zone: timezone }) < predecessorEnd) {
               return { available: false, broken_rule: 'order_violation', broken_rule_label: 'The time starts before the preceding meeting ends.' };
             }
             if (args.search_from && DateTime.fromISO(start, { zone: timezone }) < DateTime.fromISO(effectiveSearchFrom, { zone: timezone })) {
@@ -501,12 +550,41 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // `ignore_attendee_availability: true` for "find times I'm free,
           // I'll handle the others" scenarios.
           let attendeeEmails = (args.attendee_emails as string[]) ?? [];
-          const resolvedAttendees = context.resolvedMeetingAttendeeGroups === undefined
+          let resolvedAttendees = context.resolvedMeetingAttendeeGroups === undefined
             ? context.resolvedMeetingAttendees ?? []
             : meetingScopedAttendees(context.resolvedMeetingAttendeeGroups, attendeeEmails, userEmail,
                 getPersonMemory(context.userId)?.email);
+          // An organizer looking for owner availability can check the owner's
+          // calendar before an external attendee is known. This result covers
+          // only the owner and never establishes a roster for an invitation.
+          const ownerOnlySearch = !attendeeEmails.length && !args.moving_event_ids
+            && (args.owner_availability_only === true || (resolvedAttendees === null
+              && args.requester_is_attending === false && !context.resolvedMeetingAttendees?.length));
+          const requesterEmail = getPersonMemory(context.userId)?.email?.toLowerCase();
+          const explicitPeople = [...new Set(attendeeEmails.map(email => email.toLowerCase()))]
+            .filter(email => email !== userEmail.toLowerCase() && email !== requesterEmail);
+          const known = context.resolvedMeetingAttendees ?? [];
+          const individualSearch = resolvedAttendees === null && context.resolvedMeetingAttendeeGroups?.length === 0
+            && explicitPeople.length === 1 && context.individualSearchEmails?.includes(explicitPeople[0]) && known.some(email => email.toLowerCase() === explicitPeople[0])
+            && !args.moving_event_ids;
+          const groups = context.resolvedMeetingAttendeeGroups;
+          // An incomplete extraction cannot establish a roster for an invite.
+          // It can still support a bounded check of these two known calendars.
+          const pairSearch = resolvedAttendees === null && groups?.length === 0 && !known.length
+            && !!context.meetingRequestId && !!requesterEmail && !explicitPeople.length
+            && !ownerOnlySearch && args.requester_is_attending !== false && !args.moving_event_ids;
+          const unverifiedNames = groups?.length === 1 ? groups[0].unresolvedNames : [];
+          const partialSearch = ownerOnlySearch || individualSearch || pairSearch || unverifiedNames.length > 0;
+          const scope = partialSearch ? {
+            availability_scope:ownerOnlySearch ? 'owner_only' : pairSearch ? 'owner_and_requester' : individualSearch ? 'explicit_participant_only' : 'identified_participants_only',
+            other_participants:unverifiedNames.length ? 'not_verified' : 'not_checked',
+            ...(unverifiedNames.length ? {unverified_participant_names:unverifiedNames} : {}),
+          } : {};
+          if (ownerOnlySearch) resolvedAttendees = [];
+          if (pairSearch) resolvedAttendees = [requesterEmail!];
+          if (individualSearch) resolvedAttendees = explicitPeople;
           if (resolvedAttendees === null) {
-            return { error: 'ambiguous_meeting_roster', message: 'Identify which meeting this search is for and supply its participants. The current request contains separate or unresolved meeting rosters; their availability cannot be combined.' };
+            return { error: 'ambiguous_meeting_roster', message: 'Identify which meeting this search is for and supply its participants. For a question specifically about the owner’s availability, retry with owner_availability_only=true and no attendees. For joint availability keep each meeting’s participants together.' };
           }
 
           // MOVE-PATH AUTO-FILL: when moving_event_ids is set, auto-read the moving
@@ -871,10 +949,12 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // call in this thread already established who the meeting is for,
           // recover that list so the work-hours / availability constraint
           // isn't silently dropped between turns.
-          if (attendeeEmails.length === 0 && context.threadTs) {
+          const rosterKey = !partialSearch && (!context.resolvedMeetingAttendeeGroups || context.resolvedMeetingAttendeeGroups.length === 1)
+            ? context.meetingRequestId : undefined;
+          if (attendeeEmails.length === 0 && rosterKey && context.resolvedMeetingAttendeeGroups === undefined) {
             try {
               const { getThreadAttendees } = await import('../../../../utils/threadAttendees');
-              const recovered = getThreadAttendees(context.threadTs);
+              const recovered = getThreadAttendees(rosterKey);
               if (recovered.length > 0) {
                 logger.info('find_available_slots — auto-filled attendee_emails from thread context', {
                   threadTs: context.threadTs,
@@ -887,11 +967,11 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 err: String(err).slice(0, 200),
               });
             }
-          } else if (attendeeEmails.length > 0 && context.threadTs) {
+          } else if (attendeeEmails.length > 0 && rosterKey) {
             // Record for future calls in this thread.
             try {
               const { recordThreadAttendees } = await import('../../../../utils/threadAttendees');
-              recordThreadAttendees(context.threadTs, attendeeEmails);
+              recordThreadAttendees(rosterKey, attendeeEmails);
             } catch (_) { /* best-effort */ }
           }
           // Busy overrides can soften calendar conflicts. M17 keeps attendee
@@ -905,7 +985,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               const requesterEmailLower = (getPersonMemory(context.userId)?.email ?? '').toLowerCase();
               if (requesterEmailLower) {
                 const before = attendeeEmails.length;
-                if (args.requester_is_attending === false) {
+                if (ownerOnlySearch || args.requester_is_attending === false) {
                   attendeeEmails = attendeeEmails.filter(e => e.toLowerCase() !== requesterEmailLower);
                 } else if (!attendeeEmails.some(e => e.toLowerCase() === requesterEmailLower)) {
                   attendeeEmails = [...attendeeEmails, requesterEmailLower];
@@ -1012,26 +1092,27 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // clock identically. An explicit present_in_timezone from the caller
           // always wins (each use site below checks it FIRST via `||`) — this only
           // fills a gap, never overrides a stated value.
-          // A stated presentation zone is stable. An inferred person's zone
-          // resolves for each slot's date, including trips that end mid-search.
+          // Use the selected display zone, then the stated search clock.
+          // Otherwise resolve attendee travel separately for each offered date.
           const explicitPresentTz = (typeof args.present_in_timezone === 'string'
             ? args.present_in_timezone.trim()
-            : '');
+            : '') || searchWindowTz || context.requestZone;
           const presentTzForOutput = (startIso: string): string => explicitPresentTz
             || singleAttendeePresentationZone(attendeeAvailability, timezone,
               DateTime.fromISO(startIso, { zone: timezone }).toISO() ?? undefined);
 
-          // #77 — owner-initiated path with attendees: auto-pass
-          // attendeeBusyEmails so Graph free/busy filters the candidate pool,
-          // not just work-hour clipping. Prior fixes (v2.2.3 #43, v2.3.6 #71)
-          // wired the work-hours half. The colleague-initiated SPREAD search
-          // (the main branch below, a LIST of options) deliberately does NOT
-          // auto-pass — coord/main-branch use annotateSlotsWithAttendeeStatus
-          // to TAG slots with status instead, so a colleague's search never
-          // silently loses an option to an attendee conflict (M4).
-          const attendeeBusyEmails = (isOwnerInitiatedSearch && !ignoreAttendeeBusy && attendeeEmails.length > 0)
-            ? attendeeEmails
-            : undefined;
+          const optionLocale = context.channel === 'slack' && context.surface === 'colleague_dm'
+            && context.authority === 'colleague' && !isOwnerInitiatedSearch ? context.optionsReplyLocale : undefined;
+          const replyOwner = (optionLocale === 'he' && context.profile.user.name_he || context.profile.user.name).split(' ')[0];
+
+          // Find genuinely joint openings before sampling. Checking only the
+          // sampled owner openings could miss the sole time everyone can make.
+          // The tagged recovery below preserves a choice when all times clash.
+          const internalDomain = userEmail.split('@')[1]?.toLowerCase();
+          const jointCalendars = isOwnerInitiatedSearch ? attendeeEmails
+            : attendeeEmails.filter(email => internalDomain && email.toLowerCase().endsWith('@' + internalDomain));
+          const attendeeBusyEmails = (!isOwnerInitiatedSearch || !ignoreAttendeeBusy) && jointCalendars.length
+            ? jointCalendars : undefined;
 
           // 2026-07-29 (row 161, the Levana "she has something" incident) —
           // candidate_slots (point validation: "is X free at exactly Y?") is
@@ -1109,7 +1190,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // the caller.
             //
             // It used to honour a model-supplied `end`, an unconstrained free
-            // string (unlike `duration_minutes`, which is an enum and is
+            // string (unlike `duration_minutes`, which is validated and is
             // backstopped at :73). Two things were wrong with that. It was already
             // incoherent: the walker validates a `durationMin` meeting whatever
             // `end` says, and the verdict below matches the exact START, so a
@@ -1154,8 +1235,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // explicit present_in_timezone, used to echo each result back in that zone.
             // #24 — falls back to the auto-derived attendee zone (declared above) when
             // neither was given; an explicit value here still wins outright.
-            const explicitGroundTz = searchWindowTz
-              || (typeof args.present_in_timezone === 'string' ? args.present_in_timezone.trim() : '');
+            const explicitGroundTz = (typeof args.present_in_timezone === 'string' ? args.present_in_timezone.trim() : '') || searchWindowTz;
             const groundTz = (startIso: string): string => explicitGroundTz || presentTzForOutput(startIso);
             // report row 145 (2026-07-29) — provenance: only the explicit branch above
             // was actually STATED (search_window_timezone / present_in_timezone are
@@ -1191,7 +1271,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 });
                 return { start: cand.start, end: cand.start, available: false, error: 'validation_error' };
               }
-              const boundFailure = anchoredSlotFailure(cand.start, cand.end);
+              const boundFailure = searchBoundFailure(cand.start, cand.end);
               if (boundFailure) return { start: cand.start, end: cand.end, ...boundFailure };
               try {
                 const slots = await findAvailableSlots({
@@ -1307,22 +1387,28 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   channelId: context.channelId,
                   threadTs: context.threadTs,
                   timezone,
-                  slots: results.filter(r => r.available),
+                  slots: results.filter(r => r.available).map(r => ({ ...r, presentationZone: groundTz(r.start) })),
                 });
               } catch (err) {
                 logger.warn('offeredSlotsStash candidate record failed — continuing', { err: String(err).slice(0, 150) });
               }
             }
 
+            const candidateReply = !partialSearch && optionLocale && !attendeeEmailWarningCand && !attendeeNotCheckedWarningCand && !movingEventIdMismatchWarning
+              ? (await import('../offerReply')).renderUnavailableTime(results, {
+                locale: optionLocale, owner: replyOwner, zoneFor: start => groundTz(start) || timezone,
+              }) : undefined;
             return {
+              ...(candidateReply ? { options_reply: candidateReply } : {}),
               mode: 'candidate_validation',
+              ...scope,
               duration_minutes: durationMin,
               candidates_checked: normalized.length,
               results,
               ...(attendeeEmailWarningCand ?? {}),
               ...(attendeeNotCheckedWarningCand ?? {}),
               ...(movingEventIdMismatchWarning ?? {}),
-              ...(results.some(r => 'presentation_local' in r) ? { _requested_time_local: `Each result carries presentation_local — ${groundTzStated ? `the slot in ${explicitGroundTz}, the zone the times were given in` : 'the attendee-local clock computed for that meeting date (nobody stated this zone — do not say the requester asked for it)'}. Quote that alongside the owner-local time; NEVER recompute the cross-timezone conversion yourself.` } : {}),
+              ...(results.some(r => 'presentation_local' in r) ? { _requested_time_local: `Each result carries presentation_local — ${groundTzStated ? `the slot in the stated zone ${explicitGroundTz}` : 'the attendee-local clock computed for that meeting date (nobody stated this zone — do not say the requester asked for it)'}. Quote that alongside the owner-local time; NEVER recompute the cross-timezone conversion yourself.` } : {}),
             };
           }
 
@@ -1375,16 +1461,21 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // Reuse day_summary so all existing privacy scrubs still apply.
             const emptySearchResult = (summary: typeof diagnosticsOut.daySummary) => {
               groundAttendeeHours(summary);
-              const allDaysOccupied = !!summary?.length && summary.every(day => day.owner_all_day_busy || day.top_reasons.includes('owner_out_of_office'));
+              const allDaysOccupied = !!summary?.length && summary.every(day => day.owner_all_day_busy);
               const hoursBlocked = !allDaysOccupied && summary?.some(day => day.top_reasons.includes('outside_attendee_work_hours'));
+              const reasons = [...new Set(summary?.flatMap(day=>day.top_reasons) ?? [])];
               return {
                 slots: [],
+                search_outcome:{joint_openings:0,from:effectiveSearchFrom,to:effectiveSearchTo,zone:timezone,
+                  mixed_reasons:reasons.length>1,owner_all_day_busy:allDaysOccupied},
                 ...(summary?.length ? { day_summary: summary } : {}),
                 ...(allDaysOccupied ? {
                   _scheduling_decision_note: `The owner's calendar has an all-day commitment on every date checked. Explain that full-day conflict; earlier or later attendee hours cannot remove it. A busy block alone does not establish vacation or permission to change any meeting. Offer another date, or ask the owner about a specific exception through the existing approval flow.`,
                 } : {}),
                 ...(hoursBlocked ? {
-                  _scheduling_decision_note: `No confirmed option in this window; working-hour constraints exclude candidates. This is not evidence that anyone is booked solid. ${isOwnerInitiatedSearch
+                  _scheduling_decision_note: `No confirmed option in this window. ${reasons.length>1
+                    ? 'Different candidates failed for different reasons, including working hours. Explain the mixed constraints. A person’s working hours alone do not rule out the whole window.'
+                    : 'Some candidate intervals fall outside the participants’ working hours.'} This is not evidence that anyone is booked solid. ${isOwnerInitiatedSearch
                     ? 'Ask which path to explore: whether the other attendee would consider earlier/later hours, or whether you want to explore an exception to your own hours. Do not assume an early start.'
                     : 'Ask the requester to choose: would you consider earlier/later hours, or should I ask the owner about an exception to the owner\'s hours?'} Only after that explicit choice, set owner_hours_exception_requested=true to search for concrete owner-hour exceptions; it authorizes exploration only. For the requester-hours choice, obtain their specific local window and timezone and pass attendee_hours for the authenticated requester only; a general yes is not a window. Keep every other attendee unchanged. Asking the owner is a pending decision, not booking permission; use the existing approval flow with a concrete candidate. Do not book or contact anyone merely because this search found no option. Do not default to widening dates. Quote only tool-computed dated dual clocks.`,
                 } : {}),
@@ -1762,7 +1853,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   c.broken_rules.length === 1 && c.broken_rules[0] === 'in_person_on_home_day');
                 return {
                   slots: [],
-                  owner_approval_candidates: candidates,
+                  owner_approval_candidates: context.channel === 'slack' && context.surface === 'colleague_dm' && attendeeEmails.length
+                    ? await annotateMeetingOptions(candidates, attendeeEmails, userEmail, timezone, viewerEmail) : candidates,
                   ...(ownerHoursExceptionRequested ? {
                     _scheduling_decision_note: 'The requester chose to explore an exception to the owner\'s hours. These are pending candidates, not approved/bookable options. Preserve returned ranking and dated clocks. On the colleague path, create_approval(kind=policy_exception) with one exact candidate and deferred_action matching start/end/attendees; state the requester\'s reason and actual violations to the owner. Await approval before booking; tell the colleague only that you are checking. On the owner path, present the candidates and their actual violations in-thread and await explicit booking authorization. Search permission alone grants no booking authority.',
                   } : {}),
@@ -1841,42 +1933,24 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             } catch (err) {
               logger.warn('find_available_slots — hold deprioritization threw, using full set', { err: String(err).slice(0, 120) });
             }
-            // v3.7.2 (#142a) — fingerprint THIS search's shaping params so the
-            // exclusion below can tell a real "give me another option" (same
-            // shape) from a refinement (duration / window / attendee change).
-            // Colleague-controlled axes only; raw window (pre-expand) for stability.
+            // Compare like-for-like searches only when a requester asks for more options.
             const attendeesFp = Array.isArray(args.attendee_emails)
               ? [...(args.attendee_emails as unknown[])].map(e => String(e).trim().toLowerCase()).filter(Boolean).sort().join(',')
               : '';
             const offerFingerprint = `${args.duration_minutes ?? ''}|${args.search_from ?? ''}|${args.search_to ?? ''}|${attendeesFp}`;
-            // v3.4.2 — on colleague/email searches, DROP slots already offered
-            // in this conversation so "give me another option" returns NEW
-            // times, not the same spread again. Owner offers are now recorded
-            // for exact-approval binding, but retain the owner's prior search
-            // behavior here. The
-            // stash is the UNION of everything shown this conversation; on the
-            // FIRST search it's empty → no-op. Verifying specific named slots runs
-            // in the candidate_slots path above, not here, so it's unaffected. If
-            // exclusion would empty the pool, keep the full pool (never go silent).
-            // v3.7.2 (#142a) — gated on a fingerprint MATCH: a refinement (a "30
-            // min" clarification, a narrowed window, an added attendee) is the SAME
-            // ask re-parametrized, NOT "another day", so its best slots must not be
-            // dropped just because an earlier, differently-shaped search showed them
-            // (Michal 2026-07-13 — "30 min" returned a disjoint set, hiding 12:45 &
-            // 13:45). Bias to SKIP: a false skip merely re-shows a slot; a false
-            // exclude hides an open one.
-            try {
-              const { getOfferedSlots, getOfferedSearchFingerprint } = await import('../../../../utils/offeredSlotsStash');
-              const offered = getOfferedSlots(context.channelId, context.threadTs) ?? [];
-              const priorFingerprint = getOfferedSearchFingerprint(context.channelId, context.threadTs);
-              if ((!isOwnerInitiatedSearch || context.channel === 'email')
-                  && offered.length > 0 && priorFingerprint !== null && priorFingerprint === offerFingerprint) {
-                const offeredMs = new Set(offered.map(o => Date.parse(o.startIso)).filter(Number.isFinite));
-                const fresh = pickPool.filter(s => !offeredMs.has(Date.parse(s.start)));
-                if (fresh.length > 0) pickPool = fresh;
+            if (args.more_options === true) {
+              try {
+                const { getOfferedSlots, getOfferedSearchFingerprint } = await import('../../../../utils/offeredSlotsStash');
+                const offered = getOfferedSlots(context.channelId, context.threadTs) ?? [];
+                const priorFingerprint = getOfferedSearchFingerprint(context.channelId, context.threadTs);
+                if (offered.length > 0 && priorFingerprint !== null && priorFingerprint === offerFingerprint) {
+                  const offeredMs = new Set(offered.map(o => Date.parse(o.startIso)).filter(Number.isFinite));
+                  const fresh = pickPool.filter(s => !offeredMs.has(Date.parse(s.start)));
+                  if (fresh.length > 0) pickPool = fresh;
+                }
+              } catch (err) {
+                logger.warn('find_available_slots — offered-slot exclusion threw, using full pool', { err: String(err).slice(0, 120) });
               }
-            } catch (err) {
-              logger.warn('find_available_slots — offered-slot exclusion threw, using full pool', { err: String(err).slice(0, 120) });
             }
             const chosenStarts = new Set(pickSpreadSlots(pickPool, timezone, offerCount, anchorDay, args.duration_minutes as number | undefined));
 
@@ -1912,7 +1986,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             let preferredSlotStatus: Record<string, unknown> | undefined;
             if (preferredSlot) {
               const preferredEnd = DateTime.fromISO(preferredSlot, { zone: timezone }).plus({ minutes: args.duration_minutes as number }).toISO() ?? preferredSlot;
-              const boundFailure = anchoredSlotFailure(preferredSlot, preferredEnd);
+              const boundFailure = searchBoundFailure(preferredSlot, preferredEnd);
               const matchingCandidate = candidateSet.find(s => {
                 try {
                   // Equal instants allow offset-format differences, never a
@@ -1921,7 +1995,11 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                     === DateTime.fromISO(preferredSlot, { zone: timezone }).toMillis();
                 } catch { return false; }
               });
-              if (matchingCandidate && !chosenStarts.has(matchingCandidate.start)) {
+              if (!boundFailure && matchingCandidate && !chosenStarts.has(matchingCandidate.start)) {
+                if (explicitCount && chosenStarts.size >= explicitCount) {
+                  const last = Array.from(chosenStarts).pop();
+                  if (last) chosenStarts.delete(last);
+                }
                 chosenStarts.add(matchingCandidate.start);
                 logger.info('find_available_slots — preferred_slot force-included (would have been spread-filtered)', {
                   preferredSlot,
@@ -1968,6 +2046,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   });
                   const prefAvailable = prefSlots.some(s =>
                     DateTime.fromISO(s.start, { zone: timezone }).toMillis() === prefStartDt.toMillis());
+                  if (prefAvailable && explicitCount && chosenStarts.size >= explicitCount) {
+                    const last = Array.from(chosenStarts).pop();
+                    if (last) chosenStarts.delete(last);
+                  }
                   const brokenRule = prefAvailable ? undefined : firstRejectReason(prefDiag.rejectedCounts, prefDiag.daySummary);
                   const brokenRules = prefAvailable ? [] : Object.keys(prefDiag.rejectedCounts ?? {}) as SearchRejectReason[];
                   // Shared presentation-zone (presentTzForOutput, declared above) —
@@ -2035,45 +2117,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             let annotatedSlots: Array<any> = slots;
             if ((!isOwnerInitiatedSearch || annotateForFlexibleRequester) && attendeeEmails.length > 0) {
               try {
-                // eslint-disable-next-line @typescript-eslint/no-require-imports
-                const { annotateSlotsWithAttendeeStatus } = require('../../../../utils/annotateSlotsWithAttendeeStatus') as
-                  typeof import('../../../../utils/annotateSlotsWithAttendeeStatus');
-                const ownerDomain = userEmail.includes('@') ? userEmail.split('@')[1].toLowerCase() : '';
-                const internalAttendees = attendeeEmails.filter(e => {
-                  const lower = e.toLowerCase();
-                  return ownerDomain && lower.endsWith('@' + ownerDomain) && lower !== userEmail.toLowerCase();
-                });
-                // Annotate per internal attendee — one getFreeBusy call each.
-                // External attendees skipped (we can't see their calendar);
-                // they appear in Sonnet's narration with explicit "external,
-                // can't verify" framing instead.
-                const perAttendeeAnnotations = await Promise.all(
-                  internalAttendees.map(async email => {
-                    const ann = await annotateSlotsWithAttendeeStatus({
-                      slots: slots as any,
-                      attendeeEmail: email,
-                      callerEmail: userEmail,
-                      timezone,
-                    });
-                    return { email, ann };
-                  }),
-                );
-                annotatedSlots = slots.map((s: any) => {
-                  // Each entry carries `line` — the pre-rendered, viewer-bound
-                  // sentence (renderAttendeeStatusLine above) Sonnet quotes
-                  // verbatim; the raw `status` stays for logs/inspection.
-                  const attendee_status = perAttendeeAnnotations.map(p => {
-                    const match = p.ann.find(a => a.slot.start === s.start);
-                    const status: string = match?.attendeeStatus ?? 'unknown';
-                    return { email: p.email, kind: 'internal', status, line: renderAttendeeStatusLine(p.email, status, 'internal', viewerEmail) };
-                  });
-                  // External attendees → always 'unknown'
-                  const externals = attendeeEmails.filter(e => {
-                    const lower = e.toLowerCase();
-                    return !ownerDomain || !lower.endsWith('@' + ownerDomain);
-                  }).map(email => ({ email, kind: 'external', status: 'unknown' as const, line: renderAttendeeStatusLine(email, 'unknown', 'external', viewerEmail) }));
-                  return { ...s, attendee_status: [...attendee_status, ...externals] };
-                });
+                annotatedSlots = await annotateMeetingOptions(slots, attendeeEmails, userEmail, timezone, viewerEmail);
               } catch (err) {
                 logger.warn('find_available_slots — colleague-path annotation threw, returning unannotated slots', {
                   err: String(err).slice(0, 200),
@@ -2172,7 +2216,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   channelId: context.channelId,
                   threadTs: context.threadTs,
                   timezone,
-                  slots: offeredSlots,
+                  slots: offeredSlots.map(s => ({ ...s, presentationZone: presentTzForOutput(s.start) })),
                   searchFingerprint: offerFingerprint,
                 });
               } catch (err) {
@@ -2325,8 +2369,15 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             const travelBufferNote = (effectiveTravelBufferMinutes > 0 && annotatedSlots.length > 0 && !isRecoveryResult && !relaxedGranted)
               ? `Every slot in \`slots\` was already screened with a ${effectiveTravelBufferMinutes}-minute travel buffer on BOTH sides against ${context.profile.user.name.split(' ')[0]}'s real commitments — candidates too close to an existing meeting were rejected before you saw them. If asked about travel margins, quote "${effectiveTravelBufferMinutes} minutes" verbatim; never recompute the gaps yourself. Two limits: optional/skippable events are NOT padded (only real commitments are), and if the requester asked for a LARGER margin than ${effectiveTravelBufferMinutes} minutes, re-call with travel_buffer_minutes set to their number instead of asserting it.`
               : undefined;
-            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional || requestedTimeLocal || timezoneHint || preferredSlotStatus || hasAttendeeStatus || movingEventIdMismatchWarning || travelBufferNote) {
-              const result: Record<string, unknown> = { slots: annotatedSlots };
+            const ordinaryReply = (!partialSearch || (ownerOnlySearch && context.singleZoneOptions)) && optionLocale && !preferredSlot && !isRecoveryResult && !relaxedGranted
+              && !attendeeEmailWarning && !attendeeNotCheckedWarning && !movingEventIdMismatchWarning && !timezoneHint
+              && !args.owner_hours_exception_requested && !travelers.length
+              ? (await import('../offerReply')).renderOpenTimes(annotatedSlots,
+                { locale: optionLocale, owner: replyOwner, singleZoneOptions:context.singleZoneOptions, requestedMinutes:carriedDuration ?? window?.requestedMinutes, zoneFor: start => presentTzForOutput(start) || timezone },
+                attendeeEmails.filter(email => email.toLowerCase() !== userEmail.toLowerCase()), viewerEmail, attendeeFirstName)
+              : undefined;
+            if (partialSearch || ordinaryReply || travelers.length > 0 || hasDaySummary || isRecoveryResult || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional || requestedTimeLocal || timezoneHint || preferredSlotStatus || hasAttendeeStatus || movingEventIdMismatchWarning || travelBufferNote) {
+              const result: Record<string, unknown> = { slots: annotatedSlots, ...scope, ...(ordinaryReply ? { options_reply: ordinaryReply } : {}) };
               // Positions refer to the intact slots, including their individual clocks and rules.
               if (context.channel !== 'email' && (hasAttendeeConflicts || hasAttendeeStatus)) {
                 const byFacts = new Map<string, number[]>();
@@ -2377,7 +2428,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // calendar. Stripped on the email leg alongside the field
                 // itself (ops.ts email scrub).
                 result._attendee_status_note =
-                  `Each slot's \`attendee_status\` entries carry \`line\` — a pre-rendered status sentence, already in the right grammatical person for whoever you're replying to ("you show tentative then" when it's their own calendar; the attendee's name otherwise). Quote it verbatim once for the slot or its shared_attendee_fact_groups list (translate faithfully if the conversation isn't in English — keep the same grammatical person). NEVER re-derive it, and NEVER state an attendee's status in first person ("I show tentative") — "I" is you, Maelle, and it is never your calendar.`;
+                  `Omit routine free statuses. Quote each busy, tentative, out-of-office or unknown entry’s \`line\` once for its slot or shared_attendee_fact_groups list. Translate in the same grammatical person when replying in another language.`;
               }
               if (usedOwnerAttendeeTagged) {
                 const ownerFirst = context.profile.user.name.split(' ')[0];
@@ -2457,10 +2508,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 result._attendee_unverified_note =
                   `These are ${ownerFirstUnverified}'s OWN open times (his rules stay strict), screened inside each attendee's stored or assumed working hours. That hours check does not confirm calendar availability.`
                   + (hasAttendeeStatus
-                    ? ` Slots also carry \`attendee_status\` per INTERNAL attendee — a REAL calendar read, not a guess: quote each entry's \`line\` verbatim; never re-derive it, and never state an attendee's status in first person ("I show tentative") — "I" is you, Maelle, and it's never your calendar.`
+                    ? ` Use the returned attendee_status for actual calendar findings.`
                     : '')
                   + ` For an EXTERNAL attendee or any missing/unknown status, say only that you could not confirm that person's calendar yet; do not infer busy or off-hours.`
-                  + ` Do NOT demand an attendee's email to proceed. The pick routes to ${ownerFirstUnverified}'s approval as usual.`;
+                  + ` Ask which time works.`;
               }
               return result;
             }

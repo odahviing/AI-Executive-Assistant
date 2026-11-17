@@ -83,7 +83,9 @@ export class SchedulingSkill {
       const remote = candidates.filter(c => Array.isArray(c.broken_rules)
         && c.broken_rules.length === 1 && c.broken_rules[0] === 'in_person_on_home_day');
       if (r._must_be_owner_approval_note) {
-        r._must_be_owner_approval_note = 'These candidates require owner approval. They are in priority order; propose the FIRST one. Do NOT book directly. Raise create_approval(kind=policy_exception) with one candidate and the requester’s stated reason. Approval creation checks the reasons independently.'
+        r._must_be_owner_approval_note = (args.owner_hours_exception_requested === true
+          ? 'Do NOT book directly. The requester authorized checking a possible exception. Confirm the proposed time before treating it as permission for an invitation.'
+          : 'These are pending candidates in priority order. For an authorized booking inside the requested window, use create_meeting on the first agreed candidate with the real participants and without an override. A refusal returns the action and reason required by create_approval(kind=policy_exception). For an availability inquiry, offer to check with the owner.')
           + (remote.length ? ` These times work online with no approval: ${remote.map(c => c.label).join(', ')}. Offer online first; request approval only if in-person is required.` : '');
       }
       if (r._colleague_soft_block_hint) {

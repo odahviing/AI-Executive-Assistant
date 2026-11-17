@@ -1,3 +1,5 @@
+import { displayedOfferZone, isClockReply } from './schedulingClockReply';
+import type { RequestedSearchWindow } from '../skills/types';
 /**
  * Availability pre-check (v2.6.5).
  *
@@ -31,6 +33,7 @@ import { getOwnerEventsForDecision } from '../connectors/graph/calendar';
 import { renderClockInZone } from './timezoneConvert';
 import { bookingLeadTimeHours, checkSlot, OWNER_OVERRIDABLE_KINDS, type RuleViolationKind } from './scheduleRules';
 import { armsHardFloor, forgetHardBlockedSlot, hardBlockClassPhrase, recordHardBlockedSlot } from './availabilityGate';
+import { meetingDuration } from './meetingDuration';
 import { blockedSlotAlternativesBlock, type NearbyAlternative } from '../skills/meetings/nearbyAlternatives';
 import { getAnthropicClient } from '../llm/client';
 import { MODEL_HAIKU, HAIKU } from '../llm/models';
@@ -144,14 +147,13 @@ interface NormalizedSlot {
  * said and IN WHOSE FRAME; `resolveFrame` + luxon do every conversion, with
  * the same helper semantics every booking tool uses.
  *
- * Falls open: any throw / non-JSON / empty list → caller falls back to the
- * regex path (which applies the same frame rule).
+ * Failed extraction supplies no point evidence. The ordinary search tool remains available.
  */
 async function normalizeAvailabilitySlotsWithHaiku(
   message: string,
   profile: UserProfile,
   recentThread?: Array<{ role: 'user' | 'assistant'; content: string }>,
-): Promise<{ slots: NormalizedSlot[]; category: string | null }> {
+): Promise<{ slots: NormalizedSlot[]; category: string | null; searchWindow?: RequestedSearchWindow }> {
   const anthropic = getAnthropicClient();
   const ownerFirst = profile.user.name.split(' ')[0];
   // v3.7.x — category names the same call can infer from the message, so the
@@ -194,7 +196,9 @@ OWNER context:
 - Timezone: ${tz} (current offset ${ownerOffset})
 - Today's date: ${today} (${todayWeekday})
 ${threadBlock ? `\nRECENT THREAD (older → newer; for resolving which DAY the times refer to):\n${threadBlock}\n` : ''}
-The colleague is proposing specific meeting times. They may state each slot in their OWN timezone (e.g. "12:00 Boston", "16:00 CET"), in ${ownerFirst}'s ("your 19:00", "16:00 his time"), or with no timezone at all. For each distinct slot they proposed, output the clock time EXACTLY AS WRITTEN plus the IANA name of the timezone that clock belongs to.
+First classify the request. A search for 30 minutes between 9 and 12 CT is a search_window: the two bounds are not proposed meetings. A request to meet from 11:00 to 11:30 proposes one exact meeting: return its start and duration as points. A window with a preferred start still belongs to search_window. For search_window or other, return no slots. For ONE explicitly bounded window on one date, with a named timezone and no invitation to search other dates, also supply search_window with the dated start and end as local wall clocks, the named zone, and the requested meeting length if specified. Omit search_window for multiple windows or meetings, flexible preferences or unspecified zones.
+
+For points only: They may state each slot in their OWN timezone (e.g. "12:00 Boston", "16:00 CET"), in ${ownerFirst}'s ("your 19:00", "16:00 his time"), or with no timezone at all. For each distinct slot they proposed, output the clock time EXACTLY AS WRITTEN plus the IANA name of the timezone that clock belongs to.
 
 RULES:
 - One entry per proposed slot interpretation (not one per number in the message).
@@ -222,6 +226,16 @@ Output EXACTLY ONE call to normalize_slots.`;
         input_schema: {
           type: 'object' as const,
           properties: {
+            kind: { type: 'string', enum: ['points', 'search_window', 'other'] },
+            search_window: {
+              type: 'object', properties: {
+                start: { type: 'string', description: 'Start wall clock YYYY-MM-DDTHH:mm.' },
+                end: { type: 'string', description: 'End bound in the same frame, YYYY-MM-DDTHH:mm.' },
+                zone: { type: 'string', description: 'Timezone of both bounds, IANA name or stated ambiguous abbreviation.' },
+                requestedMinutes: { type: 'integer', minimum: 1, description: 'Length of one meeting explicitly specified by the human, without rounding. Omit when only the window is specified.' },
+                durationQuote: {type:'string',description:'Verbatim words in the current message specifying the meeting LENGTH, including its unit. The bounds of an availability window do not specify a meeting length. Omit both duration fields if the length is unspecified.'},
+              }, required: ['start', 'end', 'zone'],
+            },
             slots: {
               type: 'array',
               items: {
@@ -237,7 +251,7 @@ Output EXACTLY ONE call to normalize_slots.`;
             },
             category: { type: 'string', description: 'The meeting TYPE if identifiable from the message, matching one of the owner\'s category names given above (e.g. "Interview"). Omit when unclear.' },
           },
-          required: ['slots'],
+          required: ['kind', 'slots'],
         },
       }],
       tool_choice: { type: 'tool', name: 'normalize_slots' },
@@ -245,7 +259,24 @@ Output EXACTLY ONE call to normalize_slots.`;
     });
     logLlmUsage('availability_tz_normalize', MODEL_HAIKU, resp);
     const toolUse = resp.content.find((b: any) => b.type === 'tool_use') as any;
-    const raw = toolUse?.input as { slots?: Array<{ wall_clock?: string; stated_timezone?: string; duration_minutes?: number; gap_query?: boolean }>; category?: string } | undefined;
+    const raw = toolUse?.input as { kind?: string; search_window?: Partial<RequestedSearchWindow> & {durationQuote?:string}; slots?: Array<{ wall_clock?: string; stated_timezone?: string; duration_minutes?: number; gap_query?: boolean }>; category?: string } | undefined;
+    if (raw?.kind === 'search_window') {
+      const w = raw.search_window;
+      const wall = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+      if (w && typeof w.start === 'string' && typeof w.end === 'string' && typeof w.zone === 'string'
+        && wall.test(w.start) && wall.test(w.end) && w.start.slice(0, 10) === w.end.slice(0, 10)
+        && w.start < w.end && DateTime.fromISO(w.start, { zone: 'UTC' }).isValid
+        && DateTime.fromISO(w.end, { zone: 'UTC' }).isValid && (canonicalZone(w.zone) || ['IST','CST'].includes(w.zone))) {
+        const requestedMinutes = w.requestedMinutes;
+        return { slots: [], category: null, searchWindow: {
+          start: w.start, end: w.end, zone: w.zone,
+          ...(typeof requestedMinutes === 'number' && Number.isSafeInteger(requestedMinutes) && requestedMinutes > 0
+            && typeof w.durationQuote === 'string' && w.durationQuote.trim() && message.includes(w.durationQuote) ? { requestedMinutes } : {}),
+        } };
+      }
+      return { slots: [], category: null };
+    }
+    if (raw?.kind === 'other') return { slots: [], category: null };
     const out: NormalizedSlot[] = [];
     for (const entry of raw?.slots ?? []) {
       if (typeof entry?.wall_clock !== 'string') continue;
@@ -276,10 +307,14 @@ Output EXACTLY ONE call to normalize_slots.`;
       : null;
     return { slots: out, category };
   } catch (err) {
-    logger.warn('availabilityPreCheck — Haiku normalize threw, falling back to regex', {
+    logger.warn('availabilityPreCheck — time proposals could not be classified; deferring to scheduling tools', {
       err: String(err).slice(0, 200),
     });
-    return { slots: [], category: null };
+    // A standalone numeric date + clock is unambiguous in shape even without
+    // the extractor. Prose and ranges must go through regular scheduling.
+    const literal = /^\s*\d{1,4}[-/]\d{1,2}[-/]\d{1,4}\s+\d{1,2}:\d{2}\s*[?]?\s*$/.test(message);
+    const slots = literal ? extractRawPairs(message, tz, today).map(p => ({ wall_clock: p.date + 'T' + p.time })) : [];
+    return { slots, category: null };
   }
 }
 
@@ -467,6 +502,7 @@ interface SlotVerdict extends SlotOutcome {
 }
 
 export interface AvailabilityPreCheckResult {
+  searchWindow?: RequestedSearchWindow;
   /** True when a requested slot was tested or needs source-time clarification. */
   ran: boolean;
   /** Per-slot verdicts for the system prompt block. Empty when ran=false. */
@@ -504,12 +540,14 @@ export interface AvailabilityPreCheckResult {
  * orchestrator path is unaffected.
  */
 export async function precheckAvailability(params: {
+  requiredDay?: {date:string;zone:string};
   message: string;
   profile: UserProfile;
+  requestZone?: string;
   durationMinutes?: number;  // default 25 (from profile.meetings.allowed_durations[1])
   // v3.3.7 (#125b) — last few thread messages so the Haiku normalizer can
   // resolve WHICH DAY a bare time refers to ("מחר" said a message earlier).
-  recentThread?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  recentThread?: Array<{ role: 'user' | 'assistant'; content: string; toolSummaries?: string[] }>;
   /**
    * Missing-entry fallback for callers without structured requester availability.
    * Its only job is to tell this pre-check whether a bare clock is AMBIGUOUS at
@@ -603,8 +641,7 @@ export async function precheckAvailability(params: {
   if (!hasSchedulableSignal) return empty;
 
   const tz = params.profile.user.timezone;
-  const today = DateTime.now().setZone(tz).toFormat('yyyy-MM-dd');
-  const durationMinutes = params.durationMinutes ?? params.profile.meetings.allowed_durations[1] ?? 25;
+  const durationMinutes = params.durationMinutes ?? params.profile.meetings.default_meeting_duration ?? Math.min(...params.profile.meetings.allowed_durations);
 
   // v3.1.2 (#116) — multi-TZ path. Haiku reads the message and reports which
   // clock times were proposed and, per slot, which zone the colleague stated them
@@ -613,14 +650,14 @@ export async function precheckAvailability(params: {
   // v3.3.7 (#125b) — Haiku is the PRIMARY extraction path whenever the message
   // carries a time at all (was TZ-cue-only). The regex path can't resolve
   // relative day words ("מחר" in a prior message), so it resolved time-only asks
-  // to TODAY — the wrong-day "13:30 works" verdict (#125). Regex stays below as
-  // the fail-open fallback when Haiku errors/returns empty. Cost-bounded: one
+  // to TODAY — the wrong-day "13:30 works" verdict (#125). Cost-bounded: one
   // Haiku call, only on messages carrying a schedulable signal.
   // v4.2.x (M13) — the CONVERSION is here, not in Haiku. `resolveFrame` decides
   // whose clock a stated time is (or reports that it cannot) and luxon does the
   // arithmetic, so this pre-check and `find_available_slots` cannot land on two
   // different instants for one phrase the way they did on 2026-07-27.
   let pairs: Pair[] = [];
+  const statedZones = new Set<string>();
   // v3.7.x — category the normalizer inferred, threaded into checkSlot so the
   // verdict enforces per-day/day-type category caps (matches the search).
   let detectedCategory: string | null = null;
@@ -628,7 +665,8 @@ export async function precheckAvailability(params: {
     // The gate above already confirmed a schedulable signal (incl. a bare "?"
     // gap question with no time), so always let the language-agnostic Haiku
     // normalizer read it — it returns empty for non-availability messages.
-    const { slots, category } = await normalizeAvailabilitySlotsWithHaiku(params.message, params.profile, params.recentThread);
+    const { slots, category, searchWindow } = await normalizeAvailabilitySlotsWithHaiku(params.message, params.profile, params.recentThread);
+    if (searchWindow) return { ...empty, searchWindow };
     detectedCategory = category;
     if (slots.length > 0) {
       const seen = new Set<string>();
@@ -642,13 +680,20 @@ export async function precheckAvailability(params: {
           ? attendeeKnownTimezoneForDay(params.requesterAvailability, slot.wall_clock)
           : params.requesterTimezone ?? null;
         const explicit = /(?:Z|[+-]\d{2}:\d{2})$/i.test(slot.wall_clock);
-        const stated = slot.stated_timezone && !explicit ? resolveStatedSourceZone({
+        const priorReply = params.recentThread?.at(-1);
+        const bareClock = isClockReply(params.message);
+        const priorOffers = bareClock && priorReply?.role === 'assistant' && priorReply.toolSummaries?.some(line => line.startsWith('[find_available_slots ') && line.includes(' slots:')) && params.channelId
+          ? getOfferedSlots(params.channelId, params.threadTs) ?? [] : [];
+        const prose = priorReply?.content.replace(/^\[[^\n]*\]\n/, '') ?? '';
+        const stated = bareClock ? displayedOfferZone(prose, priorOffers, [tz, ...(personZone ? [personZone] : [])])
+          : slot.stated_timezone && !explicit ? resolveStatedSourceZone({
           startIso: slot.wall_clock, statedZone: slot.stated_timezone,
           homeTz: tz, personTimezone: personZone,
         }) : undefined;
-        const frame = explicit ? { zone: tz } : resolveFrame(stated, requesterTzForDate(slot.wall_clock), tz);
+        const frame = explicit ? { zone: tz } : resolveFrame(stated ?? (bareClock ? params.requestZone : undefined), requesterTzForDate(slot.wall_clock), tz);
         const primary = readClockIn(slot.wall_clock, frame.zone, tz);
         if (!primary) continue;
+        if (stated) statedZones.add(stated);
         // The second reading exists only when the frame is undecided AND the two
         // zones actually disagree about this instant — two zones on the same offset
         // (or a DST edge that collapses them) produce one instant, so there is
@@ -682,41 +727,8 @@ export async function precheckAvailability(params: {
       });
     }
 
-    // Regex fallback path. Runs when Haiku errored or returned nothing usable.
-    if (pairs.length === 0) {
-      // Owner locale order for ambiguous DD/MM vs MM/DD (Americas → month-first,
-      // everywhere else → day-first) lives inside extractRawPairs — shared with the
-      // named-attendee bail's ledger-forget above so the two extractions cannot
-      // drift. Heuristic (fails open — the real slot search re-interprets on
-      // Sonnet's reading anyway), no new profile field needed.
-      pairs = extractRawPairs(params.message, tz, today);
-      if (pairs.length === 0) return empty;
-      // v4.2.2 — every clock this path can extract is a BARE one (it has no zone
-      // signal at all), so the frame is undecided in exactly the sense resolveFrame
-      // describes, and it forks the same way. Both earlier versions asserted a single
-      // reading and each was wrong for one of the two colleagues on the tape: pre-4.2
-      // read owner-local (the Dirk hour-off), 4.2.1 read requester-local (which
-      // re-frames a clock Maelle herself offered in the owner's frame — the Luke
-      // echo). A colleague in the owner's own zone still gets one reading, so this
-      // whole block is a no-op for him.
-      pairs = pairs.map(p => {
-        const primary = readClockIn(`${p.date}T${p.time}`, tz, tz);
-        const base = { ...p, ...(primary ? { instantIso: primary.instantIso } : {}) };
-        const fallbackOtherZone = resolveFrame(undefined, requesterTzForDate(p.date), tz).otherZone;
-        if (!fallbackOtherZone) return base;
-        const otherRead = readClockIn(`${p.date}T${p.time}`, fallbackOtherZone, tz);
-        return otherRead && (otherRead.date !== p.date || otherRead.time !== p.time)
-          ? { ...base, other: { ...otherRead, zone: fallbackOtherZone }, statedClock: p.time }
-          : base;
-      });
-      if (pairs.some(p => p.other)) {
-        logger.info('availabilityPreCheck — regex fallback: bare clocks, frame undecided; checking both readings', {
-          ownerTz: tz,
-          pairs: pairs.map(p => `${p.date}T${p.time}${p.other ? ` OR ${p.other.date}T${p.other.time}` : ''}`),
-        });
-      }
-    }
-
+    // Window searches and uncertain extractions supply no point evidence.
+    if (!pairs.length) return empty;
   } catch (error) {
     if (!(error instanceof StatedTimeClarificationError)) throw error;
     // No candidate has been checked or recorded yet. Carry the actual unresolved
@@ -916,10 +928,7 @@ export async function precheckAvailability(params: {
     // would create — instead of a phantom default-25 window. Computed once per
     // PAIR so both readings of an undecided frame answer the same meeting.
     const askedMin = pair.durationMin ?? durationMinutes;
-    const snappedMin = allowedDurations.reduce(
-      (best, d) => (Math.abs(d - askedMin) < Math.abs(best - askedMin) ? d : best),
-      allowedDurations[0],
-    );
+    const { durationMin: snappedMin } = meetingDuration(askedMin, allowedDurations, false);
     try {
       const gapQuery = pair.gapQuery === true;
       const primary = await evaluateInstant(pair.date, pair.time, gapQuery, snappedMin, pair.instantIso);
@@ -1081,7 +1090,12 @@ export async function precheckAvailability(params: {
   // Appended AFTER the verdict lines because the block's own text refers to them.
   // That is the only ordering constraint here — the alternatives block never reads
   // the floor's ledger, so its position relative to the loop above is free.
+  const [statedZone] = statedZones;
+  const presentationZoneForInstant = statedZones.size === 1
+    ? () => statedZone : requesterTzForDate;
   const alternativesResult = await blockedSlotAlternativesBlock({
+    requiredDay:params.requiredDay,
+    presentationZoneForInstant,
     profile: params.profile,
     // v4.2.2 — an undecided frame contributes BOTH of its readings, because both of
     // that block's questions are per-instant: its trigger is "did anything come back
@@ -1099,12 +1113,12 @@ export async function precheckAvailability(params: {
     channelId: params.channelId,
     threadTs: params.threadTs,
   });
-  const promptBlock = renderPromptBlock(verdicts, params.profile, requesterTzForDate)
+  const promptBlock = renderPromptBlock(verdicts, params.profile, statedZones.size === 1 && statedZone !== tz ? presentationZoneForInstant : requesterTzForDate)
     + (alternativesResult.block ? `\n\n${alternativesResult.block}` : '');
   // Same facts, second surface: the synthetic tool-summary lines (see the
   // AvailabilityPreCheckResult field doc). Rendered here so the prompt block and
   // the checker-visible lines come from the same verdicts and can never disagree.
-  const toolSummaryLines = renderToolSummaryLines(verdicts, alternativesResult.alternatives, tz, requesterTzForDate, durationMinutes);
+  const toolSummaryLines = renderToolSummaryLines(verdicts, alternativesResult.alternatives, tz, requesterTzForDate, durationMinutes, statedZones.size === 1 ? statedZone : undefined);
   // v4.2.2 — log the TIER split, not just the count. `notBookable` sums the HARD
   // tier and the owner-overridable NOT CLEAN tier, and that ambiguity cost a day of
   // diagnosis: `bookable:0, notBookable:3` on 2026-07-27 (:187) was read as three
@@ -1172,6 +1186,7 @@ function renderToolSummaryLines(
   tz: string,
   requesterTzForDate: (date: string) => string,
   fallbackDurationMin: number,
+  statedZone?: string,
 ): string[] {
   // `tz` is closed over rather than passed: every instant reaching here is
   // already owner-local, so there is no call site that may stamp another zone.
@@ -1180,7 +1195,9 @@ function renderToolSummaryLines(
     return theirs ? ` [local: ${theirs}; requester ${zone}]` : '';
   };
   const clause = (o: SlotOutcome, zone?: string): string => {
-    const head = `${o.instantIso ?? `${o.date}T${o.time}`} ${tz}${localPart(o.date, o.time, o.instantIso ?? DateTime.fromISO(`${o.date}T${o.time}`, { zone: tz }).toISO()!, zone)} dur=${o.durationMin ?? fallbackDurationMin}m`;
+    const statedClock = statedZone && statedZone !== tz && statedZone !== requesterTzForDate(o.instantIso ?? o.date)
+      ? requesterClock(o.date, o.time, tz, statedZone, o.instantIso) : '';
+    const head = `${o.instantIso ?? `${o.date}T${o.time}`} ${tz}${localPart(o.date, o.time, o.instantIso ?? DateTime.fromISO(`${o.date}T${o.time}`, { zone: tz }).toISO()!, zone)}${statedClock ? ` [stated: ${statedClock}; ${statedZone}]` : ''} dur=${o.durationMin ?? fallbackDurationMin}m`;
     if (o.bookable) {
       return typeof o.maxFreeMinutes === 'number'
         ? `${head}: bookable maxFree=${o.maxFreeMinutes}m`
@@ -1194,9 +1211,11 @@ function renderToolSummaryLines(
     : `[availability_precheck ${clause(v)}]`));
   if (alternatives.length > 0) {
     const starts = alternatives
-      .map(a => DateTime.fromISO(a.start, { zone: tz }))
-      .filter(dt => dt.isValid)
-      .map(dt => `${dt.toFormat("yyyy-MM-dd'T'HH:mm")}${localPart(dt.toFormat('yyyy-MM-dd'), dt.toFormat('HH:mm'), dt.toISO()!)}`);
+      .flatMap(a => {
+        const dt = DateTime.fromISO(a.start, { zone: tz });
+        if (!dt.isValid) return [];
+        return `${dt.toFormat("yyyy-MM-dd'T'HH:mm")}${localPart(dt.toFormat('yyyy-MM-dd'), dt.toFormat('HH:mm'), dt.toISO()!)}${a.label ? ' (' + a.label + ')' : ''}`;
+      });
     if (starts.length > 0) {
       lines.push(`[availability_precheck alternatives (bookable, ${tz}): ${starts.join(', ')}]`);
     }

@@ -85,7 +85,23 @@ export type SkillId =
   | 'persona';            // → social (v2.6.2)
 
 /** Runtime context passed to tool execution */
+/** A single explicit, dated interval for discovery in this turn only. */
+export interface RequestedSearchWindow {
+  start: string;
+  end: string;
+  zone: string;
+  requestedMinutes?: number;
+}
+
 export interface SkillContext {
+  meetingRequestId?: string;
+  individualSearchEmails?: string[];
+  /** Null for a human turn which did not specify how many times to offer. */
+  requestedOptionCount?: number|null;
+  requestDurationMinutes?: number;
+  requiredMeetingDay?: {date:string; zone:string; quote:string};
+  requestZone?: string;
+  requestedSearchWindow?: RequestedSearchWindow;
   /** Turn-level ban on incidental calendar mutations, including during availability reads. */
   calendarReadOnly?: boolean;
   /** Independently classified owner decision, bound to the exact pending row
@@ -104,6 +120,8 @@ export interface SkillContext {
   standaloneBookingApproval?: { requestId: string; requestDetailsJson: string; quote: string };
   /** Actual preceding tool refusal, scoped to its exact action; never supplied
    * by model arguments. Registrar rederives private owner diagnostics itself. */
+  existingInviteSubject?: string;
+  existingInviteStart?: string;
   approvalRefusalReason?: { action: { tool: string; args: Record<string, unknown> }; reason: string };
   /** Normalized attendee emails from the approved create_meeting action, scoped to that replay. */
   approvedBookingAttendeeEmails?: readonly string[];
@@ -179,6 +197,8 @@ export interface SkillContext {
   currentUserMessage?: string;
   /** Literal sender text for approval replacement addresses. Orchestrated turns supply an empty string when unavailable. */
   typedUserMessage?: string;
+  optionsReplyLocale?: 'en' | 'he';
+  singleZoneOptions?: boolean;
   /** True for live turns, false for synthetic runs. Absent in direct contexts means unknown. */
   interactive?: boolean;
 }

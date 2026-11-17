@@ -139,29 +139,37 @@ const GENERIC_HONEST_MISS = "Actually, hold on — I'm not sure that went throug
  *     detection, not a language guess) so a Hebrew/Russian/Arabic thread
  *     doesn't get an English line in its otherwise-native-language reply.
  */
-// email-leg-hedge-shipped-colleague-third-person-wording (2026-08-28) — this
-// line was written for the colleague-facing case (talking ABOUT the owner to
-// someone else, hence "confirm it with him directly"), then reused unchanged
-// on 2026-08-24 for the ungrounded-slot-claim case, which — unlike the
-// original invented-owner-fact case — also fires on the email leg, where the
-// reply goes DIRECTLY to the owner. "him" has no antecedent there and reads
-// as broken. The same gap existed on the Slack owner-private 1:1 DM (the
-// slot-grounding check runs on both Slack legs), closed 2026-08-30.
-// `isOwnerAudience` (runOutputGates' `isOwnerDirectAudience`: email leg, or
-// the owner-private Slack DM) picks the second-person wording instead of
-// silently shipping a third-person line to its own subject.
-export function genericHonestHedge(draft: string, isOwnerAudience?: boolean): string {
+export function genericHonestHedge(draft: string, _isOwnerAudience?: boolean, bookingUnconfirmed = false): string {
   const lang = detectMessageLanguage(draft);
-  if (isOwnerAudience) {
-    if (lang === 'Hebrew') return 'רגע — לגבי הפרט הספציפי הזה אני לא לגמרי בטוחה, כדאי שתוודא בעצמך.';
-    if (lang === 'Russian') return 'Секунду — в этом конкретном моменте я не совсем уверена, лучше уточнить это самостоятельно.';
-    if (lang === 'Arabic') return 'لحظة — لست متأكدة تمامًا من هذه النقطة بالذات، من الأفضل التأكد من ذلك بنفسك.';
-    return "Actually, I'm not totally sure about that specific point — best to double check it yourself.";
+  if (bookingUnconfirmed) {
+    if (lang === 'Hebrew') return 'לא הצלחתי לאמת שהפגישה נקבעה.';
+    if (lang === 'Russian') return 'Мне не удалось подтвердить, что встреча назначена.';
+    if (lang === 'Arabic') return 'لم أتمكن من تأكيد حجز الاجتماع.';
+    return "I couldn't confirm that the meeting was booked.";
   }
-  if (lang === 'Hebrew') return 'רגע — לגבי הפרט הספציפי הזה אני לא לגמרי בטוחה, כדאי לוודא ישירות מולו.';
-  if (lang === 'Russian') return 'Секунду — в этом конкретном моменте я не совсем уверена, лучше уточнить напрямую у него.';
-  if (lang === 'Arabic') return 'لحظة — لست متأكدة تمامًا من هذه النقطة بالذات، من الأفضل التأكد منه مباشرة.';
-  return "Actually, I'm not totally sure about that specific point — best to confirm it with him directly.";
+  if (lang === 'Hebrew') return 'אין לי מידע מאומת על זה.';
+  if (lang === 'Russian') return 'У меня нет подтверждённой информации об этом.';
+  if (lang === 'Arabic') return 'ليس لديّ معلومات مؤكدة عن ذلك.';
+  return "I don't have confirmed information about that.";
+}
+
+/** Fixed requester-facing status after a confirmed delivery and a live pending row. */
+export function pendingApprovalNotice(message: string, owner: string, action: 'cancel' | 'request'): string {
+  const cancel = action === 'cancel';
+  switch (detectMessageLanguage(message)) {
+    case 'Hebrew': return cancel
+      ? `הבקשה לבטל את הפגישה הזו בלבד ממתינה להחלטה של ${owner}.`
+      : `הבקשה שלך ממתינה להחלטה של ${owner}.`;
+    case 'Russian': return cancel
+      ? `Запрос на отмену только этой встречи ожидает решения ${owner}.`
+      : `Ваш запрос ожидает решения ${owner}.`;
+    case 'Arabic': return cancel
+      ? `طلب إلغاء هذا الاجتماع وحده بانتظار قرار ${owner}.`
+      : `طلبك بانتظار قرار ${owner}.`;
+    default: return cancel
+      ? `Your request to cancel just this one meeting is awaiting ${owner}’s decision.`
+      : `Your request is awaiting ${owner}’s decision.`;
+  }
 }
 
 /**

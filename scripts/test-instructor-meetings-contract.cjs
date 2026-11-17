@@ -49,9 +49,10 @@ check('DURATION-R01 offers and recaps share the duration rendering rule', () => 
 });
 check('DURATION-P01 exact and unstated duration inputs remain supported', () => {
   const schema = tool('find_available_slots').input_schema;
-  assert.deepEqual(Array.from(schema.properties.duration_minutes.enum), [25,55]);
+  assert.equal(schema.properties.duration_minutes.minimum, 1);
+  assert.equal(schema.properties.duration_minutes.enum, undefined);
   assert.ok(!schema.required.includes('duration_minutes'));
-  assert.match(schema.properties.duration_minutes.description, /exact allowed lengths stay exact/);
+  assert.match(schema.properties.duration_minutes.description, /configured presets/);
 });
 check('PAIR-R01 recaps distinguish tentative pairs from jointly checked plans', () => {
   for (const prompt of [owner, colleague, email]) {

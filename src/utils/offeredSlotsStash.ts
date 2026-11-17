@@ -49,6 +49,8 @@ export interface OfferedSlot {
   startIso: string;
   /** Verified end for a Slack hold. Start-only offers still bind booking picks. */
   endIso?: string;
+  /** Clock frame rendered for this Slack offer. */
+  presentationZone?: string;
   display: string;   // owner-TZ "Tuesday 2026-06-16 20:30" — unambiguous date
 }
 
@@ -130,8 +132,8 @@ function persistEmailEntries(): void {
   }
 }
 
-/** Max offered slots retained per conversation (the union across re-asks). */
-const MAX_OFFERED = 12;
+/** History budget between searches. A larger current offer is always retained in full. */
+const HISTORY_BUDGET = 12;
 
 /**
  * Record the slots just offered in a conversation. v3.4.2 — ACCUMULATES (union),
@@ -145,14 +147,14 @@ export function recordOfferedSlots(params: {
   channelId: string;
   threadTs?: string;
   timezone: string;                       // owner TZ — display is rendered here
-  slots: Array<{ start: string; end?: string }>;
+  slots: Array<{ start: string; end?: string; presentationZone?: string }>;
   // v3.7.2 (#142a) — fingerprint of THIS search's shape (duration|window|
   // attendees). Passed by the spread-search recorder; OMITTED by the point-check
   // recorder — preserve-on-omit below keeps the spread fingerprint intact.
   searchFingerprint?: string;
 }): void {
   // No per-call `slice(0, 6)`. It was a second, silent bound competing with
-  // MAX_OFFERED (the real cap, applied to the merged union below) and with the
+  // the merged history budget below and with the
   // configured offered_slot_count (M4): a profile offering 8 slots recorded 6,
   // and a proposed-alternatives payload — requested-day options THEN the widening
   // — dropped exactly the widened ones, so a pick from the second list came back
@@ -168,6 +170,7 @@ export function recordOfferedSlots(params: {
       startIso: isEmail ? s.start : dt.toISO()!,
       display: dt.toFormat('EEEE yyyy-MM-dd HH:mm'),
       ...(end && end > dt ? { endIso: end.toISO()! } : {}),
+      ...(!isEmail && s.presentationZone ? { presentationZone: s.presentationZone } : {}),
     });
   }
   if (fresh.length === 0) return;
@@ -183,7 +186,7 @@ export function recordOfferedSlots(params: {
     merged.set(startMs, slot);
   }
   stash.set(key, {
-    slots: [...merged.values()].slice(-MAX_OFFERED),
+    slots: [...merged.values()].slice(-Math.max(HISTORY_BUDGET, fresh.length)),
     expiresAt: Date.now() + ttlForKey(key),
     // Preserve-on-omit: the point-check recorder omits searchFingerprint, so an
     // interleaved "is he free at X?" confirmation can't wipe the spread search's.

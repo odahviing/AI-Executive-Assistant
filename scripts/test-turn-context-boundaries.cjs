@@ -11,7 +11,7 @@ const { test } = require('node:test');
 const root = path.resolve(__dirname, '..');
 const before = process.argv.includes('--before');
 const prefix = 'artifacts/workshop-verification/slack-audit-20260919/handyman';
-const actual = new Set(['src/core/orchestrator/buildTurnContext.ts', 'src/core/orchestrator/systemPrompt.ts', 'src/utils/skillPreferences.ts']);
+const actual = new Set(['src/utils/schedulingClockReply.ts','src/core/orchestrator/colleagueSchedulingPrompt.ts','src/core/orchestrator/buildTurnContext.ts', 'src/core/orchestrator/systemPrompt.ts', 'src/utils/skillPreferences.ts']);
 const names = { UOWNER: 'Owner Example', UACTIVE: 'Active Person', UIDLE: 'Idle Roommate' };
 function fixture(t) {
   const disk = fs.mkdtempSync(path.join(os.tmpdir(), 'maelle-context-boundary-'));

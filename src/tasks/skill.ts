@@ -207,7 +207,7 @@ async function classifyFreeformCalendarChange(
       max_tokens: 20,
       system: `Classify an owner-approval request by whether it concerns a CALENDAR CHANGE to a meeting — booking a new meeting, moving/rescheduling an existing meeting, adding/removing attendees, or cancelling a meeting.
 - 'calendar' — it clearly IS one of those.
-- 'not_calendar' — it clearly is NOT (posting content, sharing info, flagging an out-of-scope request for the owner, a general non-scheduling yes/no).
+- 'not_calendar' — it clearly is NOT (posting content, sharing info, flagging an out-of-scope request for the owner, a general non-scheduling yes/no). A decision on whether an organizer should SEND THEIR OWN EXISTING invitation to the owner is also not_calendar: the decision is relayed to the organizer. Contrast an instruction for this assistant to add someone to an event, which is calendar.
 - 'unsure' — genuinely ambiguous, or not enough to tell.
 Judge by meaning, in any language. Bias to 'unsure' rather than guessing 'not_calendar' on a maybe — an unsure verdict just asks; a wrong 'not_calendar' silently drops a real change. Answer via the classify tool only.`,
       tools: [{
@@ -380,7 +380,7 @@ export async function createApprovalRequest(
   args: Record<string, unknown>,
   context: SkillContext,
   // Code-only handoff from a locked reschedule reply; never a tool argument.
-  handoff?: { replacingOutreachRequestId?: string },
+  handoff?: { replacingOutreachRequestId?: string; existingInviteDecision?: boolean },
 ): Promise<unknown> {
   const { profile, channelId, threadTs } = context;
   const ownerUserId = profile.user.slack_user_id;
@@ -409,6 +409,8 @@ export async function createApprovalRequest(
         const payload = (rawPayload && typeof rawPayload === 'object' ? rawPayload as Record<string, unknown> : {});
         // Routing state is code-authored, never a caller's cap-exemption claim.
         if (payload.rule === 'freeform_needs_clarification') delete payload.rule;
+        delete payload.organizer_invitation;
+        if (handoff?.existingInviteDecision && subkind === 'freeform') payload.organizer_invitation = true;
         const askText = args.ask_text as string;
         const replacementId = handoff?.replacingOutreachRequestId;
         if (replacementId) {
@@ -434,7 +436,7 @@ export async function createApprovalRequest(
           const q = typeof payload.question === 'string' ? payload.question : '';
           const c = typeof payload.context === 'string' ? payload.context : '';
           const s = typeof payload.subject === 'string' ? payload.subject : '';
-          const calVerdict = await classifyFreeformCalendarChange(q, c, s);
+          const calVerdict = handoff?.existingInviteDecision ? 'not_calendar' : await classifyFreeformCalendarChange(q, c, s);
           if (calVerdict === 'calendar') {
             logger.info('create_approval — refused calendar-shaped freeform; redirecting to the structured path', {
               preview: (s || q).slice(0, 80), requesterSlackId: payload.requester_slack_id,
@@ -922,13 +924,45 @@ export async function createApprovalRequest(
         // ── Dedup via LLM judge ──────────────────────────────────────────────
         // Check open requests for this (owner, requester) before inserting.
         // Same logical ask within 48h → return existing instead of fresh row.
+        // The requester-facing receipt describes the operation the owner can
+        // actually approve. The free-form ask can use a different duration.
+        const pendingBooking = (row: RequestRow) => {
+          if (row.kind !== 'approval' || row.subkind !== 'policy_exception' || row.state !== 'awaiting_owner'
+            || context.surface !== 'colleague_dm' || row.owner_user_id !== ownerUserId
+            || row.requester_slack_id !== context.userId || row.origin_channel !== channelId
+            || (row.origin_thread_ts ?? '') !== (threadTs ?? '')) return {};
+          const details = parseDetails(row);
+          if (!details || details.counter) return {};
+          const action = extractCallbacks(details).on_approve;
+          if (action?.tool !== 'create_meeting') return {};
+          const { start, end } = action.args ?? {};
+          if (typeof start !== 'string' || typeof end !== 'string'
+            || ![start, end].every(stamp => /(?:Z|[+-]\d\d:\d\d)$/i.test(stamp))) return {};
+          const minutes = DateTime.fromISO(end).diff(DateTime.fromISO(start), 'minutes').minutes;
+          if (!Number.isInteger(minutes) || minutes <= 0) return {};
+          return { pending_booking: { start, end, minutes } };
+        };
+        const sameApprovalOperation = (row: RequestRow): boolean => {
+          if (row.kind !== 'approval' || row.subkind !== subkind) return false;
+          const previous = parseDetails(row)?.deferred_action as {tool?:unknown} | undefined;
+          const proposed = payload.deferred_action as {tool?:unknown} | undefined;
+          return !(previous?.tool && proposed?.tool && previous.tool !== proposed.tool);
+        };
+        const keyForApproval = (): string => {
+          const parts = {ownerUserId, requesterSlackId: requesterSlackId ?? null, subject};
+          const legacyKey = buildIdempotencyKey({...parts, kind:'approval'});
+          const legacy = getRequestByIdempotencyKey(legacyKey);
+          if (legacy && sameApprovalOperation(legacy)) return legacyKey;
+          const tool = (payload.deferred_action as {tool?:string} | undefined)?.tool ?? '';
+          return buildIdempotencyKey({...parts, kind:'approval:' + subkind + ':' + tool});
+        };
         let existingId: string | null = null;
         let unchangedProseSnapshot: { subject: string; description: string | null } | undefined;
         let priorDecline: RequestRow | null = null;
         if (requesterSlackId) {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { getDb } = require('../db/client') as typeof import('../db/client');
-          const candidates = getDb().prepare(`
+          const rows = getDb().prepare(`
             SELECT * FROM requests
             WHERE owner_user_id = ?
               AND requester_slack_id = ?
@@ -937,6 +971,7 @@ export async function createApprovalRequest(
             ORDER BY created_at DESC
             LIMIT 8
           `).all(ownerUserId, requesterSlackId) as RequestRow[];
+          const candidates = rows.filter(sameApprovalOperation);
           if (candidates.length > 0) {
             const judged = await judgeRequestDedup({
               proposed: { kind: 'approval', subkind, subject, description: askText },
@@ -946,8 +981,8 @@ export async function createApprovalRequest(
             if (judged.match === 'existing' && judged.existing_id) {
               const matched = candidates.find(candidate => candidate.id === judged.existing_id);
               if (matched?.state === 'cancelled') priorDecline = matched;
-              else {
-                existingId = judged.existing_id;
+              else if (matched) {
+                existingId = matched.id;
                 if (judged.material_change === false && matched) {
                   unchangedProseSnapshot = { subject: matched.subject, description: matched.description };
                 }
@@ -1148,9 +1183,7 @@ export async function createApprovalRequest(
           // low-stakes housekeeping update.
           if (row.subject !== subject) {
             try {
-              const refreshedKey = buildIdempotencyKey({
-                ownerUserId, requesterSlackId: requesterSlackId ?? null, kind: 'approval', subject,
-              });
+              const refreshedKey = keyForApproval();
               if (refreshedKey !== row.idempotency_key) {
                 updateRequest(row.id, { idempotencyKey: refreshedKey });
               }
@@ -1177,17 +1210,13 @@ export async function createApprovalRequest(
             expires_at: existing.expires_at,
             kind: subkind,
             reused_existing: true,
-            owner_notified: !!existing.owner_dm_channel,
+            owner_notified: !!existing.terminal_dm_msg_ts,
+            ...pendingBooking(existing),
           };
         }
 
         // Idempotency key as deterministic fallback (unique constraint at insert).
-        let idempotencyKey = buildIdempotencyKey({
-          ownerUserId,
-          requesterSlackId: requesterSlackId ?? null,
-          kind: 'approval',
-          subject,
-        });
+        let idempotencyKey = keyForApproval();
         let idempotent = priorDecline ?? getRequestByIdempotencyKey(idempotencyKey);
         while (idempotent && ['resolved', 'cancelled', 'expired'].includes(idempotent.state)) {
           const nextKey = `${idempotencyKey}:re:${idempotent.id}`;
@@ -1219,7 +1248,8 @@ export async function createApprovalRequest(
               expires_at: refreshedIdempotent.expires_at,
               kind: subkind,
               reused_existing: true,
-              owner_notified: !!refreshedIdempotent.owner_dm_channel,
+              owner_notified: !!refreshedIdempotent.terminal_dm_msg_ts,
+              ...pendingBooking(refreshedIdempotent),
             };
           }
           // Bug 2.2 (Maayan "Offensive GTM Q&A", 2026-07-15) — the match is
@@ -1346,7 +1376,7 @@ export async function createApprovalRequest(
           if (!isUniqueViolation) throw err;  // unrelated error — propagate
 
           const existing = getRequestByIdempotencyKey(idempotencyKey);
-          if (!existing) {
+          if (!existing || !sameApprovalOperation(existing)) {
             // Shouldn't happen — UNIQUE fired but lookup misses. Re-throw
             // so we don't silently swallow a real bug.
             throw err;
@@ -1382,6 +1412,7 @@ export async function createApprovalRequest(
           // identical bug) — refresh the stored ask before reuse.
           const { row: refreshed, changed: refreshedChanged } = refreshIfOpen(existing);
           await maybeRevive(refreshed, { force: refreshedChanged });
+          const current = getRequest(refreshed.id) ?? refreshed;
           return {
             ok: true,
             approval_id: refreshed.id,
@@ -1389,6 +1420,8 @@ export async function createApprovalRequest(
             expires_at: refreshed.expires_at,
             kind: subkind,
             reused_existing: true,
+            owner_notified: !!current.terminal_dm_msg_ts,
+            ...pendingBooking(current),
             hint: 'This requester already has an open approval for this ask. They may be following up — the original is still awaiting decision.',
           };
         }
@@ -1484,6 +1517,7 @@ export async function createApprovalRequest(
           kind: subkind,
           reused_existing: false,
           owner_notified: ownerNotified,
+          ...pendingBooking(row),
           ...(!ownerNotified ? { _note: 'The request is tracked, but delivery to the owner was not confirmed. It will retry shortly; do not say the owner has received it.' } : {}),
         };
 }

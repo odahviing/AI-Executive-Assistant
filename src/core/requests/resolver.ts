@@ -185,6 +185,7 @@ export interface ResolveResult {
   booked?: boolean;
   start?: string;
   action_summary?: string;
+  requester_notice?: 'action_unconfirmed' | 'coordinated_incomplete';
   outcomes?: Array<Record<string, unknown>>;
   remaining?: Array<Record<string, unknown>>;
   /**
@@ -2207,6 +2208,7 @@ export async function closeUnconfirmedExecution(row: RequestRow, ctx: ResolveCon
     recordOwnerNotificationOutcome(row, posted);
   } catch { recordOwnerNotificationOutcome(row, { ok: false, reason: 'error' }); }
   return { ok: false, request_id: row.id, state: 'resolved', effect: 'approve_replay_unconfirmed', reason,
+    ...(sent ? {requester_notice:noticeKind} : {}),
     ...(outcomes && !ctx.wasAwaitingColleague ? { outcomes, remaining: prior.remaining as Array<Record<string, unknown>> } : {}),
     requester_notify_outcome: sent ? 'sent' : 'failed' };
 }

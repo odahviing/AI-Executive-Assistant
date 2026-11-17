@@ -648,8 +648,13 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
 
     switch (toolName) {
       case 'recall_interactions': {
-        const name = (args as any).name as string;
-        const events = getEventsByActor(userId, name);
+        const name = typeof args.name === 'string' ? args.name.trim() : '';
+        if (!name) return {found:false,error:'missing_person'};
+        const identity = findPersonByName(name);
+        const person = identity.match;
+        if (context.senderRole !== 'owner' && (!person?.slack_id || person.slack_id !== context.userId)) return {found:false};
+        if (identity.status === 'ambiguous') return {found:false,error:'ambiguous_person',candidates:identity.candidates.map(p=>p.name)};
+        const events = getEventsByActor(userId, person?.name || name);
 
         // v3.3.7 (#125c) — verbatim grounding. The event log holds capture-pass
         // SUMMARIES; answering "what did you tell Yael?" from a summary is how
@@ -664,10 +669,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // ever changes.
         const recentExchange = await (async () => {
           try {
-            const hits = searchPeopleMemory(name)
-              .filter(p => p.slack_id && SLACK_ID_RE.test(p.slack_id));
-            const person = hits[0];
-            if (!person?.slack_id) return undefined;
+            if (!person?.slack_id || !SLACK_ID_RE.test(person.slack_id)) return undefined;
             if (context.senderRole !== 'owner' && person.slack_id !== context.userId) {
               return undefined;  // never leak someone else's exchange to a colleague
             }

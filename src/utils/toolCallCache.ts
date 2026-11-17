@@ -50,7 +50,7 @@ import logger from './logger';
 import type { SkillContext } from '../skills/types';
 
 type CallerContext = Pick<SkillContext, 'userId' | 'senderRole' | 'authority' | 'surface'
-  | 'channel' | 'channelId' | 'inboundConnectionId' | 'isMpim' | 'isOwnerInGroup' | 'mpimMemberIds' | 'calendarReadOnly'>;
+  | 'channel' | 'channelId' | 'inboundConnectionId' | 'isMpim' | 'isOwnerInGroup' | 'mpimMemberIds' | 'calendarReadOnly' | 'optionsReplyLocale' | 'requestDurationMinutes' | 'meetingRequestId' | 'individualSearchEmails' | 'requestZone' | 'existingInviteSubject' | 'existingInviteStart' | 'requestedSearchWindow'>;
 
 const WRITE_TTL_MS = 60 * 1000;
 const READ_TTL_MS = 5 * 1000;
@@ -82,7 +82,15 @@ function buildKey(ownerUserId: string, threadTs: string | undefined, toolName: s
     inboundConnectionId: context.inboundConnectionId,
     // Active availability checks can move flexible blocks. Their results
     // cannot stand in for a read-only check, or the other way around.
+    existingInviteStart: toolName === 'check_join_availability' ? context.existingInviteStart : undefined,
+    existingInviteSubject: toolName === 'check_join_availability' ? context.existingInviteSubject : undefined,
     calendarReadOnly: toolName === 'check_join_availability' && context.calendarReadOnly === true,
+    optionsReplyLocale: toolName === 'find_available_slots' ? context.optionsReplyLocale : undefined,
+    requestZone: toolName === 'find_available_slots' ? context.requestZone : undefined,
+    individualSearchEmails: toolName === 'find_available_slots' ? context.individualSearchEmails : undefined,
+    meetingRequestId: toolName === 'find_available_slots' ? context.meetingRequestId : undefined,
+    requestDurationMinutes: toolName === 'find_available_slots' || toolName === 'create_meeting' ? context.requestDurationMinutes : undefined,
+    requestedSearchWindow: toolName === 'find_available_slots' ? context.requestedSearchWindow : undefined,
     isMpim: context.isMpim, isOwnerInGroup: context.isOwnerInGroup,
     mpimMemberIds: context.mpimMemberIds ? [...context.mpimMemberIds].sort() : undefined,
   });

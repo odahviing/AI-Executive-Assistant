@@ -250,14 +250,16 @@ Omit \`search_from\` / \`search_to\` in candidate mode; the candidate range is u
         input_schema: {
           type: 'object',
           properties: {
+            option_count: { type: 'integer', minimum: 1, maximum: 20, description: 'When the requester specifies how many choices to show (including one best time), pass that count. Omit for a general availability request.' },
+            more_options: { type: 'boolean', description: 'Set true when the requester asks for additional, different times for the same search. A repeat check or recap retains the current best options.' },
             duration_minutes: (() => {
               const allowed = profile.meetings.allowed_durations;
               const defaultDur = profile.meetings.default_meeting_duration
                 ?? [...allowed].sort((a, b) => a - b)[0];
               return {
                 type: 'number' as const,
-                enum: allowed,
-                description: `OPTIONAL. Omit when duration is unstated; the handler applies the configured default (${defaultDur} minutes). For a stated or negotiated length, use the nearest allowed preset; exact allowed lengths stay exact.`,
+                minimum: 1,
+                description: `OPTIONAL. Omit when duration is unstated; the default is ${defaultDur} minutes. Pass the actual requested length in whole minutes. Scheduling applies the configured presets (${allowed.join(', ')}) consistently with booking.`,
               };
             })(),
             attendee_emails: { type: 'array', items: { type: 'string' }, description: 'Emails of attendees whose calendars should constrain the search (intersected with the owner\'s). Known internal colleagues named in the request are resolved from the directory and added for you automatically — you do NOT need to resolve names or call find_slack_user first. Pass any emails you already have. You do NOT need an EXTERNAL attendee\'s email to search (candidate / other company / personal domain): their calendar isn\'t visible, so the tool searches the owner\'s side and you collect their email only at BOOKING. Never demand an email — or withhold times — just to run the search.' },
@@ -280,6 +282,7 @@ Omit \`search_from\` / \`search_to\` in candidate mode; the candidate range is u
             time_window_is_hard: { type: 'boolean', description: 'Set TRUE only when the owner/attendee gave a REAL time constraint ("must end by noon", "only after 3pm", "available 7–12"). Then the search_from/search_to times are honored as a hard clip. When false/omitted (DEFAULT), those times are treated as SOFT — the tool searches the OWNER\'S FULL WORK DAY (including night-shift hours) and lets the work-hours + attendee-timezone filters surface the real overlap. This prevents accidentally clipping off valid late/night-shift slots that overlap a far-timezone colleague\'s working hours.' },
             present_in_timezone: { type: 'string', description: 'IANA timezone to ALSO render every returned slot in (e.g. "America/New_York", "America/Los_Angeles"). Set this whenever the requester asks for options in a specific timezone — INCLUDING when no attendee is stored in that zone (e.g. an organizer collecting options to hand to US colleagues "in ET"). The tool attaches a pre-rendered `presentation_local` string per slot (e.g. "Tue 16 Jun 09:00 EDT"); quote it verbatim and NEVER do the timezone conversion yourself.' },
             search_window_timezone: { type: 'string', description: 'IANA timezone that the search_from/search_to CLOCK times are expressed in (e.g. "America/New_York"). Set this when the requested meeting time was GIVEN in a non-owner timezone — e.g. the owner/colleague said "9:45 AM ET": pass search_from="...T09:45:00" + search_window_timezone="America/New_York" and the tool converts to the owner timezone for the search. OMIT when the times are already in the owner timezone (e.g. the requester already converted, or said "4pm my time"). NEVER hand-convert the search time yourself — tag the source zone and let the tool convert.' },
+            owner_availability_only: { type: 'boolean', description: 'For a question specifically about the owner’s own availability, check just that calendar. Omit attendees. The result says nothing about joint availability and never authorizes booking.' },
             requester_is_attending: { type: 'boolean', description: 'DEFAULT true: include the authenticated colleague requester without asking. Set FALSE only on an explicit statement that the requester is not attending; interview category, arranging for others, or omission from a participant list alone leaves the default intact. Preserve every other requested attendee. False excludes only the requester from calendar and hours checks; actual attendees and the owner still constrain slots.' },
             prefer_morning: { type: 'boolean', description: 'Prefer morning slots in the user timezone' },
             meeting_mode: {
@@ -1025,6 +1028,23 @@ Release when the holder declines, replaces or confirms the hold, or the owner ca
         // no new commitment is being booked here (see the checkSlot call above).
         // M9 — the reason travels in human terms (checkSlot's own label), so the
         // colleague can understand it and, if it matters, trigger an approval.
+        if (context.existingInviteSubject && context.existingInviteStart && Date.parse(context.existingInviteStart) === startDt.toMillis() && typeof subject === 'string'
+          && context.existingInviteSubject.toLowerCase() === subject.trim().toLowerCase()
+          && context.senderRole === 'colleague' && context.authority === 'colleague'
+          && context.surface === 'colleague_dm' && context.userId !== profile.user.slack_user_id
+          && Number.isFinite(durationMin) && durationMin > 0 && startDt.toMillis() > DateTime.now().toMillis()) {
+          const {createApprovalRequest} = await import('../tasks/skill');
+          const question = `Would you like the organizer to send you their existing invitation for "${subject}" on ${timeStr} (${timezone})?`;
+          const approval = await createApprovalRequest({
+            kind:'freeform', ask_text: question,
+            payload:{subject, question, context: joinCheck.violation_label ?? 'The requested time falls outside your usual schedule.'},
+          }, context, {existingInviteDecision:true}) as {ok?:boolean;owner_notified?:boolean;error?:string};
+          const notified = approval?.ok === true && approval.owner_notified === true;
+          return {can_join:'needs_approval', ...checkedTime, subject, duration_min:durationMin,
+            approval, owner_notified:notified, broken_rule:joinCheck.violation_kind, violations:[joinCheck.violation_label],
+            ...(notified ? {internal_actions:[{tool:'create_approval',detail:'Existing invitation attendance decision sent to owner'}]} : {}),
+            message:notified ? 'The owner was asked whether the organizer should send the existing invitation. Their answer is pending.' : 'Owner notification was not confirmed. The invitation is still with its organizer.'};
+        }
         const joinViolation = joinCheck.violation_label ?? 'one of his scheduling rules';
         return {
           can_join: 'needs_approval',
@@ -1036,7 +1056,8 @@ Release when the holder declines, replaces or confirms the hold, or the owner ca
           violations: [joinViolation],
           broken_rule: joinCheck.violation_kind,
           message: `${ownerFirst}'s calendar is clear at that time, but joining would break one of his own rules: ${joinViolation}. Ask ${ownerFirst} — explain what "${subject}" is about${reason ? ` (${reason})` : ''} and what it would cost him. If approved, tell ${requesterName} to forward the invite.`,
-          _note: 'Escalate to the owner in their DM thread via create_approval(kind=policy_exception). To the colleague, give the reason in plain human terms — never the rule name. If the owner approves, tell the colleague to forward the invite. Do NOT book.',
+          decision_question: `Would you like ${requesterName} to send you their existing invitation for "${subject}" (${timeStr}, ${timezone}) despite the scheduling conflict?`,
+          _note: 'For an actual request to have the owner join, raise the decision via create_approval(kind=freeform) using decision_question and the conflict as context. The organizer owns the invitation. The decision is whether the organizer should send it; there is no calendar mutation to replay. An availability-only inquiry gets the checked result. Tell the requester it was raised only after confirmed owner notification.',
         };
       }
 
@@ -1369,8 +1390,6 @@ When proposing slots that involve a colleague (move-meeting search with attendee
 OVERLAP REPORTING — when check_calendar_health flags a double_booking, its result names which side is movable vs protected; narrate that recommendation directly, and only ask which-to-move when BOTH sides are protected. Run find_available_slots for the movable side BEFORE narrating, so you offer a concrete proposed time, not "I'd move it somewhere."
 
 RESCHEDULES → find_available_slots when a new time is needed. Explicit owner instructions and picked offers follow the direct-op rules. If the finder returns 0–1 slots, re-call with relaxed:true and disclose returned soft-rule violations. Preserve the single-first / nearby-pair discovery order above. Owner accepts → book; rejects → propose alternatives within scope. An empty relaxed search still requires evidence for its cause.
-
-Exception where raw-calendar narration is fine: ${firstName} asked for a duration that's NOT one of your allowed durations (e.g. "90-min workshop"). The slot finder can't help. Just narrate what's free.
 
 DIRECT OPS (when time + attendees are already known):
 - create_meeting — book a new event immediately. Follow location/category/work-day rules (see detailed rules further down).

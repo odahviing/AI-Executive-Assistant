@@ -61,6 +61,8 @@ function harness(options = {}) {
       return {status:positive&&result.scheduled===true&&result.jobId?'tracked':positive&&(result.success===true||result.ok===true||result.saved===true)?'completed':'failed',result:result||{}};
     } },
     'src/utils/shadowNotify.ts': { shadowNotify: async () => {} },
+    'src/connectors/graph/calendar.ts': { getCalendarEvents: async () => [] },
+    'src/utils/scheduleRules.ts': { checkSlot: () => ({passes:true}), brokenOwnerRules: () => [] },
     'src/connectors/graph/calendarReads.ts': { verifyApprovedCalendarAction:async()=>options.verification||{status:'unavailable',reason:'No authoritative read can establish this outcome.'} },
     'src/utils/ownerDailyThread.ts': { postOwnerDecision: async args => { effects.ownerPosts.push(args.text); return { ok: !options.ownerPostFail, channel: 'DOWNER', threadTs: 'owner.daily', ts: 'owner.1' }; } },
     'src/utils/workHours.ts': { workTimeBaseFromNow: () => '2026-09-10T00:00:00Z', addWorkdays: () => '2026-09-14T00:00:00Z' },
@@ -287,4 +289,14 @@ test('audit A10 initial unavailable approval delivery has a prompt retry',async(
 });
 test('audit A10 legitimate successful approval reports delivery',async()=>{
  const h=harness();const result=await h.create();assert.equal(result.owner_notified,true);assert.equal(h.effects.ownerPosts.length,1);
+});
+
+test('a new contact approval stays separate from a pending calendar exception from the same requester', async () => {
+  const h = harness({semanticRepeat:true});
+  const result = await h.create();
+  assert.equal(result.created, true);
+  assert.equal(h.effects.judges.length, 0);
+  assert.equal(h.effects.creates.length, 1);
+  assert.equal(h.effects.creates[0].subkind, 'unknown_person');
+  assert.equal(h.effects.executes.length, 0);
 });

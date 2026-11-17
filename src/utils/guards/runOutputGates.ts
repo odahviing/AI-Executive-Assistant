@@ -36,8 +36,8 @@
  *   COLLEAGUE-READABLE: human voice → security → dates → final fact/action
  *     truth, using request-specific decisions and action receipts. The existing
  *     always-on fact call replaces the separately admitted approval check.
- *     Approval/completion findings receive a fixed uncertainty line; no model
- *     gets to rewrite that decision into a fresh action claim.
+ *     A grant finding can report the confirmed pending status of a requester's
+ *     own approval. Unestablished approval/completion receives a fixed hedge.
  *
  * `ctx.transport === 'email'` (gh#24) skips both axes entirely and takes a
  * dedicated THIRD leg, runEmailLegGates below — not because email is a third
@@ -150,6 +150,12 @@ export interface OutputGateContext {
  */
 function normalizeForTransport(ctx: OutputGateContext, text: string): string {
   return ctx.transport === 'email' ? text : formatForSlack(text);
+}
+
+function isRenderedCalendarReply(ctx: OutputGateContext, reply: string): boolean {
+  const rendered = ctx.result.renderedSearchReply;
+  return ctx.transport !== 'email' && ctx.role === 'colleague' && !ctx.isChannel && !ctx.isMpim
+    && !!rendered && rendered === ctx.result.reply && reply === formatForSlack(rendered);
 }
 
 /**
@@ -323,7 +329,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     // turn failure into success. This also removes the duplicate probe calls.
     try {
       const { runHumanGate } = await import('../humanGate');
-      const verdict = await runHumanGate(cleanReply, profile, audience, channelId);
+      const verdict = await runHumanGate(cleanReply, profile, audience, channelId, false, false, undefined, undefined, result.meetingRequest ? userMessage : undefined);
       if (!verdict.ok && verdict.rewrite?.trim()) cleanReply = formatForSlack(verdict.rewrite);
     } catch (err) {
       logger.warn('humanGate threw — leaving draft unchanged', { err: String(err) });
@@ -464,7 +470,12 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
       // off-domain recipients. Recent questions also let this existing check
       // judge honest identity answers outside securityGate's English prefilter.
       // Owner-private/email/coda callers supply no identity-question context.
-      const verdict = await runHumanGate(cleanReply, profile, audience, channelId, false, false, aiIdentityContextMessages);
+      // A verified slot table already has human-written copy. A voice rewrite
+      // changed "your calendar shows busy" to "his calendar shows busy".
+      // The security and identity checks below still see the actual reply.
+      const renderedOptions = isRenderedCalendarReply(ctx, cleanReply) && result.toolSummaries?.length === 1
+        && result.toolSummaries[0].startsWith('[find_available_slots ');
+      const verdict = renderedOptions ? {ok:true, rewrite:null} : await runHumanGate(cleanReply, profile, audience, channelId, false, false, aiIdentityContextMessages, undefined, result.meetingRequest ? userMessage : undefined);
       if (!verdict.ok && verdict.rewrite && verdict.rewrite.trim().length > 0) {
         cleanReply = formatForSlack(verdict.rewrite);
       }
@@ -744,8 +755,9 @@ export async function runCodaGates(
 // ── Internal gates ──────────────────────────────────────────────────────────
 
 /** Minimal request-specific evidence; private payloads/identifiers never enter output. */
-async function requestOutcomeEvidence(ctx: OutputGateContext): Promise<string> {
-  let requestEvidence = 'unavailable';
+async function requestOutcomeEvidence(ctx: OutputGateContext): Promise<{
+  context: string; pendingForRequester?: 'cancel' | 'request';
+}> {
   try {
     const { getRequestsForThread } = await import('../../db/requests');
     const { ORIGIN_SURFACE_REPLAY_TOOLS } = await import('../../core/requests/types');
@@ -757,13 +769,27 @@ async function requestOutcomeEvidence(ctx: OutputGateContext): Promise<string> {
       && /^D[A-Z0-9]+$/.test(ctx.channelId)
       && ctx.isMpim !== true && ctx.isChannel !== true && ctx.isOwnerInGroup !== true
       ? ctx.channelId : undefined;
-    requestEvidence = JSON.stringify(getRequestsForThread(ctx.profile.user.slack_user_id, ctx.threadTs, ownerDecisionChannel).map(row => {
+    const rows = getRequestsForThread(ctx.profile.user.slack_user_id, ctx.threadTs, ownerDecisionChannel);
+    const approvals = rows.filter(row => row.kind === 'approval');
+    let pendingForRequester: 'cancel' | 'request' | undefined;
+    const context = JSON.stringify(rows.map(row => {
       let outcome: Record<string, unknown> = {};
       let details: Record<string, any> = {};
       try { outcome = JSON.parse(row.outcome_json ?? '{}') ?? {}; } catch { /* unknown */ }
       try { details = JSON.parse(row.details_json ?? '{}') ?? {}; } catch { /* unknown */ }
       const requested = details.callbacks?.on_approve ?? details.deferred_action;
       const args = { ...requested?.args, ...details.counter };
+      // Older receipts have no request ID. Bind those only when the thread
+      // contains a single approval. New receipts identify the actual delivery.
+      const sameApproval = ctx.result.notifiedApprovalId ? ctx.result.notifiedApprovalId === row.id : approvals.length === 1 && approvals[0] === row;
+      if (sameApproval && row.state === 'awaiting_owner'
+        && row.owner_user_id === ctx.profile.user.slack_user_id && row.requester_slack_id === ctx.senderId
+        && row.origin_channel === ctx.channelId && row.origin_thread_ts === ctx.threadTs
+        && ctx.role === 'colleague' && ctx.transport !== 'email' && /^D[A-Z0-9]+$/.test(ctx.channelId)
+        && !ctx.isChannel && !ctx.isMpim && !ctx.isOwnerInGroup) {
+        pendingForRequester = requested?.tool === 'delete_meeting' && typeof args.meeting_id === 'string' && args.meeting_id.trim()
+          ? 'cancel' : 'request';
+      }
       return { subject: row.subject, created_at: row.created_at, state: row.state,
         requested: { tool: requested?.tool, meeting_subject: args.meeting_subject,
           meeting_id: args.meeting_id, new_start: args.new_start, new_end: args.new_end },
@@ -780,10 +806,11 @@ async function requestOutcomeEvidence(ctx: OutputGateContext): Promise<string> {
           && (ORIGIN_SURFACE_REPLAY_TOOLS as readonly string[]).includes(outcome.replayed),
         booked_start: outcome.booked_start ?? null };
     }));
+    return { context, pendingForRequester };
   } catch (err) {
     logger.warn('Final truth context unavailable', { err: String(err) });
   }
-  return requestEvidence;
+  return { context: 'unavailable' };
 }
 
 /** Shared receipt safeguards for action verdicts, independent of checker mode. */
@@ -912,7 +939,7 @@ async function runClaimCheckAndMaybeRewrite(
     // Module F + E extended-rule inputs (priorAssistantReply, currentUserMessage,
     // imagesInTurn) were removed in the latency pass; honesty rules 1/2/2b/2c/2d
     // /3/5b/9 stay in the system prompt per v2.8.5.
-    const requestEvidence = await requestOutcomeEvidence(ctx);
+    const { context: requestEvidence } = await requestOutcomeEvidence(ctx);
     // The draft can recap an earlier event observation without a new mutation.
     // Give both the checker and its existing tool-less rewrite the same factual
     // tape the drafting context saw, with chronology explicit. A mutation-only
@@ -1185,7 +1212,7 @@ async function runOwnerFactCheckAndMaybeRewrite(
   let cleanReply = initialReply;
 
   try {
-    const { checkReplyClaims, rewriteOwningTheMiss, genericHonestHedge } = await import('../claimChecker');
+    const { checkReplyClaims, rewriteOwningTheMiss, genericHonestHedge, pendingApprovalNotice } = await import('../claimChecker');
 
     // owner-personal-fact-fabricated-in-colleague-reply (2026-08-14, bouncer
     // retry) — ground truth the check needs beyond "did a tool run": the SAME
@@ -1211,7 +1238,8 @@ async function runOwnerFactCheckAndMaybeRewrite(
       ? latestSummaries.slice(-1).filter(line => /^\[find_available_slots(?:\s|\])/.test(line)
         && !/^\[find_available_slots FAILED:/.test(line) && / calendars_read=/.test(line))
       : [];
-    const finalOutcomeContext = `Requests: ${await requestOutcomeEvidence(ctx)}. Earlier tool receipts: ${JSON.stringify(latestSummaries)}`;
+    const requestEvidence = await requestOutcomeEvidence(ctx);
+    const finalOutcomeContext = `Requests: ${requestEvidence.context}. Earlier tool receipts: ${JSON.stringify(latestSummaries)}`;
     const verdict = await checkReplyClaims({
       reply: cleanReply,
       toolSummaries: result.toolSummaries ?? [],
@@ -1241,7 +1269,19 @@ async function runOwnerFactCheckAndMaybeRewrite(
           .some(line => line.includes('mutated=book') && line.toLowerCase().includes(target));
       if (verdict.action_type !== 'permission_granted' && matchingToolAlreadyRan
         && !specificsMismatch && bookingTargetMatches) return cleanReply;
-      return genericHonestHedge(cleanReply, isOwnerDirectAudience(ctx));
+      const receipts = result.toolSummaries?.length ? result.toolSummaries : latestSummaries;
+      const lastReceipt = receipts.at(-1);
+      const deliveredApproval = lastReceipt?.startsWith('[create_approval:') && lastReceipt.endsWith(' mutated=task notified=approval_owner');
+      if (requestEvidence.pendingForRequester && (verdict.action_type === 'permission_granted' || verdict.action_type === 'book')
+        && (result.notifiedApprovalId || deliveredApproval) && !result.bookingOccurred) {
+        return pendingApprovalNotice(ctx.userMessage || cleanReply, profile.user.name.split(' ')[0], requestEvidence.pendingForRequester);
+      }
+      const observed = result.sharedMeetingRead;
+      if (verdict.action_type === 'book' && !result.bookingOccurred && ctx.role === 'colleague'
+        && !ctx.isChannel && !ctx.isMpim && observed && cleanReply.includes(observed.subject)) return observed.reply;
+      const failedBooking = !result.bookingOccurred && (result.toolSummaries ?? [])
+        .some(line => line.startsWith('[create_meeting FAILED:'));
+      return genericHonestHedge(cleanReply, isOwnerDirectAudience(ctx), failedBooking);
     }
 
     let rewriteSummaries = result.toolSummaries ?? [];
@@ -1546,6 +1586,10 @@ async function runAvailabilityFloorAndMaybeRewrite(ctx: OutputGateContext, initi
  * function for why the prose never grounded anything.
  */
 async function runSlotGroundingCheckAndMaybeRewrite(ctx: OutputGateContext, initialReply: string): Promise<string> {
+  // The handler formatted these clocks from the checked slot instants. Preserve
+  // the exact rendering; edited drafts and any conflicting floor rewrite still
+  // need the semantic grounding check.
+  if (isRenderedCalendarReply(ctx, initialReply)) return initialReply;
   const { profile, result } = ctx;
   if (!initialReply || initialReply.trim().length === 0) return initialReply;
   if (!/\d/.test(initialReply)) return initialReply;

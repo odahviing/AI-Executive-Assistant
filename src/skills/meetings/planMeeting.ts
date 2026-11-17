@@ -39,7 +39,7 @@ import type { UserProfile } from '../../config/userProfile';
 import { getOwnerEventsForDecision, getFreeBusyForDecision, type CalendarEvent } from '../../connectors/graph/calendar';
 import { attendeeWorkSegmentsBetween, loadAttendeeAvailabilityForEmails } from '../../utils/attendeeAvailability';
 import { resolveLocation, isPhoneLocationString, type LocationVerdict } from '../../utils/resolveLocation';
-import { bookingLeadTimeHours, checkSlot } from '../../utils/scheduleRules';
+import { bookingLeadTimeHours, checkSlot, OWNER_OVERRIDABLE_KINDS } from '../../utils/scheduleRules';
 import { subjectViewerFor, type SubjectViewer } from '../../utils/displaySubject';
 import { profileDualClock } from '../../utils/weTimeResolver';
 import { findNearbyAlternatives, type NearbyAlternative } from './nearbyAlternatives';
@@ -268,7 +268,7 @@ export type PlanAction =
   // presence here is exactly as reliable as on `confirm_override`.
   | { action: 'attendee_condition_unmet'; reason: string; suggestedAskText: string }
   | { action: 'confirm_override'; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null; attendeeBusyLabel?: string }
-  | { action: 'escalate_approval'; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null }
+  | { action: 'escalate_approval'; ownerWaivableOnly?: boolean; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null }
   /**
    * Two lists, never one. `alternatives` is what exists on the day the
    * requester named; `widenedAlternatives` is what only exists if the search is
@@ -277,7 +277,7 @@ export type PlanAction =
    * shape of "nothing on Thursday — want me to look further out?", and it is a
    * shape the caller cannot flatten by accident.
    */
-  | { action: 'propose_alternative'; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; alternatives: Array<{ start: string; end: string; label: string }>; widenedAlternatives: Array<{ start: string; end: string; label: string }>; requestedDay: string; category: string | null }
+  | { action: 'propose_alternative'; ownerWaivableOnly?: boolean; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; alternatives: Array<{ start: string; end: string; label: string }>; widenedAlternatives: Array<{ start: string; end: string; label: string }>; requestedDay: string; category: string | null }
   | { action: 'decline_as_attendee'; organizerName: string | null; organizerEmail: string | null }
   | { action: 'refuse_not_owners'; organizerName: string | null; organizerEmail: string | null }
   | { action: 'ask_location_mode'; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null; reasoning: string; attendeeBusyLabel?: string }
@@ -731,6 +731,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   // Colleague-path rule break: the label, and the nearby rule-compliant options
   // to offer before escalating (#8). Both feed the single combined return.
   let ruleViolationLabel: string | undefined;
+  let ownerWaivableRule = false;
   let attendeeBusyLabel: string | undefined;
   // The two sets are kept APART all the way to the caller. Options on the
   // day the requester actually named are the answer; anything on a later day is
@@ -911,6 +912,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         ownerOverrideNotice = ruleResult.violation_label ?? 'a scheduling rule';
       }
     } else if (!ruleResult.passes) {
+      ownerWaivableRule = !!ruleResult.violation_kind && (OWNER_OVERRIDABLE_KINDS.has(ruleResult.violation_kind) || ruleResult.violation_kind === 'owner_busy_collision');
       ruleViolationLabel = ruleResult.violation_label ?? 'rule violated';
       const label = ruleViolationLabel;
       const subj = input.subject ?? 'this meeting';
@@ -1296,6 +1298,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         ? {
             action: 'propose_alternative',
             violationLabel: ruleViolationLabel,
+            ownerWaivableOnly: ownerWaivableRule && gates.length === 1,
             suggestedAskText,
             openQuestions,
             alternatives: ruleAlternatives,
@@ -1306,6 +1309,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         : {
             action: 'escalate_approval',
             violationLabel: ruleViolationLabel,
+            ownerWaivableOnly: ownerWaivableRule && gates.length === 1,
             suggestedAskText,
             openQuestions,
             category,

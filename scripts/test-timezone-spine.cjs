@@ -314,12 +314,13 @@ test('search display resolves attendee zone for each offered date, explicit disp
   const {entries}=personHarness();
   const run=args=>{
     const pick=compile(`${siblings[i-1].getText()}\n${decl.getText()}\nexport const pick=presentTzForOutput;`,
-      {args,timezone:zone,attendeeAvailability:[entry],DateTime,singleAttendeePresentationZone:entries.singleAttendeePresentationZone}).pick;
+      {args,context:{},timezone:zone,searchWindowTz:args.search_window_timezone ?? '',attendeeAvailability:[entry],DateTime,singleAttendeePresentationZone:entries.singleAttendeePresentationZone}).pick;
     return typeof pick==='function'?pick:()=>pick;
   };
   assert.equal(run({})('2026-09-21T16:00:00+03:00'),'Europe/London');
   assert.equal(run({})('2026-09-16T16:00:00+03:00'),'America/New_York');
-  const fixed=run({present_in_timezone:'Asia/Tokyo'});
+  assert.equal(run({search_window_timezone:'America/Chicago'})('2026-09-16T16:00:00+03:00'),'America/Chicago');
+  const fixed=run({present_in_timezone:'Asia/Tokyo',search_window_timezone:'America/Chicago'});
   assert.equal(fixed('2026-09-16T16:00:00+03:00'),'Asia/Tokyo');
   assert.equal(fixed('2026-09-21T16:00:00+03:00'),'Asia/Tokyo');
 });

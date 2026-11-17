@@ -15,7 +15,9 @@ function compile(source, bindings) { const m = { exports: {} }; const js = ts.tr
 const readsFile = 'src/connectors/graph/calendarReads.ts';
 const createFile = 'src/skills/meetings/ops/handlers/createMeeting.ts';
 const fn = name => one(nodes(readsFile, n => ts.isFunctionDeclaration(n) && n.name?.text === name)).getText().replace('export ', '');
-const event = (start = '2026-09-24T12:00:00') => ({ id: 'existing', subject: 'Review', start: { dateTime: start, timeZone: 'UTC' }, attendees: [{ emailAddress: { address: 'peer@example.test' } }] });
+const event = (start = '2026-09-24T12:00:00') => ({ id: 'existing', subject: 'Review', isAllDay:false,
+  start: { dateTime: start, timeZone: 'UTC' }, end: { dateTime: start.slice(0,11)+'12:25:00', timeZone:'UTC' },
+  organizer: {emailAddress:{address:'owner@example.test'}}, attendees: [{ type:'required', emailAddress: { address: 'peer@example.test' } }] });
 function matchers({ warm = [], live = [event()], error } = {}) {
   let calls = 0;
   const fns = compile(fn('findDuplicateEvent') + '\n' + fn('findReschedulableSibling') + '\nmodule.exports = { findDuplicateEvent, findReschedulableSibling };', {
@@ -23,25 +25,60 @@ function matchers({ warm = [], live = [event()], error } = {}) {
   });
   return { ...fns, calls: () => calls };
 }
-const duplicate = h => h.findDuplicateEvent('owner@example.test', 'Review', '2026-09-24T12:00:00Z', 'UTC');
+const intended = { endIso:'2026-09-24T12:25:00Z', attendees:[{email:'PEER@example.test'}], allDay:false,
+  roomEmail:'room@example.test', requireRoom:false };
+const duplicate = (h, identity = intended) => h.findDuplicateEvent('owner@example.test', 'Review', '2026-09-24T12:00:00Z', 'UTC',
+  ...(fn('findDuplicateEvent').includes('intended:') ? [identity] : []));
 const sibling = h => h.findReschedulableSibling({ userEmail: 'owner@example.test', ownerEmail: 'owner@example.test', subject: 'Review', startIso: '2026-09-25T12:00:00Z', timezone: 'UTC', attendeeEmails: ['peer@example.test'] });
 function guard(kind, result, error, forceNew = false) {
-  const marker = kind === 'duplicate' ? 'create_meeting idempotency pre-check failed' : 'reschedulable-sibling check threw';
+  const marker = kind === 'early' ? 'colleague-path early idempotency probe failed' : kind === 'duplicate' ? 'create_meeting idempotency pre-check failed' : 'reschedulable-sibling check threw';
   const branch = one(nodes(createFile, n => ts.isTryStatement(n) && n.catchClause?.getText().includes(marker)));
   const code = kind === 'sibling' ? branch.parent.parent.getText() : branch.getText();
-  return compile('module.exports = async function() {' + code + '\nreturn { reachedWrite: true }; };', {
+  const helpers = nodes(createFile, n => ts.isVariableDeclaration(n) && n.name?.getText() === 'probeExistingBooking');
+  const probe = helpers.length ? 'const '+helpers[0].getText()+';\n' : '';
+  return compile('module.exports = async function() {' + probe + code + '\nreturn { reachedWrite: true }; };', {
     args: { subject: 'Review', start: '2026-09-24T12:00:00Z', end: '2026-09-24T12:25:00Z', force_new: forceNew },
     userEmail: 'owner@example.test', ownerEmail: 'owner@example.test', timezone: 'UTC', attendees: [{ email: 'peer@example.test' }],
-    context: { profile: {} }, viewerEmail: undefined, DateTime, tripDisplay: undefined,
+    context: { profile: {user:{name:'Owner'},meetings:{}} }, assistantEmail:undefined, viewerEmail: undefined, DateTime, tripDisplay: undefined,
+    formatIsoTime: () => 'Thursday 12:00',
     logger: { warn() {}, info() {} }, presentationLocalFieldFor: () => ({}), renderWeDualClock: () => 'Thursday 12:00',
     displaySubject: x => x.subject, subjectViewerFor: () => 'owner',
-    findDuplicateEvent: async () => { if (error) throw error; return result; },
+    findDuplicateEvent: async (...params) => { if (error) throw error; return typeof result === 'function' ? result(...params) : result; },
     findReschedulableSibling: async () => { if (error) throw error; return result; },
   })();
 }
 let passed = 0, failed = 0;
 async function check(name, f) { try { await f(); passed++; console.log('ok ' + name); } catch (e) { failed++; console.log('not ok ' + name + ': ' + e.message); } }
 (async () => {
+  const read = (...live) => duplicate(matchers({live}));
+  for (const [label, change] of [
+    ['different roster', {attendees:[]}], ['missing roster', {attendees:undefined}],
+    ['different organizer', {organizer:{emailAddress:{address:'someone@example.test'}}}],
+    ['different duration', {end:{dateTime:'2026-09-24T12:30:00',timeZone:'UTC'}}],
+    ['nearby start', {start:{dateTime:'2026-09-24T12:01:00',timeZone:'UTC'}}],
+    ['changed attendee role', {attendees:[{type:'optional',emailAddress:{address:'peer@example.test'}}]}],
+  ]) await check('same title with '+label+' requests clarification', async () =>
+    assert.equal(await read({...event(), ...change}), 'ambiguous'));
+  await check('two matching events cannot identify one retry', async () => assert.equal(await read(event(), {...event(),id:'second'}), 'ambiguous'));
+  await check('one proven invitation among nearby events is a true retry', async () => assert.equal((await read({...event(),attendees:[]}, event())).id, 'existing'));
+  await check('room auto-addition and address case preserve a genuine retry', async () =>
+    assert.equal((await read({...event(), attendees:[...event().attendees,{type:'optional',emailAddress:{address:'ROOM@example.test'}}]})).id,'existing'));
+  await check('an explicitly requested room must be present', async () =>
+    assert.equal(await duplicate(matchers(), {...intended,requireRoom:true}), 'ambiguous'));
+  for (const path of ['early','duplicate']) {
+    await check(path+' ambiguous collision withholds both success and creation',async () => {
+      const result = await guard(path, 'ambiguous'); assert.equal(result.error,'existing_booking_identity_unconfirmed');
+      assert.equal(result.reachedWrite,undefined); assert.equal(result.meetingId,undefined);
+    });
+    await check(path+' actual matcher returns the intended invitation and withholds a different roster',async () => {
+      const good = await guard(path, matchers().findDuplicateEvent);
+      assert.equal(good.idempotent,true); assert.equal(good.meetingId,'existing');
+      const mismatched = matchers({live:[{...event(), attendees:[]}]});
+      const result = await guard(path, mismatched.findDuplicateEvent);
+      assert.equal(result.error,'existing_booking_identity_unconfirmed');
+      assert.equal(result.meetingId,undefined); assert.equal(result.reachedWrite,undefined);
+    });
+  }
   await check('regression cached-absence-cannot-hide-duplicate', async () => assert.equal((await duplicate(matchers()))?.id, 'existing'));
   await check('regression cached-absence-cannot-hide-sibling', async () => assert.equal((await sibling(matchers()))?.id, 'existing'));
   await check('regression duplicate-read-failure-stops-create', async () => assert.rejects(guard('duplicate', null, Error('unavailable')), /unavailable/));

@@ -8,9 +8,24 @@
  */
 
 import crypto from 'crypto';
+import type { RefusedBooking } from './conversations';
 import { DateTime } from 'luxon';
 import { getDb } from './client';
 import { getConversationHistory } from './conversations';
+
+/** Recover the exact approval (including a terminal decision) after an uncertain write. */
+export function findRefusedBookingApproval(booking: RefusedBooking): {approval_id: string; owner_notified: boolean; state: string} | undefined {
+  const candidates = getDb().prepare(`SELECT id, state, terminal_dm_msg_ts, details_json FROM requests
+    WHERE kind='approval' AND subkind='policy_exception' AND owner_user_id=? AND requester_slack_id=?
+    AND origin_channel=? AND origin_thread_ts=? ORDER BY created_at DESC`)
+    .all(booking.ownerId, booking.requesterId, booking.channelId, booking.threadTs) as Pick<RequestRow,'id'|'state'|'terminal_dm_msg_ts'|'details_json'>[];
+  const wanted = JSON.parse(JSON.stringify(booking.action));
+  for (const row of candidates) {
+    const details = JSON.parse(row.details_json ?? '{}');
+    const callback = details.callbacks?.on_approve ?? details.deferred_action;
+    if ((require('node:util') as typeof import('node:util')).isDeepStrictEqual(callback, wanted)) return {approval_id:row.id, owner_notified:!!row.terminal_dm_msg_ts, state:row.state};
+  }
+}
 import type {
   CreateRequestInput,
   NextCheckHandler,

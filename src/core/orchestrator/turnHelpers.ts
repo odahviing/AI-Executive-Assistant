@@ -347,6 +347,13 @@ function attendeeCheckSource(toolName: string, result: unknown): 'slots' | 'note
 
 function summarizeToolCall(toolName: string, input: Record<string, unknown>, result: unknown, ownerTz: string): string {
   let summary = renderToolSummary(toolName, input, result, ownerTz);
+  if (toolName === 'create_approval' && result && typeof result === 'object') {
+    const receipt = result as {ok?: boolean; pending_booking?: {start:string; end:string; minutes:number}};
+    if (receipt.ok && receipt.pending_booking) {
+      const {start, end, minutes} = receipt.pending_booking;
+      summary += ` [awaiting owner decision: ${start} to ${end}, ${minutes} minutes; meeting not booked]`;
+    }
+  }
   if (toolName === 'hold_slot' && result && typeof result === 'object') {
     const hold = result as Record<string,unknown>;
     if (hold.success === true && typeof hold.hold_id === 'string' && typeof hold.start_iso === 'string'
@@ -609,6 +616,8 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         return `[get_calendar ${input.start_date}→${input.end_date}: ${events.length} events]`;
       }
       case 'find_available_slots': {
+        const scope = (result as {availability_scope?:unknown} | null)?.availability_scope;
+        const scopeNote = scope === 'owner_only' || scope === 'explicit_participant_only' ? ' scope=' + scope + ' other_participants=not_checked' : '';
         // v3.0.3 — enrich the summary with the actual slot list returned,
         // not just the input duration. Pre-fix the compact string was
         // `[find_available_slots: duration_minutes=N]` — claim-checker
@@ -646,9 +655,10 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // — the draft was correct; the missing label made it unverifiable.
         const fmt = (s: { start?: string; end?: string; presentation_local?: unknown }) => {
           if (!s.start) return '?';
-          const t = String(s.start).slice(11, 16);  // 'HH:MM'
-          const d = String(s.start).slice(0, 10);   // 'YYYY-MM-DD'
-          const base = s.end ? `${d} ${t}-${String(s.end).slice(11, 16)}` : `${d} ${t}`;
+          const start = DateTime.fromISO(s.start, {zone:ownerTz});
+          if (!start.isValid) return '?';
+          const end = s.end && DateTime.fromISO(s.end, {zone:ownerTz});
+          const base = start.toFormat('yyyy-MM-dd HH:mm') + (end && end.isValid ? '-' + end.toFormat('HH:mm') : '');
           return `${base} ${ownerTz}${localSuffix(s.presentation_local)}`;
         };
         // check-claimed-that-never-ran (2026-09-06, bounce) — `broken_rule_label`
@@ -686,7 +696,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
             Array.isArray((result as any).results) ? (result as any).results : [];
           const durCV = (result as any).duration_minutes ?? (input as any).duration_minutes;
           const parts = results.map(r => `${fmt(r)} ${verdictWord(r)}`);
-          return `[find_available_slots candidate_validation dur=${durCV}m: ${parts.join(', ')}]`;
+          return `[find_available_slots candidate_validation dur=${durCV}m: ${parts.join(', ')}${scopeNote}]`;
         }
 
         const slots: Array<{ start?: string; end?: string; attendee_status?: Array<{ email?: string; status?: string }>; attendee_conflicts?: Array<{ email?: string; reason?: string; assumed?: boolean }> }> =
@@ -700,7 +710,9 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           const statuses = (s.attendee_status ?? []).map(a => `${a.email}:${a.status}`);
           return `${fmt(s)}${conflicts.length ? ` attendee_conflicts=${conflicts.join('+')}` : ''}${statuses.length ? ` attendee_status=${statuses.join('+')}` : ''}`;
         }).join(', ');
-        const dur = (input as any).duration_minutes;
+        const lengths = new Set(slots.map(slot => (Date.parse(slot.end ?? '') - Date.parse(slot.start ?? '')) / 60000));
+        const measured = lengths.size === 1 ? [...lengths][0] : undefined;
+        const dur = measured && Number.isSafeInteger(measured) && measured > 0 ? measured : (input as any).duration_minutes;
         const from = (input as any).search_from;
         const to = (input as any).search_to;
         const window = from && to ? ` ${String(from).slice(0, 16)}→${String(to).slice(0, 16)}` : '';
@@ -836,11 +848,15 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
               reasonPart = ` reason=${topReason}${oofUntil ? ` (until ${oofUntil})` : ''}`;
             }
           }
-          return `[find_available_slots${window} dur=${dur}m: 0 slots${reasonPart}${offDaysPart}${preferredPart}]`;
+          const pending = (result as {owner_approval_candidates?:Array<{start:string;end:string;presentation_local?:string}>})?.owner_approval_candidates;
+          const decisionPart = Array.isArray(pending) && pending.length
+            ? ' owner_decision_required (unapproved): ' + pending.map(slot => fmt(slot)).join(', ')
+            : '';
+          return `[find_available_slots${window} dur=${dur}m: 0 slots${scopeNote}${reasonPart}${offDaysPart}${preferredPart}${decisionPart}]`;
         }
         const recovery = (result as { _relaxed_recovery?: unknown } | null)?._relaxed_recovery === true
           ? '; strict=0; relaxed_recovery' : '';
-        return `[find_available_slots${window} dur=${dur}m → ${slots.length} slots: ${slotList}; selection=non_exhaustive${recovery}${offDaysPart}${attendeePartialPart}${attendeeBlockedPart}${attendeesReadPart}${preferredPart}]`;
+        return `[find_available_slots${window} dur=${dur}m → ${slots.length} slots: ${slotList}; owner_calendar=checked selection=non_exhaustive${scopeNote}${recovery}${offDaysPart}${attendeePartialPart}${attendeeBlockedPart}${attendeesReadPart}${preferredPart}]`;
       }
       case 'check_join_availability': {
         // proposed-slot-not-grounded-in-search-result (2026-08-24) — this tool
@@ -854,7 +870,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // 'needs_approval') so a "he's free then" claim can be verified the
         // same way a find_available_slots claim can.
         const r = result && typeof result === 'object'
-          ? result as { can_join?: unknown; meeting_start?: unknown; presentation_local?: unknown } : {};
+          ? result as { can_join?: unknown; meeting_start?: unknown; presentation_local?: unknown; broken_rule?:unknown } : {};
         // Match the handler's owner-zone interpretation of naive input; retain
         // the checked offset and its computed presentation instead of making
         // the grounding model infer a timezone from an unlabelled clock.
@@ -862,7 +878,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           : typeof input.meeting_start === 'string' ? input.meeting_start : '';
         const at = DateTime.fromISO(meetingStart, { zone: ownerTz }).setZone(ownerTz);
         const when = at.isValid ? `${at.toISO()} ${ownerTz}` : '?';
-        return `[check_join_availability ${when}${localSuffix(r.presentation_local)}: can_join=${String(r.can_join ?? 'unknown')}${blockMovesSuffix(result, r.meeting_start, ownerTz)}]`;
+        return `[check_join_availability ${when}${localSuffix(r.presentation_local)}: can_join=${String(r.can_join ?? 'unknown')}${typeof r.broken_rule === 'string' && /^[a-z_]+$/.test(r.broken_rule) ? ' reason=' + r.broken_rule : ''}${blockMovesSuffix(result, r.meeting_start, ownerTz)}]`;
       }
       case 'find_slack_user':
         return `[find_slack_user: "${input.name}"]`;
@@ -940,6 +956,13 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           ? blockMovesSuffix(result, (result as { booked_start?: unknown; new_start?: unknown }).booked_start
             ?? (result as { new_start?: unknown }).new_start, ownerTz) : '';
 
+        if (toolName === 'book_floating_block' && outcome.ok) {
+          const block = result as { created?: boolean; date?: string; start?: string; end?: string };
+          if (block.created === true && /^\d{4}-\d{2}-\d{2}$/.test(block.date ?? '')
+            && [block.start, block.end].every(clock => /^([01]\d|2[0-3]):[0-5]\d$/.test(clock ?? ''))) {
+            return `[book_floating_block OK ${block.date} ${block.start}–${block.end} ${ownerTz}${idPart}]`;
+          }
+        }
         if (outcome.ok && typeof (result as { action_summary?: unknown }).action_summary === 'string') {
           const changes = (result as { action_summary: string }).action_summary.replace(/\s+/g, ' ').trim().slice(0, 220);
           // v3.7.x — surface the structured added-attendee EMAILS beside the

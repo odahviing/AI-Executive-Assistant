@@ -157,6 +157,7 @@ export function resolveNamedInternalAttendees(params: {
   names: string[];
   ownerEmail: string;
   ownerName?: string;
+  ownerLocalName?: string;
   excludeEmails?: string[];
 }): { resolved: ResolvedInternalAttendee[]; unresolved: string[] } {
   const { names, ownerEmail, ownerName } = params;
@@ -171,13 +172,25 @@ export function resolveNamedInternalAttendees(params: {
 
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { searchPeopleMemory, getPersonByEmail } = require('../db/people') as typeof import('../db/people');
+    const { searchPeopleMemory, getPersonByEmail, getPersonMemory } = require('../db/people') as typeof import('../db/people');
     for (const rawName of names) {
       const name = (rawName ?? '').trim();
       if (!name) continue;
+      const mention = /^<@([UW][A-Z0-9]{6,})(?:\|[^<>]+)?>$/.exec(name);
+      if (mention) {
+        const person = getPersonMemory(mention[1]);
+        const email = person?.email?.toLowerCase().trim();
+        if (!person || !email || !email.endsWith('@' + ownerDomain)) unresolved.push(name);
+        else if (!exclude.has(email) && !seen.has(email)) {
+          resolved.push({name:person.name || name,email});
+          seen.add(email);
+        }
+        continue;
+      }
       // The owner himself (named as the meeting subject, e.g. "meeting with
       // Idan and Simon") is the search base — never an attendee, never external.
-      if (ownerName && nameGenuinelyMatches(ownerName, ownerEmail, name)) continue;
+      if ((ownerName && nameGenuinelyMatches(ownerName, ownerEmail, name))
+        || (params.ownerLocalName && nameGenuinelyMatches(params.ownerLocalName, undefined, name))) continue;
       let matches: Array<{ name?: string; name_he?: string | null; email?: string }>;
       try {
         matches = searchPeopleMemory(name) ?? [];

@@ -15,7 +15,7 @@ const zone = 'Asia/Jerusalem';
 const at = clock => '2026-10-06T' + clock + ':00+03:00';
 const email = 'guest@outside.test', peer = 'peer@example.test', room = 'conference@example.test';
 const anchor = { id:'anchor', type:'singleInstance', subject:'Fixture appointment', isCancelled:false, end:{dateTime:at('12:00'),timeZone:zone} };
-function fixture({ source = anchor, availability = [], roster = [peer], location, existing = false, resourceBusy = false, peerBusy=false, unknownResource=false, collected = {}, role='owner', surface='owner_dm' } = {}) {
+function fixture({ source = anchor, availability = [], roster = [peer], location, existing = false, resourceBusy = false, peerBusy=false, unknownResource=false, collected = {}, requestedSearchWindow, role='owner', surface='owner_dm' } = {}) {
   const read = async () => { if(source instanceof Error) throw source; return source; };
   const g = {
     getCalendarEvents:async () => { const e=await read(); return e?[e]:[]; },
@@ -29,7 +29,7 @@ function fixture({ source = anchor, availability = [], roster = [peer], location
     'src/skills/meetings/bookingRequest.ts':{grantRelaxed:()=>({relaxed:false})},
     'src/utils/displaySubject.ts':{subjectViewerFor:()=> 'owner', viewerEmailFor:()=>null, displaySubject:e=>e.subject},
     'src/skills/meetings/ops/analysis.ts':{},'src/db/slotHolds.ts':{getActiveSlotHolds:()=>[]},
-    'src/utils/offeredSlotsStash.ts':{getOfferedSlots:()=>[],getOfferedSearchFingerprint:()=>null,recordOfferedSlots:a=>(collected.offers??=[]).push(...a.slots)},
+    'src/utils/offeredSlotsStash.ts':{getOfferedSlots:()=>(collected.offers??[]).map(s=>({startIso:s.start})),getOfferedSearchFingerprint:()=>collected.fingerprint??null,recordOfferedSlots:a=>{collected.fingerprint=a.searchFingerprint;(collected.offers??=[]).push(...a.slots);}},
     'src/skills/meetings/ops/violationLabels.ts':{humanizeViolationLabel:k=>k,attendeeFirstName:e=>e,attendeeConflictLine:c=>c.email},
     'src/db.ts':{listSchedulingContacts:()=>[],getPersonMemory:()=>null},
   }});
@@ -40,7 +40,7 @@ function fixture({ source = anchor, availability = [], roster = [peer], location
   avail.loadAttendeeAvailabilityForEmails=emails=>availability.filter(a=>emails.includes(a.email));
   const realLocation=h.load('src/utils/resolveLocation.ts',true);
   Object.assign(h.load('src/utils/resolveLocation.ts'),realLocation);
-  const context={channelId:'fixture',threadTs:'fixture',userId:'UOWNER',profile:h.profile,authority:role,senderRole:role,channel:'slack',surface};
+  const context={requestedSearchWindow,channelId:'fixture',threadTs:'fixture',userId:'UOWNER',profile:h.profile,authority:role,senderRole:role,channel:'slack',surface};
   const plan=async extra=>h.load('src/skills/meetings/planMeeting.ts').planMeeting({profile:h.profile,initiator:role,intent:existing?'move':'new_booking',subject:'Visit',
     participants:roster.map(email=>({email})),slotStartIso:at('10:00'),slotEndIso:at('10:25'),preloadedEvents:[],viewer:'owner',isOnlineHint:existing?undefined:false,
     locationHint:location, ...(existing?{existingEventId:'moving',priorSlotStartIso:at('14:00'),existingEventLocation:'Main Room',existingEventIsOnline:true,existingEventCategories:['Meeting']}:{}),...extra});
@@ -48,6 +48,52 @@ function fixture({ source = anchor, availability = [], roster = [peer], location
     {context,userEmail:h.profile.user.email,timezone:zone,relaxedGrant:{relaxed:false},isOwnerPath:role==='owner'});
   return {h,plan,search,collected};
 }
+check('duration','repeat spread calls keep the single stated window and meeting length',async()=>{
+  const requestedSearchWindow={start:'2026-10-06T09:00',end:'2026-10-06T12:00',zone,requestedMinutes:30};
+  const f=fixture({requestedSearchWindow,role:'colleague'});
+  for(const extra of [{duration_minutes:40},{duration_minutes:25,candidate_slots:[]},{duration_minutes:40,moving_event_ids:[]}]){
+    await f.search({search_from:at('14:00'),search_to:at('19:00'),...extra});
+    assert.ok(f.h.calls.searches.length);
+    for(const search of f.h.calls.searches){
+      assert.equal(search.durationMinutes,25);
+      assert.equal(Date.parse(search.searchFrom),Date.parse(at('09:00')));
+      assert.equal(Date.parse(search.searchTo),Date.parse(at('12:00')));
+    }
+  }
+  const outside=await f.search({candidate_slots:[{start:at('15:00')}]});
+  assert.equal(outside.results[0].available,false);
+  assert.equal(outside.results[0].broken_rule,'outside_search_window');
+  assert.ok(f.collected.offers.every(slot=>Date.parse(slot.start)<Date.parse(at('12:00'))));
+});
+check('choices','one best time is stable on retry and an explicit next choice is different',async()=>{
+  const f=fixture();
+  const search=async extra=>{const r=await f.search({option_count:1,...extra});return (r.slots??r).map(s=>s.start);};
+  const first=await search({});assert.equal(first.length,1);
+  assert.deepEqual(await search({}),first);
+  const next=await search({more_options:true});assert.equal(next.length,1);assert.notDeepEqual(next,first);
+  const preferred=await search({preferred_slot:next[0]});assert.deepEqual(preferred,next);
+});
+check('choices','preferred time outside an explicit window cannot enter the offer ledger',async()=>{
+  const f=fixture();const r=await f.search({search_from:at('09:00'),search_to:at('12:00'),time_window_is_hard:true,preferred_slot:at('15:00')});
+  assert.equal(r.preferred_slot_status.available,false);assert.equal(r.preferred_slot_status.broken_rule,'outside_search_window');
+  assert.ok(f.collected.offers.every(s=>Date.parse(s.start)!==Date.parse(at('15:00'))));
+});
+check('duration','search and booking check the same requested interval across preset boundaries',async()=>{
+  for (const role of ['owner','colleague']) {
+    const f=fixture({role});
+    const booking=f.h.load('src/skills/meetings/bookingRequest.ts',true);
+    for (const requested of [25,30,40,55,90]) {
+      const start=at('10:00');
+      const end=DateTime.fromISO(start).plus({minutes:requested}).toISO();
+      const decision=booking.resolveDuration(start,end,f.h.profile,role==='owner');
+      const result=await f.search({duration_minutes:requested,candidate_slots:[{start}]});
+      assert.equal(result.duration_minutes,decision.durationMin,JSON.stringify(result));
+      assert.equal(Date.parse(result.results[0].end)-Date.parse(start),decision.durationMin*60000);
+    }
+    const invalid=await f.search({duration_minutes:-1});
+    assert.equal(invalid.error,'invalid_duration');
+  }
+});
 const hours = (email,start,end,assumed=false) => ({email,timezone:zone,assumed,week:regularWeek(['Tuesday'],start,end)});
 check('hours','known external hours participate in write decision',async()=>{
   const f=fixture({roster:[email],availability:[hours(email,'15:00','18:00')]});

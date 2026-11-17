@@ -78,7 +78,7 @@ const requestedClock = one(collect(source(handlerDir + 'findAvailableSlots.ts'),
 
 // Exercise the production named-slot guard with the no-predecessor fixture.
 function orderGuardFor(branch) {
-  return ['violatesOrder', 'anchoredSlotFailure'].filter(name => calls(branch, name)).map(name =>
+  return ['violatesOrder', 'anchoredSlotFailure', 'searchBoundFailure'].filter(name => calls(branch, name)).map(name =>
     one(collect(source(handlerDir + 'findAvailableSlots.ts'), n =>
       ts.isVariableStatement(n) && variableNames(n).includes(name)), name));
 }
@@ -160,7 +160,7 @@ function harness(memoryFiles = new Map()) {
     const index = before.indexOf(recorder);
     const nodes = variableNames(before[index - 1]).includes('offeredSlots') ? [before[index - 1], recorder] : [recorder];
     await execute(nodes, { context: ctx, timezone: zone, annotatedSlots, preferredSlotStatus,
-      offerFingerprint: '40|2026-09-16|2026-09-17|person@example.test' });
+      presentTzForOutput: () => '', offerFingerprint: '40|2026-09-16|2026-09-17|person@example.test' });
   }
   async function candidate(ctx, options = {}) {
     const node = one(collect(source(handlerDir + 'findAvailableSlots.ts'), n => ts.isIfStatement(n)
@@ -170,7 +170,7 @@ function harness(memoryFiles = new Map()) {
     const env = {
       args, context: ctx, timezone: zone, userEmail: 'owner@example.test', searchWindowTz: '', autoPresentTz: '', presentTzForOutput: () => '',
       candidateAttendeeBusyEmails: ['person@example.test'], attendeeAvailability: [], mode: 'online',
-      ownerClockProfile: undefined,
+      ownerClockProfile: undefined, optionLocale: undefined, partialSearch:false, scope:{},
       ...compile(namedFunction('src/utils/attendeeAvailability.ts', 'presentationClockFields').getText(), {}),
       relaxedGranted: false, excludeEventIdsForSearch: ['source-event'], leadHours: 1,
       viewer: ctx.senderRole, viewerEmail: 'viewer@example.test', movingEventIdMismatchWarning: undefined,
@@ -201,7 +201,7 @@ function harness(memoryFiles = new Map()) {
     assert.equal(last.parent, first.parent, 'preferred anchors share a block');
     return execute([requestedClock, ...orderGuardFor(last), ...Array.from(siblings).slice(siblings.indexOf(first), siblings.indexOf(last) + 1)], {
       args: { preferred_slot: options.start ?? instant, duration_minutes: 40 }, context: ctx,
-      timezone: zone, searchWindowTz: '', candidateSet: options.candidateSet ?? [], chosenStarts: new Set(),
+      timezone: zone, searchWindowTz: '', candidateSet: options.candidateSet ?? [], explicitCount: undefined, chosenStarts: new Set(),
       userEmail: 'owner@example.test', attendeeBusyEmails: ['person@example.test'], attendeeAvailability: [],
       mode: 'online', relaxedGranted: false, excludeEventIdsForSearch: ['source-event'], leadHours: 1,
       viewer: ctx.senderRole, viewerEmail: 'viewer@example.test', presentTzForOutput: () => '',
@@ -236,6 +236,16 @@ function harness(memoryFiles = new Map()) {
   return { stash, context, record, alternatives, candidate, preferred, spread, grid, consume, execute, holdHandler,
     advance(ms) { now += ms; } };
 }
+
+test('every interval in a single twenty-option offer remains selectable', () => {
+  const h = harness(), ctx = h.context('colleague');
+  const slots = Array.from({length:20}, (_, i) => {
+    const start = millis(instant) + i * 3600000;
+    return {start:new Date(start).toISOString(),end:new Date(start + 25 * 60000).toISOString()};
+  });
+  h.stash.recordOfferedSlots({channelId:ctx.channelId,threadTs:ctx.threadTs,timezone:zone,slots});
+  for(const slot of slots) assert.equal(h.stash.wasOfferedSlot(ctx.channelId,ctx.threadTs,slot.start),true);
+});
 
 test('exact stash matching accepts equivalent offsets but rejects nearby seconds/minutes', () => {
   const h = harness(), ctx = h.context(); h.record(ctx);

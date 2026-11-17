@@ -3,7 +3,34 @@ import { getDb } from './client';
 // ── Conversation threads ─────────────────────────────────────────────────────
 
 export type MessageRole = 'user' | 'assistant';
+/** A refused booking is evidence for asking the owner, never permission to book. */
+export interface RefusedBooking {
+  sourceToolId: string;
+  ownerId: string;
+  requesterId: string;
+  channelId: string;
+  threadTs: string;
+  reason: string;
+  action: { tool: 'create_meeting'; args: Record<string, unknown> };
+}
+/** Human-authored scheduling details, scoped to a speaker and private thread. Never action authority. */
+export interface MeetingRequestState {
+  batch?: boolean;
+  requestId?: string;
+  requiredDay?: {date:string; zone:string; quote:string};
+  bookingInstruction?: {kind:'exact'|'window'; text:string; localDate:string};
+  individualSearchEmails?: string[];
+  ownerId: string;
+  requesterId: string;
+  channelId: string;
+  threadTs: string;
+  original: string;
+  updates: string[];
+  clockZone?: {zone:string; quote:string};
+  duration?: { minutes: number; quote: string };
+}
 export interface ConversationMessage {
+  meetingRequest?: MeetingRequestState;
   role: MessageRole;
   content: string;
   ts?: string;
@@ -11,6 +38,7 @@ export interface ConversationMessage {
    * [] means a confirmed no-tool turn; absent means legacy/unknown. Never
    * populate from message prose, remote history, or user-supplied metadata. */
   toolSummaries?: string[];
+  refusedBooking?: RefusedBooking;
 }
 
 export function getConversationHistory(threadTs: string): ConversationMessage[] {
@@ -34,9 +62,11 @@ export function appendToConversation(
 ): void {
   const db = getDb();
   const existing = getConversationHistory(threadTs);
-  const { toolSummaries, ...plainMessage } = message;
+  const { toolSummaries, refusedBooking, meetingRequest, ...plainMessage } = message;
   existing.push({
     ...plainMessage,
+    ...(message.role === 'assistant' && Array.isArray(toolSummaries) && meetingRequest ? { meetingRequest } : {}),
+    ...(message.role === 'assistant' && Array.isArray(toolSummaries) && refusedBooking ? { refusedBooking } : {}),
     ...(message.role === 'assistant' && Array.isArray(toolSummaries)
       && toolSummaries.every(line => typeof line === 'string')
       ? { toolSummaries: [...toolSummaries] } : {}),
@@ -49,6 +79,29 @@ export function appendToConversation(
     VALUES (@thread_ts, @channel_id, @context)
     ON CONFLICT(thread_ts) DO UPDATE SET context = @context, updated_at = datetime('now')
   `).run({ thread_ts: threadTs, channel_id: channelId, context: JSON.stringify(trimmed) });
+}
+
+/** Check the delivered operation again at dispatch. Retire it only after a durable approval exists. */
+export function currentRefusedBooking(refusal: RefusedBooking, settled = false): boolean {
+  const db = getDb();
+  return db.transaction(() => {
+    const row = db.prepare('SELECT context FROM conversation_threads WHERE thread_ts = ? AND channel_id = ?')
+      .get(refusal.threadTs, refusal.channelId) as { context: string } | undefined;
+    if (!row) return false;
+    const history: ConversationMessage[] = JSON.parse(row.context);
+    const current = [...history].reverse().find(message => message.role === 'assistant')?.refusedBooking;
+    if (!current || current.sourceToolId !== refusal.sourceToolId || current.ownerId !== refusal.ownerId
+      || current.requesterId !== refusal.requesterId || current.channelId !== refusal.channelId
+      || current.threadTs !== refusal.threadTs || current.reason !== refusal.reason
+      || JSON.stringify(current.action) !== JSON.stringify(refusal.action)) return false;
+    if (!settled) return true;
+    for (const message of history) {
+      if (message.refusedBooking?.sourceToolId === refusal.sourceToolId) delete message.refusedBooking;
+    }
+    db.prepare('UPDATE conversation_threads SET context = ? WHERE thread_ts = ? AND channel_id = ?')
+      .run(JSON.stringify(history), refusal.threadTs, refusal.channelId);
+    return true;
+  }).immediate();
 }
 
 /**

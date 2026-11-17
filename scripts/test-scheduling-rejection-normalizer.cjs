@@ -24,6 +24,7 @@ async function run(kind,{off=true,remote=false,remoteThrows=false,ordinary=false
   args:{start,end,meeting_id:'Leadership',meeting_subject:'Existing meeting'},newStart:start,newEnd:end,
   firstRejectReason:finder.firstRejectReason,oofUntilDisplayFor:finder.oofUntilDisplayFor,
   humanizeViolationLabel:h.load('src/skills/meetings/ops/violationLabels.ts').humanizeViolationLabel,
+  require:id=>{assert.equal(id,'../../../../utils/scheduleRules');return h.load('src/utils/scheduleRules.ts');},
   startDt:DateTime.fromISO(start),fromIso:start,toIso:end,startMs:Date.parse(start),DateTime,
   inPersonRequested:remote,CalendarOfflineError:class extends Error{},logger:{info(){},warn(){}},
   HANDLER_ERROR_CODE:{NOT_RULE_COMPLIANT:'not_rule_compliant'},

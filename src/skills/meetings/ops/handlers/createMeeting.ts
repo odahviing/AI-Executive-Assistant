@@ -163,6 +163,13 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             logger.warn('create_meeting — WE time resolve threw, using time as-is', { err: String(err).slice(0, 160) });
           }
         }
+        if (context.requiredMeetingDay && typeof args.start === 'string' && !context.approvedBookingAttendeeEmails) {
+          const day = context.requiredMeetingDay;
+          const localStart = DateTime.fromISO(args.start,{zone:timezone}).setZone(day.zone);
+          if (localStart.toISODate() !== day.date)
+            return {error:'outside_requested_day',required_day:day.date,required_zone:day.zone,interpreted:localStart.toISO(),
+              message:`The supplied start is ${localStart.toFormat('ccc d LLL HH:mm ZZZZ')} in ${day.zone}. The requester needs ${day.date} in that zone. For a searched candidate copy its start and end ISO instants including offsets. Do not copy the display clock onto a different offset.`};
+        }
         // v3.0.7 — runtime array guard. The `as Array<...>` cast is a pure-TS
         // assertion with no runtime check. When Sonnet passes `attendees` as a non-array
         // shape (single object, keyed object, null, omitted — all observed),
@@ -186,7 +193,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             message: `attendees must be an array of {name, email} objects. Got ${rawAttendees === null ? 'null' : typeof rawAttendees}. Retry with attendees=[{name, email}, ...] — even for a single attendee, wrap in an array.`,
           };
         }
-        const attendees = rawAttendees as Array<{ name?: string; email?: string; slack_id?: string }>;
+        const attendees = rawAttendees as Array<{ name?: string; email?: string; slack_id?: string; optional?: boolean }>;
         // Compare the submitted roster with the approval before requester/room
         // policy adjusts it. A stale or altered replay cannot introduce or drop
         // an explicit recipient and then acquire authority via a name lookup.
@@ -482,7 +489,15 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // proposing an off-preset long duration still gets the verify question; a
         // ≤5-min mismatch ("1 hour"→55) snaps silently for everyone.
         const startIsoIn = args.start as string | undefined;
-        const endIsoIn   = args.end   as string | undefined;
+        let endIsoIn = args.end as string | undefined;
+        const requestedMinutes = context.requestDurationMinutes;
+        if (requestedMinutes && args.is_all_day !== true && typeof startIsoIn === 'string'
+          && typeof endIsoIn === 'string' && /(?:Z|[+-]\d{2}:\d{2})$/i.test(startIsoIn)
+          && Number.isFinite(Date.parse(startIsoIn)) && Number.isFinite(Date.parse(endIsoIn))
+          && Date.parse(endIsoIn) - Date.parse(startIsoIn) !== requestedMinutes * 60000) {
+          endIsoIn = new Date(Date.parse(startIsoIn) + requestedMinutes * 60000).toISOString();
+          args.end = endIsoIn;
+        }
         if (typeof startIsoIn === 'string' && typeof endIsoIn === 'string') {
           const dur = resolveDuration(startIsoIn, endIsoIn, context.profile, context.senderRole === 'owner');
           if (dur?.needsConfirm) {
@@ -623,6 +638,29 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           }
         }
 
+        const probeExistingBooking = async () => {
+          const duplicate = await findDuplicateEvent(userEmail, args.subject as string, args.start as string, timezone, {
+            endIso: args.end as string, attendees, assistantEmail, roomEmail: context.profile.meetings.room_email,
+            requireRoom: args.add_room_email === true, allDay: args.is_all_day === true,
+          });
+          if (!duplicate) return;
+          if (duplicate === 'ambiguous') return {
+            success: false, error: 'existing_booking_identity_unconfirmed',
+            message: 'An event with this title is already near the requested time. I could not confirm the exact invitation. Nothing was created. Check the existing invitation before changing or booking anything.',
+          };
+          const subject = (args.subject as string).trim();
+          const ownerView = subjectViewerFor(context) === 'owner';
+          const bookedTime = ownerView
+            ? renderWeDualClock(args.start as string, { isAway: !!tripDisplay, effectiveTz: tripDisplay?.tz ?? timezone, location: tripDisplay?.location ?? '' }, timezone, { endIso: args.end as string })
+            : formatIsoTime(args.start as string, timezone);
+          return {
+            success: true, meetingId: duplicate.id, idempotent: true,
+            ...presentationLocalFieldFor(attendees.map(a => a.email), args.start as string, userEmail, timezone,
+              ownerView ? context.profile : undefined, args.end as string),
+            action_summary: `'${subject}' is already on the calendar for ${bookedTime}. No duplicate was created.`,
+          };
+        };
+
         // v2.3.2 — colleague-path booking gate. When a colleague has confirmed
         // slot + duration + subject in this DM (1:1 or fast-path multi-internal
         // flow), Maelle calls create_meeting directly instead of falling back to
@@ -663,33 +701,10 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           // stale approval that lands in the owner's DM and re-surfaces in every
           // brief until manually rejected.
           //
-          // So: probe Graph for an existing meeting at this same subject+start
-          // (±2-min tolerance) BEFORE Guards A/B fire. If found → return success
-          // with idempotent=true. The downstream late-idempotency check stays as
-          // defense-in-depth. Subject+start match is the same heuristic the late
-          // check uses; attendee-list matching is a future tightening (the rare
-          // collision is the owner manually booking an unrelated event with the
-          // same subject; trade-off favors avoiding stale approvals).
+          // A confirmed retry needs no further rule or free/busy checks.
           try {
-            const duplicate = await findDuplicateEvent(userEmail, args.subject as string, args.start as string, timezone);
-            if (duplicate) {
-              const ownerFirst = context.profile.user.name.split(' ')[0];
-              const requestedSubject = (args.subject as string).trim();
-              logger.info('create_meeting colleague-path idempotent short-circuit (early) — already booked', {
-                subject: requestedSubject, existingEventId: duplicate.id, requester: context.userId,
-              });
-              return {
-                success: true,
-                meetingId: duplicate.id,
-                idempotent: true,
-                // Same attendee-local field as the booked return at the bottom of
-                // this handler — this `OK` line is read by the same output checker.
-                ...presentationLocalFieldFor(attendees.map(a => a.email), args.start as string, userEmail, timezone,
-              subjectViewerFor(context) === 'owner' ? context.profile : undefined, args.end as string),
-                action_summary: `'${requestedSubject}' is already on ${ownerFirst}'s calendar for ${formatIsoTime(args.start as string, timezone)}. Already booked, no action needed.`,
-                _note: 'A meeting with this exact subject and start was already booked earlier in this thread. Do NOT call create_meeting again. Do NOT escalate to create_approval. Tell the colleague briefly that it is booked and move on.',
-              };
-            }
+            const existing = await probeExistingBooking();
+            if (existing) return existing;
           } catch (probeErr) {
             logger.warn('create_meeting colleague-path early idempotency probe failed — proceeding with guards', {
               err: String(probeErr).slice(0, 200),
@@ -1105,6 +1120,10 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 return {
                   success: false,
                   error: HANDLER_ERROR_CODE.NOT_RULE_COMPLIANT,
+                  owner_waivable_only: !!brokenRule && !!diagnostics.rejectedCounts?.[brokenRule] && !remoteSameTime
+                    && Object.entries(diagnostics.rejectedCounts ?? {}).every(([kind, count]) => !count ||
+                      (kind === 'owner_busy_collision' && !!conflictingEvent && !isAllDayCollision) ||
+                      (require('../../../../utils/scheduleRules') as typeof import('../../../../utils/scheduleRules')).OWNER_OVERRIDABLE_SEARCH_LABELS.has(kind)),
                   broken_rule: brokenRule ?? 'unknown',
                   broken_rule_label: brokenRuleLabel,
                   // The add-attendees steer only makes sense for a real, timed
@@ -1281,26 +1300,8 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // inside planMeeting — owner books one-step with a heads-up, colleague
         // escalates — so the old override_work_day re-ask is gone.)
         try {
-          const duplicate = await findDuplicateEvent(userEmail, args.subject as string, args.start as string, timezone);
-          if (duplicate) {
-            const requestedSubject = (args.subject as string).trim();
-            logger.warn('create_meeting idempotent short-circuit — same subject+start already on calendar', {
-              subject: requestedSubject,
-              start: args.start,
-              existingEventId: duplicate.id,
-            });
-            return {
-              success: true,
-              meetingId: duplicate.id,
-              idempotent: true,
-              // Same attendee-local field as the booked return below — this `OK`
-              // line is read by the same output checker.
-              ...presentationLocalFieldFor(attendees.map(a => a.email), args.start as string, userEmail, timezone,
-              subjectViewerFor(context) === 'owner' ? context.profile : undefined, args.end as string),
-              action_summary: `'${requestedSubject}' is already on the calendar for ${renderWeDualClock(args.start as string, { isAway: !!tripDisplay, effectiveTz: tripDisplay?.tz ?? timezone, location: tripDisplay?.location ?? '' }, timezone, { endIso: args.end as string })}. Did not create a duplicate.`,
-              _note: 'A meeting with this exact subject and start time was already on the calendar. Returning the existing event id instead of creating a duplicate. Do NOT call create_meeting again for this slot.',
-            };
-          }
+          const existing = await probeExistingBooking();
+          if (existing) return existing;
         } catch (err) {
           logger.warn('create_meeting idempotency pre-check failed — withholding create', { err: String(err) });
           throw err;
@@ -1402,6 +1403,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           return {
             success: false,
             error: 'soft_rule_offer_alternatives',
+            owner_waivable_only: plan.ownerWaivableOnly === true,
             violation_label: plan.violationLabel,
             // The day they asked for and the widening are separate fields
             // on purpose. Offer the requested day's options as THE answer; the
@@ -1484,6 +1486,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           return {
             success: false,
             error: 'rule_violation',
+            owner_waivable_only: plan.action === 'escalate_approval' && plan.ownerWaivableOnly === true,
             violation_label: plan.violationLabel,
             suggested_ask_text: plan.suggestedAskText,
             ...openQuestionsField(plan.openQuestions),
@@ -1910,7 +1913,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           end:        args.end      as string,
           // By this point Guard A has refused any attendee missing email and
           // the auto-fill has populated names. Coerce to the strict shape.
-          attendees:  attendees.map(a => ({ name: a.name ?? '', email: a.email ?? '' })),
+          attendees:  attendees.map(a => ({ name: a.name ?? '', email: a.email ?? '', ...(a.optional === true ? { optional: true } : {}) })),
           // v2.4.3 — body scrubbed AND auto-enriched with location. The
           // Outlook location field is truncated by many clients, so the body
           // always carries a readable location line at the top — attendees can find the meeting
@@ -2369,7 +2372,9 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           // quotes it instead of re-narrating from the raw home-zone `booked_start`
           // and mislabelling it (the "17:00 = 5 PM EDT" inversion, 2026-06-29).
           const bookedTravel = { isAway: !!tripDisplay, effectiveTz: tripDisplay?.tz ?? timezone, location: tripDisplay?.location ?? '' };
-          const bookedWhen = renderWeDualClock(args.start as string, bookedTravel, timezone, { endIso: args.end as string });
+          const bookedClock = renderWeDualClock(args.start as string, bookedTravel, timezone, { endIso: args.end as string });
+          const homeStart = DateTime.fromISO(args.start as string, { zone: timezone });
+          const bookedWhen = !tripDisplay && homeStart.isValid ? bookedClock + ' (' + timezone + ')' : bookedClock;
           const bookedTripNote = tripDisplay
             ? 'Travel day — state the booked time from `action_summary` VERBATIM (it carries both clocks, correctly labelled). Do NOT recompute it from `booked_start`/`booked_end`, which are the raw home-zone instant kept for verification only.'
             : undefined;

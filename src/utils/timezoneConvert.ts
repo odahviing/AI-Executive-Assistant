@@ -52,8 +52,14 @@ export function isoHasExplicitZone(iso: string | undefined | null): boolean {
  * (shipping "America/New_York" invites a "→ New York" location paste). Returns
  * '' on an invalid parse so callers can skip the parenthetical cleanly.
  */
-export function renderClockInZone(iso: string, ownerTz: string, targetTz: string): string {
+export function renderClockInZone(iso: string, ownerTz: string, targetTz: string, endIso?: string): string {
   const dt = DateTime.fromISO(iso, { zone: ownerTz }).setZone(targetTz);
   if (!dt.isValid) return '';
-  return dt.toFormat('EEE d MMM HH:mm ZZZZ');
+  if (!endIso) return dt.toFormat('EEE d MMM HH:mm ZZZZ');
+  const end = DateTime.fromISO(endIso, { zone: ownerTz }).setZone(targetTz);
+  if (!end.isValid || end <= dt) return '';
+  if (dt.hasSame(end, 'day') && dt.offset === end.offset) {
+    return `${dt.toFormat('EEE d MMM HH:mm')}–${end.toFormat('HH:mm ZZZZ')}`;
+  }
+  return `${dt.toFormat('EEE d MMM HH:mm ZZZZ')}–${end.toFormat('EEE d MMM HH:mm ZZZZ')}`;
 }

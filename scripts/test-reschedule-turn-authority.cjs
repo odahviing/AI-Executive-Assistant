@@ -46,12 +46,14 @@ const contextFixture = fixtureFactory('scripts/test-turn-context-boundaries.cjs'
   ['const state = { classified:', "const state = { intent: { kind: 'task', conversation_state: 'open' }, classified:"],
 ]);
 const loopFixture = fixtureFactory('scripts/test-tool-cache-scope.cjs', '\nfor (const [label, overrides]', [
+  ["assert.ok(delivered, 'tool result returned to model');", "if (!overrides.expectClarification) assert.ok(delivered, 'tool result returned to model');"],
   ["const evidence = 'artifacts/workshop-verification/v5-readiness-20260923/handyman/attempt1';", `const evidence = '${prefix}';`],
   ["const cachePath = before ? `${evidence}/before/src/utils/toolCallCache.ts` : 'src/utils/toolCallCache.ts';", "const cachePath = 'src/utils/toolCallCache.ts';"],
   ["const source = relative => fs.readFileSync(path.join(root, relative), 'utf8');", 'const source = readProduct;'],
   ['let currentStep;', 'let contextOverride = {}; let currentStep; let fixtureHandler;'],
   ['return structuredClone(nextOtherResult);', 'return fixtureHandler ? fixtureHandler(name, args, context) : structuredClone(nextOtherResult);'],
-  ["WRITE_TOOLS: new Set(['update_my_preferences', 'message_colleague'])", "WRITE_TOOLS: new Set(['hold_slot', 'create_meeting', 'update_my_preferences', 'message_colleague', 'move_meeting', 'resolve_approval'])"],
+  ["WRITE_TOOLS: new Set(['update_my_preferences', 'message_colleague'])", "WRITE_TOOLS: new Set(['hold_slot', 'create_meeting', 'create_approval', 'update_my_preferences', 'message_colleague', 'move_meeting', 'resolve_approval'])"],
+  ["'../../db': { auditLog() {}, recordSocialMoment() {} },", "'../../db': { auditLog() {}, recordSocialMoment() {} }, '../../db/conversations': {currentRefusedBooking: (...args) => contextOverride.conversations.currentRefusedBooking(...args)}, '../../db/requests':{findRefusedBookingApproval: value=>contextOverride.conversations.findApproval(value)}, '../requests/resolver':{withRequestLock:async(key,work)=>work()},"],
   ['resolvedMeetingAttendees: [], availabilityPrecheckToolSummaries: [],', 'resolvedMeetingAttendees: [], availabilityPrecheckToolSummaries: [], ...contextOverride,'],
   ['dir, prefs, profile, cache, statuses,', 'setContext(value) { contextOverride = value; }, setHandler(fn) { fixtureHandler = fn; }, dir, prefs, profile, cache, statuses,'],
 ]);
@@ -291,6 +293,111 @@ function compileHoldModule(file, deps, globals = {}, declaration) {
     { exports, require: id => { assert.ok(id in deps, id); return deps[id]; }, ...globals }, { filename:file });
   return exports;
 }
+test('a colleague can ask once about an unchanged refused booking without re-running the invitation', async t => {
+  const db = new (require('better-sqlite3'))(':memory:');
+  t.after(() => db.close());
+  db.exec('CREATE TABLE conversation_threads(thread_ts TEXT PRIMARY KEY, channel_id TEXT, context TEXT, updated_at TEXT)');
+  const conversations = compileHoldModule('src/db/conversations.ts', { './client': { getDb: () => db } });
+  db.exec('CREATE TABLE requests(id TEXT, state TEXT, terminal_dm_msg_ts TEXT, details_json TEXT,kind TEXT,subkind TEXT,owner_user_id TEXT,requester_slack_id TEXT,origin_channel TEXT,origin_thread_ts TEXT,created_at TEXT)');
+  const { findRefusedBookingApproval } = compileHoldModule('src/db/requests.ts', {'node:util':require('node:util')}, {getDb:()=>db,
+    isDeepStrictEqual:require('node:util').isDeepStrictEqual}, 'findRefusedBookingApproval');
+  conversations.findApproval = findRefusedBookingApproval;
+  const loop = loopFixture(t);
+  loop.profile.user.slack_user_id = 'UOWNER';
+  const args = { subject: 'Yottaa sync', start: '2099-11-16T12:15:00-05:00', end: '2099-11-16T12:25:00-05:00',
+    attendees: ['chris@example.test','lori@example.test','scott@example.test'] };
+  const reason = 'The owner requires four hours of notice';
+  const deferred = { tool: 'create_meeting', args };
+  loop.otherResult({ success: false, error: 'soft_rule_offer_alternatives', violation_label: reason, _deferred_action_hint: deferred });
+  await loop.call(args, colleague, 'create_meeting');
+  const refusal = loop.output().refusedBooking;
+  assert.ok(refusal, 'capture the actual refused operation');
+  const delivered = (content, stored) => conversations.appendToConversation('T1','D1',
+    { role: 'assistant', content, toolSummaries: [], refusedBooking: stored });
+  delivered('12:15 breaks the notice rule. There are later alternatives.', refusal);
+  const ask = 'I think he will make an exception, how about you ask him';
+  async function turn(message, disposition, overrides = {}, quote = message) {
+    const c = contextFixture(t);
+    c.state.classifier = ({anthropic, ...input}) => classifier({kind:'task', conversation_state:'open', meeting_action:'explore',
+      refused_booking_reply:disposition, approval_request_quote:quote}).run(input);
+    return c.run({ ...colleague, userMessage:message, typedUserMessage:message,
+      conversationHistory:conversations.getConversationHistory('T1'), ...overrides });
+  }
+  const discussion = await turn('perhaps he will allow this one', 'continue');
+  assert.ok(discussion.blockedWriteTools.has('create_approval'));
+  assert.equal(discussion.continuedRefusal.sourceToolId, refusal.sourceToolId);
+  delivered('I have not asked him.', discussion.continuedRefusal);
+  const followup = await turn(ask, 'ask_owner');
+  assert.equal(followup.requestedException.sourceToolId, refusal.sourceToolId);
+  assert.ok(!followup.blockedWriteTools.has('create_approval'));
+  for (const name of ['create_meeting','move_meeting','resolve_approval','message_colleague','hold_slot']) assert.ok(followup.blockedWriteTools.has(name));
+  const hebrew = 'תשאל אותו אם הוא מאשר את אותה הפגישה';
+  assert.ok((await turn(hebrew, 'ask_owner')).requestedException);
+  for (const [message, disposition, overrides, quote] of [
+    ['no le preguntes', 'other'], ['he said “ask him”', 'other'], ['please ask about a different time', 'other'],
+    [ask, 'ask_owner', {}, 'unrelated text'], [ask, 'ask_owner', {userId:'UIDLE'}],
+    [ask, 'ask_owner', {channelId:'D_OTHER'}], [ask, 'ask_owner', {threadTs:'T_OTHER'}],
+    [ask, 'ask_owner', {surface:'room', isMpim:true}], [ask, 'ask_owner', {proseOnly:true}],
+    [ask, 'ask_owner', {conversationHistory:[{role:'assistant',content:'legacy text'}]}],
+  ]) assert.equal((await turn(message, disposition, overrides, quote)).requestedException, undefined);
+
+  loop.setContext({...followup, conversations});
+  const sent = [];
+  let failInsert = true;
+  loop.setHandler((name, payload, context) => {
+    sent.push(name);
+    assert.equal(name, 'create_approval');
+    assert.deepEqual(JSON.parse(JSON.stringify(payload.payload.deferred_action)), deferred);
+    assert.equal(context.approvalRefusalReason.reason, reason);
+    assert.equal(payload.payload.context, ask);
+    if (failInsert) { failInsert = false; return { success:false, error:'db_temporarily_unavailable' }; }
+    db.prepare('INSERT INTO requests VALUES (?,?,?,?,?,?,?,?,?,?,?)').run('req_example','awaiting_owner',null,
+      JSON.stringify({deferred_action:deferred}),'approval','policy_exception','UOWNER','UACTIVE','D1','T1','2099-01-01');
+    throw Error('response lost after request insertion');
+  });
+  // A later model-invented calendar write is rejected after the synthetic
+  // approval returns, even when it is a different tool name.
+  await loop.call(args, {...colleague,typedUserMessage:ask}, 'create_meeting');
+  assert.deepEqual(sent, ['create_approval']);
+  assert.ok(conversations.getConversationHistory('T1').at(-1).refusedBooking, 'definite pre-insert error preserved the receipt');
+  assert.ok(loop.output().refusedBooking, 'retry evidence accompanies the actual outbound reply');
+  delivered('I could not send the request.', loop.output().refusedBooking);
+  loop.setContext({...await turn(ask,'ask_owner'),conversations});
+  await loop.call(args, {...colleague,typedUserMessage:ask}, 'create_meeting');
+  assert.deepEqual(sent, ['create_approval','create_approval']);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM requests').get().n,1);
+  assert.equal(conversations.getConversationHistory('T1').at(-1).refusedBooking, undefined);
+  await loop.call({}, {...colleague,typedUserMessage:ask}, 'create_approval');
+  assert.deepEqual(sent, ['create_approval','create_approval'], 'even stale pre-crash context recovers the existing row');
+});
+test('a concrete colleague booking automatically requests its verified exception once, including unconfirmed delivery', async t => {
+  const text = 'Please book the Yottaa sync with Lori and Scott today at 12:15 to 12:25';
+  const args = {subject:'Yottaa sync',start:'2099-11-16T12:15:00-05:00',end:'2099-11-16T12:25:00-05:00',
+    attendees:[{email:'chris@example.test'},{email:'lori@example.test'},{email:'scott@example.test'}]};
+  const reason = 'The owner requires four hours of notice';
+  const c = contextFixture(t);
+  c.state.classifier = ({anthropic,...input}) => classifier({kind:'task',meeting_action:'execute',
+    meeting_people:[],exact_booking_quote:'today at 12:15 to 12:25'}).run(input);
+  const context = await c.run({...colleague,userMessage:text,typedUserMessage:text});
+  assert.equal(context.exactBookingRequested,true);
+  for (const [waivable,additionalQuestion,notified] of [[true,false,true],[true,false,false],[false,false,false],[true,true,false]]) {
+    const loop = loopFixture(t);
+    const calls=[];
+    loop.setContext({...context,messages:[],conversations:{findApproval:()=>undefined,currentRefusedBooking:()=>false}});
+    loop.setHandler((tool, input) => {
+      calls.push(tool);
+      if(tool==='create_meeting') return {success:false,error:'soft_rule_offer_alternatives',owner_waivable_only:waivable,
+        violation_label:reason,...(additionalQuestion?{open_questions:['choose location','rule']} : {}),
+        _deferred_action_hint:{tool:'create_meeting',args}};
+      assert.equal(tool,'create_approval');
+      assert.equal(input.kind,'policy_exception'); assert.deepEqual(input.payload.deferred_action.args,args);
+      return {ok:true,approval_id:'req_1',owner_notified:notified};
+    });
+    const receipt=await loop.call(args,{...colleague,userMessage:text,typedUserMessage:text},'create_meeting');
+    assert.deepEqual(calls,waivable&&!additionalQuestion ? ['create_meeting','create_approval'] : ['create_meeting']);
+    if (calls.length===2) assert.equal(receipt.owner_notified,notified);
+  }
+});
 test('Thursday selection reaches real hold handler and SQLite once with its actual expiry', async t => {
   const db = new (require('better-sqlite3'))(':memory:');
   t.after(() => db.close());
@@ -427,6 +534,35 @@ for(const [name,options] of [
   assert.ok(!names(result).includes('hold_slot')); assert.ok(result.blockedWriteTools.has('hold_slot'));
   assert.ok(!names(result).includes('create_meeting')); assert.ok(names(result).includes('find_available_slots'));
 });
+test('a delivered range end cannot authorize a different, unshown start from the search',async t=>{
+  const reply = 'Thu 19 Nov 17:15–17:45';
+  const {result} = await verifiedSelection(t,{reply,message:'Hold 17:45',pick:{mode:'single',selections:[
+    selection({candidateIndex:1,selectionQuote:'17:45',offeredClock:'17:45',offerZoneQuote:''})]}});
+  assert.ok(result.blockedWriteTools.has('hold_slot'));
+});
+test('a rechecked duration cannot silently replace the interval actually delivered',async t=>{
+  const {result} = await verifiedSelection(t,{reply:'Thu 19 Nov 17:15–17:45',message:'Hold 17:15',
+    pick:{mode:'single',selections:[selection({offerZoneQuote:''})]}});
+  assert.ok(result.blockedWriteTools.has('hold_slot'));
+});
+test('a numbered pick counts delivered intervals once and retains the explicitly offered clock',async t=>{
+  const {result} = await verifiedSelection(t,{reply:'Thu 19 Nov 09:15–09:40 CST\nThu 19 Nov 09:45–10:10 CST',
+    message:'Hold option 2',requesterZone:'America/New_York',offers:offered.map(slot=>({...slot,presentationZone:'America/Chicago'})),
+    pick:{mode:'single',selections:[selection({candidateIndex:1,selectionQuote:'2',offeredClock:'09:45',position:2,
+      timeZone:'America/Chicago',offerZoneQuote:'CST'})]}});
+  assert.deepEqual(Array.from(result.holdOnlyWindows.keys()),[Date.parse(offered[1].startIso)]);
+});
+test('a stale Thursday hold has a verified reoffer route and a status question grants no writes',async t=>{
+  for (const message of ['Hold the slot we discussed for Thursday','Are you sending me an invite?']) {
+    const {result} = await verifiedSelection(t,{message,action:'explore',offers:[]});
+    assert.ok(result.blockedWriteTools.has('hold_slot'));
+    assert.ok(result.blockedWriteTools.has('create_meeting'));
+    assert.ok(names(result).includes('find_available_slots'));
+    assert.match(result.prompt,/candidate_slots to recheck the discussed date, start and duration/);
+    assert.match(result.prompt,/internal hold/);
+    assert.match(result.prompt,/send an invitation when they authorize/);
+  }
+});
 test('room reuses authenticated typed selection and delivered offer from this thread',async t=>{
   const {result,sent}=await verifiedSelection(t,{input:{channelId:'C1',isChannel:true,surface:'room',
     userMessage:'<<ROOM ROSTER: 17:45>>\n'+originalHoldText}});
@@ -471,4 +607,67 @@ test('explicit invite after offered slots reaches ordinary authenticated colleag
   });
   assert.equal((await f.call(args,colleague,'create_meeting')).id,'mock-event');
   assert.equal(f.executions(),1); assert.equal(f.output().bookingOccurred,true);
+});
+
+test('an ambiguous colleague clock is not permission to book the owner-clock reading', async t => {
+  const receipt = '[availability_precheck 2026-10-29T13:30:00-04:00 America/New_York dur=25m: bookable | same clock read in Asia/Jerusalem: 2026-10-29T07:30:00-04:00 America/New_York dur=25m: not bookable]';
+  const loop = loopFixture(t);
+  loop.setContext({availabilityPrecheckToolSummaries:[receipt]});
+  await loop.call({subject:'Meeting', start:'2026-10-29T13:30:00-04:00'}, {
+    userId:'UACTIVE', senderRole:'colleague', authority:'colleague', surface:'colleague_dm',
+    typedUserMessage:'Please book at 13:30', userMessage:'Please book at 13:30', expectClarification:true,
+  }, 'create_meeting');
+  assert.equal(loop.executions(), 0);
+  assert.match(loop.output().reply,/13:30/);
+  assert.deepEqual(Array.from(loop.output().toolSummaries), [receipt]);
+});
+
+test('a polite concrete booking and an availability question use distinct tool scopes', async t => {
+  const book = 'Can you schedule the Yottaa sync from 12:15 to 12:25 today?';
+  const lookup = 'Would 12:15 work for that meeting?';
+  for (const [message,action,quote,authorized] of [
+    [book,'book_exact',book,true],
+    [lookup,'explore',undefined,false],
+    [lookup,'book_exact','unrelated quoted instruction',false],
+  ]) {
+    const context = contextFixture(t);
+    context.state.classifier = ({anthropic,...input}) => classifier({
+      kind:'task',meeting_action:action,meeting_people:[],exact_booking_quote:quote,
+    }).run(input);
+    const result = await context.run({...colleague,userMessage:message,typedUserMessage:message});
+    assert.equal(result.exactBookingRequested,authorized);
+    assert.equal(names(result).includes('create_meeting'),authorized);
+  }
+});
+
+test('a shared calendar read reports the viewer’s clock and never asserts a new invitation', () => {
+  const {sharedMeetingRead} = compileHoldModule('src/skills/meetings/ops/offerReply.ts',{luxon:require('luxon')});
+  const event={subject:'Tentative Slot',_localDate:'2026-11-19',_localStartTime:'10:15',_durationMin:30,isAllDay:false};
+  const shown=sharedMeetingRead(event,'America/New_York','Asia/Jerusalem','Hebrew','עידן');
+  assert.equal(shown.subject,event.subject);
+  assert.match(shown.reply,/17:15–17:45/);
+  assert.match(shown.reply,/לא שלחתי זימון חדש/);
+  assert.equal(sharedMeetingRead({...event,_localDate:'2026-11-01',_localStartTime:'01:30'},'America/New_York','Asia/Jerusalem','Hebrew','עידן'),undefined);
+  assert.equal(sharedMeetingRead({...event,isAllDay:true},'America/New_York',undefined,'English','Idan'),undefined);
+});
+
+test('a scheduling follow-up keeps only the same requester’s active duration', async t => {
+  const context = contextFixture(t);
+  const first = 'Find 10 minutes for Softcat';
+  const next = 'Monday at 15:03';
+  context.state.classifier = ({anthropic,...input}) => classifier({
+    kind:'task',meeting_action:'explore',meeting_people:[],
+    request_relation:input.message === first ? 'new' : 'continue',
+    ...(input.message === first ? {request_duration:{minutes:10,quote:'10 minutes'}} : {}),
+  }).run(input);
+  const initial = await context.run({...colleague,userMessage:first,typedUserMessage:first});
+  assert.equal(initial.meetingRequest.duration.minutes,10);
+  const history = [{role:'assistant',content:'Which time?',toolSummaries:[],meetingRequest:initial.meetingRequest}];
+  const follow = input => context.run({...colleague,userMessage:next,typedUserMessage:next,conversationHistory:history,...input});
+  const same = await follow({});
+  assert.equal(same.meetingRequest.original,first);
+  assert.equal(same.meetingRequest.duration.minutes,10);
+  assert.deepEqual(Array.from(same.meetingRequest.updates),[next]);
+  assert.equal((await follow({conversationHistory:[{...history[0],meetingRequest:{...initial.meetingRequest,requesterId:'UOTHER'}}]})).meetingRequest?.duration,undefined);
+  assert.equal((await follow({channelId:'DOTHER'})).meetingRequest?.duration,undefined);
 });

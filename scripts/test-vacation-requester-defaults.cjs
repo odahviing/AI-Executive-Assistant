@@ -15,7 +15,7 @@ function branches(){const text=source(),tree=ts.createSourceFile(file,text,ts.Sc
  return {attendance:attendance.getText(tree),membership:membership.thenStatement.getText(tree)};
 }
 async function normalize({emails=['peer@test','optional@test'],flag,owner=false,user='UASK',email='ask@test',throwLookup=false,spineOwner=null}={}){
- const b=branches(),state={attendeeEmails:[...emails],args:{requester_is_attending:flag,requester_slack_id:'FORGED'},isOwnerInitiatedSearch:owner,
+ const b=branches(),state={ownerOnlySearch:false,attendeeEmails:[...emails],args:{requester_is_attending:flag,requester_slack_id:'FORGED'},isOwnerInitiatedSearch:owner,
  context:{userId:user,profile:{user:{slack_user_id:'UOWNER'}}},getPersonMemory:id=>{assert.equal(id,user);if(throwLookup)throw Error('offline');return email?{email}:null;},
  logger:{info(){},warn(){}},movingIdsForAttendees:['foreign','own'],rosterById:new Map([['foreign',{attendees:['secret@test']}],['own',{attendees:['ask@test']}]]),
  qualifyingIds:[],excludeEventIdsForSearch:undefined,userEmail:'owner@test',require:()=>({findMeetingOwner:async()=>({requesterSlackId:spineOwner})})};

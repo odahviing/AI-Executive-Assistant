@@ -117,6 +117,19 @@ test('full precheck uses real validator and real nearby search after return reje
  for(const s of [...nearby.onAnchorDays,...nearby.beyond])assert.equal(h.check(s.start,s.end).passes,true);
  assert.ok([...nearby.onAnchorDays,...nearby.beyond].every(s=>!(DateTime.fromISO(s.start)<DateTime.fromISO('2026-09-15T00:00:00+03:00')&&DateTime.fromISO(s.end)>DateTime.fromISO('2026-09-15T00:00:00+03:00'))));
 });
+test('blocked point alternatives quote and stash each interval in its presentation zone',async()=>{
+ const h=harness(blocked);
+ const result=await h.load('src/skills/meetings/nearbyAlternatives.ts').blockedSlotAlternativesBlock({
+   profile:h.profile,verdicts:[{date:'2026-09-14',time:'23:45',bookable:false}],durationMinutes:25,
+   initiator:'colleague',channelId:'D1',presentationZoneForInstant:()=> 'America/Chicago'});
+ assert.ok(result.alternatives.length>0);
+ for(const option of result.alternatives){
+   const start=DateTime.fromISO(option.start).setZone('America/Chicago'),end=DateTime.fromISO(option.end).setZone('America/Chicago');
+   assert.ok(option.label.includes(start.toFormat('EEE d MMM HH:mm')+'–'+end.toFormat('HH:mm ZZZZ')),option.label);
+   assert.ok(result.block.includes(option.label));
+ }
+ assert.ok(h.calls.offers[0].slots.every(slot=>slot.presentationZone==='America/Chicago'));
+});
 test('full precheck gap probes and unavailable calendar preserve truthful outcomes',async()=>{
  const h=harness(blocked,{slots:[{wall_clock:'2026-09-14T23:45',stated_timezone:home,gap_query:true}]});
  const result=await h.load('src/utils/availabilityPreCheck.ts').precheckAvailability({message:'2026-09-14 23:45?',profile:h.profile});

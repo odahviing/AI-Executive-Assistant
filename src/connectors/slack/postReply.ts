@@ -554,6 +554,8 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   appendToConversation(threadTs, channelId, {
     role: 'assistant',
     toolSummaries: [...(result.toolSummaries ?? [])],
+    ...(result.meetingRequest ? {meetingRequest:result.meetingRequest} : {}),
+    ...(result.refusedBooking ? { refusedBooking: result.refusedBooking } : {}),
     content: result.toolSummaries?.length
       ? `${result.toolSummaries.join(' ')}\n${cleanReply}`
       : cleanReply,

@@ -24,7 +24,7 @@ async function run(kind='free', args={}, surface='colleague', context={}, writes
  const check={passes:kind==='free'||kind==='rearrange'||kind==='movable',overCommitment:events.length?{subject:'Busy'}:undefined,violation_kind:'outside_working_hours',violation_label:'Outside hours'};
  const code=ts.transpileModule('module.exports=async function(args,context,profile)'+branch,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
  const module={exports:{}};
- const bindings={updateMeeting:async change=>writes.push(change), logger:{info(){},warn(){}}, module,exports:module.exports,DateTime,renderClockInZone:rendererModule.exports.renderClockInZone,subjectViewerFor:()=>surface,viewerEmailFor:()=>null,displaySubject:()=> 'a meeting',PRIVATE_MASK:'[Private]',checkSlot:()=>check,occupancyRoleOf:()=> 'commitment',getOwnerEventsForDecision:async()=>{if(kind==='offline')throw Error('offline');return events;},require:(name)=>{if(name.includes('floatingBlocks'))return {getFloatingBlocks:()=>['rearrange','movable'].includes(kind)?[{name:'lunch',preferred_start:'09:00',preferred_end:'19:00'}]:[],preserveFloatingSourceRanges:()=>[],blockAppliesOnDay:()=>true,windowMsForDay:(d,t,z)=>DateTime.fromISO(d+'T'+t,{zone:z}).toMillis(),isFloatingBlockEvent:()=>true,isMovableFloatingBlockEvent:()=>true,blockSizedToEvent:()=>({duration_minutes:30}),findBlockDestination:()=>({aligned:kind==='movable'?Date.parse('2026-10-01T15:30:00Z'):null})};if(name.includes('rebalanceFloatingBlocks'))return {logRebalanceMoveActivity:()=>{if(kind!=='movable')throw Error('unexpected write');}};if(name.includes('calendarIssues'))return {getSuppressedEventIds:()=>new Set()};throw Error('Unexpected '+name);}};
+ const bindings={updateMeeting:async change=>writes.push(change), logger:{info(){},warn(){}}, module,exports:module.exports,DateTime,renderClockInZone:rendererModule.exports.renderClockInZone,subjectViewerFor:()=>surface,viewerEmailFor:()=>null,displaySubject:()=> 'a meeting',PRIVATE_MASK:'[Private]',checkSlot:()=>check,occupancyRoleOf:()=> 'commitment',getOwnerEventsForDecision:async()=>{if(kind==='offline')throw Error('offline');return events;},require:(name)=>{if(name==='../tasks/skill')return {createApprovalRequest:async input=>{writes.push(input);return {ok:true,owner_notified:true}}};if(name.includes('floatingBlocks'))return {getFloatingBlocks:()=>['rearrange','movable'].includes(kind)?[{name:'lunch',preferred_start:'09:00',preferred_end:'19:00'}]:[],preserveFloatingSourceRanges:()=>[],blockAppliesOnDay:()=>true,windowMsForDay:(d,t,z)=>DateTime.fromISO(d+'T'+t,{zone:z}).toMillis(),isFloatingBlockEvent:()=>true,isMovableFloatingBlockEvent:()=>true,blockSizedToEvent:()=>({duration_minutes:30}),findBlockDestination:()=>({aligned:kind==='movable'?Date.parse('2026-10-01T15:30:00Z'):null})};if(name.includes('rebalanceFloatingBlocks'))return {logRebalanceMoveActivity:()=>{if(kind!=='movable')throw Error('unexpected write');}};if(name.includes('calendarIssues'))return {getSuppressedEventIds:()=>new Set()};throw Error('Unexpected '+name);}};
  vm.runInNewContext(code,bindings);
  return module.exports({meeting_start:start,duration_min:30,subject:'Sync',requester_name:'Paul',...args},context,{user:{timezone:zone,name:'Idan',email:'owner@example.com'},behavior:{calendar_health_mode:['movable','rearrange'].includes(kind)?'active':'passive'}});
 }
@@ -56,4 +56,17 @@ test('read-only active profile still reports a rearrangement that requires owner
  assert.equal(r.can_join, false);
  assert.equal(r.needs_owner_decision,true);
  assert.equal(writes.length,0);
+});
+
+test('attendance decision routes only a matching, requested organizer invitation', async()=>{
+  const ctx={existingInviteStart:'2026-10-01T17:45:00+03:00',existingInviteSubject:'Sync',senderRole:'colleague',authority:'colleague',surface:'colleague_dm',userId:'UPAUL',calendarReadOnly:true};
+  const writes=[];
+  const sent=await run('rule',{},'colleague',ctx,writes);
+  assert.equal(sent.owner_notified,true);
+  assert.equal(writes.length,1);
+  assert.equal(writes[0].kind,'freeform');
+  assert.equal(writes[0].payload.deferred_action,undefined);
+  for(const changed of [{existingInviteSubject:'Another meeting'},{surface:'room'},{existingInviteSubject:undefined}]){
+    const actions=[];await run('rule',{},'colleague',{...ctx,...changed},actions);assert.equal(actions.length,0);
+  }
 });
