@@ -112,5 +112,5 @@
     }
   ],
   "modelAcceptance": "No fresh real-LLM 53-conversation acceptance run. 95% goal belongs to ongoing 5.5 work.",
-  "sourceReleaseSha": null
+  "sourceReleaseSha": "8109886405f6184dd86acdea665ca7a9e466b91f"
 }
