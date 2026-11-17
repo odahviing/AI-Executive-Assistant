@@ -14,7 +14,20 @@ for(const [id,extra,role] of [['owner-dm',{senderId:'UOWNER',role:'owner'},'owne
  const draft='Thursday 11:00 is one of the returned options.';assert.equal(await h.gates.runOutputGates(draft,ctx(r.summary,extra)),draft);assert.ok(h.calls.some(c=>c.messages[0].content.includes(r.summary)));assert.ok(h.events.includes('date'));
 });
 test('rejected-candidates-restart-history',async()=>{const r=await run(options),h=harness();await h.gates.runOutputGates('Thursday 11:00 is one of the returned options.',ctx('',{result:{toolSummaries:[],availabilityQuestionDetected:true},history:[{role:'assistant',content:r.summary+'\nPrior response.'}]}));assert.ok(h.calls.some(c=>c.messages[0].content.includes('(earlier turn) '+r.summary.slice(0,r.summary.lastIndexOf(']')+1))));assert.ok(r.summary.includes('not offered-slot availability'));});
-test('offer-conflicts-remain-attached-to-own-slot',()=>{const h=harness(),s=h.turn.summarizeToolCall('find_available_slots',{duration_minutes:40},{slots:[{start:'2026-10-08T11:00:00+03:00',end:'2026-10-08T11:40:00+03:00',attendee_conflicts:[{email:'peer@example.test',reason:'off_hours',assumed:true}]},{start:'2026-10-08T14:00:00+03:00',end:'2026-10-08T14:40:00+03:00',attendee_status:[{email:'peer@example.test',status:'unknown'}]}]},profile.user.timezone);assert.match(s,/11:00-11:40 Asia\/Jerusalem attendee_conflicts=peer@example.test:off_hours\(assumed\), 2026-10-08 14:00-14:40 Asia\/Jerusalem attendee_status=peer@example.test:unknown/);});
+test('offer-conflicts-remain-attached-to-own-slot', () => {
+ const h = harness();
+ const summary = h.turn.summarizeToolCall('find_available_slots', {duration_minutes:40}, {
+  slots:[
+   {start:'2026-10-08T11:00:00+03:00',end:'2026-10-08T11:40:00+03:00',
+    attendee_conflicts:[{email:'peer@example.test',reason:'off_hours',assumed:true}]},
+   {start:'2026-10-08T14:00:00+03:00',end:'2026-10-08T14:40:00+03:00',
+    attendee_status:[{email:'peer@example.test',status:'unknown'}]},
+  ],
+ }, profile.user.timezone);
+ assert.ok(summary.includes(
+  '11:00-11:40 Asia/Jerusalem owner_status=available attendee_conflicts=peer@example.test:off_hours(assumed), '
+  + '2026-10-08 14:00-14:40 Asia/Jerusalem owner_status=available attendee_status=peer@example.test:unknown'), summary);
+});
 test('preserved-clean-offers-and-retry',async()=>{const a=await run({clean:true}),b=await run({clean:true});assert.ok(a.out.slots.length);assert.equal(a.summary,b.summary);assert.ok(a.out.slots.every(s=>!s.attendee_conflicts?.length));});
 test('preserved-empty-offhours-reason',async()=>{const r=await run({offhours:true});assert.equal(r.out.slots.length,0);assert.ok(r.summary.includes('outside_attendee_work_hours'));});
 test('preserved-unavailable-calendar',async()=>assert.rejects(run({offline:true}),/fixture calendar unavailable/));
