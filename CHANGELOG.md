@@ -1,3 +1,11 @@
+## 5.4.7 — Read complete calendars and confirm the exact invitation
+
+- Read all calendar pages and the full requested free/busy range. Treat incomplete provider data as unconfirmed availability and retain independently verified busy intervals.
+- Confirm an existing invitation by its organizer, exact time, duration and attendee roles. A nearby meeting with the same title no longer counts as a successful booking; exact retries still avoid duplicates.
+- Stop expired slot holds from blocking availability or consuming a person's hold allowance, including timestamps with different UTC offsets.
+- Use the owner's configured timezone, working hours, allowed durations and category limits when answering owner-private scheduling questions.
+- Describe queued notifications as awaiting delivery. Keep pending messages separate from completed-action receipts and from the work described in the message.
+
 ## 5.4.6 — Preserve scheduling questions, invite addresses and selected holds
 
 - Deliver the full final response when the model splits it into text blocks, including a question preceding a booking summary.

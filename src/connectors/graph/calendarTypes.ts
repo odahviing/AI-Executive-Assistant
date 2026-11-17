@@ -11,7 +11,7 @@ export interface CalendarEvent {
   sensitivity?: 'normal' | 'personal' | 'private' | 'confidential';
   categories?: string[];
   organizer?: { emailAddress: { name: string; address: string } };
-  attendees?: Array<{ emailAddress: { name: string; address: string }; status: { response: string } }>;
+  attendees?: Array<{ emailAddress: { name: string; address: string }; type?: 'required' | 'optional' | 'resource'; status: { response: string } }>;
   isCancelled: boolean;
   isOnlineMeeting: boolean;
   onlineMeetingUrl?: string;

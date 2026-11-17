@@ -944,6 +944,8 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // tool, so this never exposes a contact's email to a colleague.
         const email = row?.email ?? null;
         const slackId = row?.slack_id ?? null;
+        const ownerRecord = slackId === context.profile.user.slack_user_id
+          || !!email && email.toLowerCase() === context.profile.user.email.toLowerCase();
 
         // 2026-09-11 — the row's SCHEDULING facts. This tool returned notes,
         // exchanges and social only, so a deliberate read could not see hours
@@ -957,7 +959,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // owner/person authority (L2), the prose is an older capture (Isaac's
         // 2026-05-26 note "Mon/Thu only" was still cited as authority after the
         // structured hours had been corrected). Owner-only tool — no L6 concern.
-        const hours = row ? describeEffectiveWorkingHours(row) : null;
+        const hours = row && !ownerRecord ? describeEffectiveWorkingHours(row) : null;
 
         // Item 2 (2026-08-16) — the coda system's social memory (subjects +
         // topic-beats, plus item 3's merged per-subject summary once that
@@ -992,7 +994,14 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           email,
           slack_id: slackId,
           currently_traveling: row ? getTravelRecordById(row.person_id) : null,
-          ...(row?.timezone ? { timezone: row.timezone, timezone_set_by: row.timezone_set_by ?? 'untagged' } : {}),
+          ...(ownerRecord ? {
+            timezone:context.profile.user.timezone, timezone_set_by:'owner_config',
+            owner_schedule:context.profile.schedule,
+            owner_meeting_rules:{
+              allowed_durations:context.profile.meetings.allowed_durations,
+              categories:(context.profile.categories ?? []).map(({name,limits,day_type}) => ({name,limits,day_type})),
+            },
+          } : row?.timezone ? { timezone: row.timezone, timezone_set_by: row.timezone_set_by ?? 'untagged' } : {}),
           ...(row?.state ? { state: row.state } : {}),
           ...(hours
             ? {

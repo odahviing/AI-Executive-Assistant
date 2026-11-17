@@ -69,7 +69,10 @@ for(const [name,options,completed,verified] of [
  if(name==='failed-calendar'){assert.equal(row.state,'awaiting_owner');assert.equal(result.ok,false)}
  else {assert.equal(row.state,'resolved',JSON.stringify({result,warnings:lifecycle.effects.warnings}));assert.equal(outcome.replayed,options.tool)}
  if(name==='unconfirmed-calendar')assert.equal(outcome.verified,false);
- if(name==='tracked-noncalendar')assert.ok(result.effect.includes('tracked'));
+ if(name==='tracked-noncalendar'){
+   assert.equal(result.effect,'approved — message scheduled and awaiting delivery');
+   assert.equal(result.action_summary,undefined);
+ }
  let observed;
  const checker=checkerHarness(req=>{
    const p=req.messages[0].content;const line=p.split('Requests: ')[1]?.split('\n')[0];

@@ -46,8 +46,8 @@ function identityFixture({extra=[],offline=false,missingUid=false,stale=false}={
  const client={api(url){let req={header(){return req},select(value){requests.push({url,select:value});return req},query(value){requests.push({url,query:value});return req},async get(){if(url.includes('/events/'))return stale?{...source,id:'wrong'}:source;if(offline)throw Error('calendar forbidden');return {value:events};}};return req;}};
  const file='src/connectors/graph/calendarReads.ts',sourceText=revision?cp.execFileSync('git',['show',revision+':'+file],{encoding:'utf8'}):fs.readFileSync(file,'utf8');
  const tree=ts.createSourceFile(file,sourceText,ts.ScriptTarget.Latest,true);
- const fn=tree.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='getFreeBusyForDecision');
- const module={exports:{}};vm.runInNewContext(ts.transpileModule(fn.getText(),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{module,exports:module.exports,DateTime,Date,Set,getClient:()=>client,getFreeBusy,toStartOfDayLocal:s=>s,toEndOfDayLocal:s=>s,logger:{warn(){}}});
+ const fns=tree.statements.filter(n=>ts.isFunctionDeclaration(n)&&['calendarInterval','parseGraphFreeBusySlot','readCalendarViewPages','getFreeBusyForDecision'].includes(n.name?.text));
+ const module={exports:{}};vm.runInNewContext(ts.transpileModule(fns.map(n=>n.getText()).join('\n'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{module,exports:module.exports,DateTime,Date,Set,getClient:()=>client,getFreeBusy,toStartOfDayLocal:s=>s,toEndOfDayLocal:s=>s,logger:{warn(){}}});
  return {read:module.exports.getFreeBusyForDecision,requests,source,events};
 }
 test('A3 regression identity-bearing read preserves attendee double-booking',async()=>{const f=fixture(),i=identityFixture({extra:[['other','14:20','14:25']]});f.reads.getFreeBusyForDecision=i.read;const result=await f.find('14:15','14:55',{attendeeBusyEmails:['person@example.test'],allowMovingEventOverlap:true});assert.equal(result.length,0);});

@@ -137,7 +137,7 @@ async function readProvider(emails, diag, uppercase=true) {
   const file='src/connectors/graph/calendarReads.ts', rev=process.argv.indexOf('--revision');
   const source=rev<0?fs.readFileSync(path.join(__dirname,'..',file),'utf8'):cp.execFileSync('git',['show',process.argv[rev+1]+':'+file],{encoding:'utf8'});
   const parsed=ts.createSourceFile(file,source,ts.ScriptTarget.Latest,true);
-  const code=parsed.statements.filter(n=>['getFreeBusyImpl','parseGraphFreeBusySlot'].includes(n.name?.text)).map(n=>n.getText(parsed)).join('\n');
+  const code=parsed.statements.filter(n=>['getFreeBusyImpl','parseGraphFreeBusySlot','calendarInterval'].includes(n.name?.text)).map(n=>n.getText(parsed)).join('\n');
   const api={async post(){return {value:emails.map(email=>({scheduleId:uppercase?email.toUpperCase():email,scheduleItems:[{start:{dateTime:'2026-10-13T08:00:00Z'},end:{dateTime:'2026-10-13T08:40:00Z'},status:'busy'}]}))};}};
   const mod={exports:{}};vm.runInNewContext(ts.transpileModule(code+'\nmodule.exports=getFreeBusyImpl',{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{module:mod,exports:mod.exports,getClient:()=>({api:()=>api}),DateTime:require('luxon').DateTime});
   const r=await mod.exports('owner@example.test',emails,'2026-10-13T08:00Z','2026-10-13T08:40Z','UTC',40);Object.assign(diag,{unresolved:r.unresolved,notChecked:r.notChecked});return r.result;

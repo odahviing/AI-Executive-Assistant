@@ -1,0 +1,116 @@
+{
+  "version": "5.4.7",
+  "baseline": "374d33998d4bd065285de051756c8460b0bb56e5",
+  "donor": "e98696aabe5a68e338f6f8faf26f9aa77499aa18",
+  "authorization": "Owner approved the proposed five focused fixes and live patch: תעשה את זה. Earlier instruction explicitly requested SOLO work.",
+  "reviewMode": "Solo code review and executed native regressions, as explicitly requested by the owner. No independent Bouncer pass is claimed.",
+  "areas": [
+    {
+      "name": "Expired holds",
+      "root": "src/db/slotHolds.ts getActiveSlotHolds/countActiveHoldsForHolder/countActiveHoldsForHolderSubject",
+      "correction": "Filter active reads and quotas by both expiry and interval end, comparing actual instants with SQLite julianday.",
+      "boundary": "Booking gate, offered-slot annotations, briefing and per-holder/per-subject caps share the same reads. Expiry delivery/terminal lifecycle is unchanged.",
+      "proof": "test-slot-hold-expiry-delivery.cjs: before 22 pass / 1 fail; live unexpired holds and delivery failure controls retained."
+    },
+    {
+      "name": "Complete calendar evidence",
+      "root": "src/connectors/graph/calendarReads.ts datePart/getCalendarEventsImpl/getFreeBusy/getFreeBusyForDecision/getFreeBusyImpl",
+      "correction": "Read all calendar pages, reject malformed/repeated continuations, split long free/busy ranges, preserve all requested dates and per-mailbox incomplete status; retain independently proven disjoint busy rows when removing a moving occurrence.",
+      "boundary": "Search, pre-book validation, move checks, calendar queries and exposed get_free_busy handler use the corrected evidence. Subject/body privacy projections and colleague authority remain unchanged.",
+      "proof": "test-calendar-read-coverage.cjs: before 3 pass / 13 fail, after 16 pass. Existing reschedule and provider fixtures must include extracted helper functions."
+    },
+    {
+      "name": "Exact existing invitation",
+      "root": "src/connectors/graph/calendarReads.ts findDuplicateEvent; createMeeting.ts early colleague and final pre-write probes",
+      "correction": "A confirmed retry matches organizer, exact interval, all-day flag and attendee addresses/roles/room. Nearby title collisions return unconfirmed identity without a successful receipt or write. Preserve optional attendee roles on creation.",
+      "boundary": "Both create guards call one matcher using a fresh calendar read. Read errors still withhold writes at the final probe; a real exact retry is idempotent; cancelled events do not block new creation.",
+      "proof": "test-meeting-create-dedup-freshness.cjs: before 13 pass / 12 fail, after 25 pass. These isolated collisions are not attributed to a proven production incident."
+    },
+    {
+      "name": "Owner configured scheduling facts",
+      "root": "src/core/assistant.ts get_person_memory",
+      "correction": "Authenticated owner's record exposes actual configured timezone, schedule, duration choices and category limits instead of stale generic person hours.",
+      "boundary": "Existing owner-private tool gate remains. Colleague and shared-room reads stay denied; third-party records keep their own policy; no stored person/profile writes.",
+      "proof": "test-person-memory-identity.cjs: before 44 pass / 1 fail, after 45 pass, including owner-room and colleague denial controls."
+    },
+    {
+      "name": "Pending notification status",
+      "root": "src/core/requests/resolver.ts runApproveCallback/notifyRequesterOfDecision",
+      "correction": "Tracked message_colleague reports a message awaiting delivery, not that the human's original work is incomplete. Composer receives the actual sending outcome and Hebrew/English fallbacks agree.",
+      "boundary": "Queued notifications have no completed action_summary. Delivery receipts, failed sends, retry caps, booking approvals and non-message tracked work keep their existing contracts.",
+      "proof": "test-approval-outreach-receipt.cjs: before 11 pass / 3 fail. Existing replay assertion updated to assert delivery state and absent completed receipt."
+    }
+  ],
+  "charterReview": {
+    "W1_W3": "Changes repair data reads, identity matching and outcome payloads at their producers. Existing notification composition receives corrected facts.",
+    "W4": "No prose regex or language-specific intent detection added.",
+    "W9_W11": "Existing authenticated visibility and Connection transport gates preserved; no transport bypass or external test write.",
+    "W12": "No new LLM call, model tier, tool, persisted schema or connection. Main 5.5 model stages excluded.",
+    "M3_M6_M8_M9_M10_M11_M16": "No new owner availability veto. Identity ambiguity is not booked or called completed. Existing approvals, privacy and caller timezone behavior covered by the dependency suite inventory."
+  },
+  "checks": {
+    "status": "passed",
+    "suiteZoneExecutions": 168,
+    "assertions": 4567,
+    "typecheck": "passed",
+    "evidence": "artifacts/workshop-verification/wrap-5.4.7/verified.json",
+    "sha256": "bf3b42fc6b42e4ccd4b075168e70065f2626e2acba6a8725ce9e8754dc9622ef",
+    "fixtureReconciliation": {
+      "changed": [
+        "scripts/test-meeting-reschedule.cjs",
+        "scripts/test-nov13-meeting-decisions.cjs",
+        "scripts/test-timezone-owner-decisions.cjs",
+        "scripts/test-yael-output-truth.cjs"
+      ],
+      "productionCodeChangesAfterInitialSnapshot": [],
+      "dependencyClosure": [
+        "test-boston-permanent-schedule.cjs",
+        "test-calendar-read-coverage.cjs",
+        "test-coordinated-approval-replay.cjs",
+        "test-coordinated-owner-outcomes.cjs",
+        "test-meeting-reschedule.cjs",
+        "test-nov13-meeting-decisions.cjs",
+        "test-timezone-configured-dst.cjs",
+        "test-timezone-context-authority.cjs",
+        "test-timezone-owner-decisions.cjs",
+        "test-weekday-attendee-hours.cjs",
+        "test-weekly-windows-matchmaker.cjs",
+        "test-yael-output-truth.cjs"
+      ],
+      "allAffectedConsumersRerun": true
+    }
+  },
+  "bookkeeping": {
+    "newLedgerDispositions": [],
+    "shippingIndependentlyReviewedRefs": [],
+    "githubClosuresOrComments": [],
+    "manualReleaseEvidence": "Five focused repair areas recorded here under the owner's solo instruction; do not invent independent verified ledger entries.",
+    "existingUnrelatedVerification": "The pre-existing nov13-boston-office-location review reports the previously changed private YAML as stale on the 5.4.6 baseline. This patch does not modify or deploy that private YAML. The historical report item remains open.",
+    "nativeBookkeepingPlan": "Not applicable to this manual solo release: native helper requires nonempty independently-reviewed ledger refs; none are being closed or claimed here. Keep ledger/report history intact.",
+    "requiredBeforePush": [
+      "Affected test failures repaired and rerun",
+      "Exact source/fixture impact reconciliation",
+      "Version and CHANGELOG",
+      "Source commit and true commit timestamp",
+      "Completed wrap state in bookkeeping commit",
+      "ledger-stats --report and --wrap 5.4.7",
+      "Remote master push and observed live boot SHA"
+    ]
+  },
+  "metadata": [
+    {
+      "file": "package.json",
+      "beforeSha256": "e671cbdc839c3fbcdb92f5d529c63bd366369a00e7059d01a1d135e3a9dcf95c",
+      "afterSha256": "bf3b0123553c0922ecda469265a2a1c17dfd545faf63f1405e4cda9922e44a89",
+      "change": "version only, 5.4.6 to 5.4.7"
+    },
+    {
+      "file": "package-lock.json",
+      "beforeSha256": "f7a907e0e77b4acfc9f4c654dd266f2d111982b4f5fe500350ef6feebbf416d3",
+      "afterSha256": "3faa2b592883dd22b8d0669542a0e088e8dd83efa07dab50239a810c8fd26763",
+      "change": "version only, 5.4.6 to 5.4.7"
+    }
+  ],
+  "modelAcceptance": "No fresh real-LLM 53-conversation acceptance run. 95% goal belongs to ongoing 5.5 work.",
+  "sourceReleaseSha": null
+}

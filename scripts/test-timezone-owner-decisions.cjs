@@ -159,11 +159,11 @@ test('ordinary offer and each create success branch send attributed clocks to th
  const labels=compile('export function run(){'+offered.getText()+'}',{s:interval,display:'Tue 1 Dec 16:45 GMT+2',explicitPresentTz:'',ownerClockProfile:h.profile,...h.availability}).run();
  assert.match(labels.clock_display,/Your time: Tue 1 Dec 09:45–10:10.*Attendee time: Tue 1 Dec 16:45/);
  const returns=nodes(sourceOf('createMeeting'),n=>ts.isCallExpression(n)&&n.expression.getText()==='presentationLocalFieldFor');
- assert.equal(returns.length,3);
+ assert.equal(returns.length,2); // Shared duplicate probe and fresh create.
  for(const call of returns){
   for(const surface of ['owner_dm','room','colleague_dm']){
    const context={profile:h.profile,surface,senderRole:surface==='owner_dm'?'owner':'colleague'};
-   const fields=compile('export const fields='+call.getText(),{attendees:[{email:h.person.email}],args:interval,
+   const fields=compile('export const fields='+call.getText(),{attendees:[{email:h.person.email}],args:interval,ownerView:surface==="owner_dm",
     userEmail:h.profile.user.email,timezone:h.profile.user.timezone,context,subjectViewerFor:viewerFor,...h.availability}).fields;
    assert.match(fields.presentation_local,/16:45/);
    if(surface==='owner_dm')assert.match(fields.clock_display,/Your time: Tue 1 Dec 09:45–10:10/);
