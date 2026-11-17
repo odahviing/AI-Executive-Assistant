@@ -30,6 +30,14 @@ test('offer-conflicts-remain-attached-to-own-slot', () => {
 });
 test('preserved-clean-offers-and-retry',async()=>{const a=await run({clean:true}),b=await run({clean:true});assert.ok(a.out.slots.length);assert.equal(a.summary,b.summary);assert.ok(a.out.slots.every(s=>!s.attendee_conflicts?.length));});
 test('preserved-empty-offhours-reason',async()=>{const r=await run({offhours:true});assert.equal(r.out.slots.length,0);assert.ok(r.summary.includes('outside_attendee_work_hours'));});
+test('queued message receipt retains pending delivery without claiming replay completion', () => {
+ const h = harness();
+ const summary = h.turn.summarizeToolCall('resolve_approval', {}, {
+  ok:true, state:'resolved', effect:'approved — message scheduled and awaiting delivery',
+ }, profile.user.timezone);
+ assert.match(summary,/message scheduled and awaiting delivery/);
+ assert.doesNotMatch(summary,/replayed the approved action/);
+});
 test('preserved-unavailable-calendar',async()=>assert.rejects(run({offline:true}),/fixture calendar unavailable/));
 test('preserved-unknown-attendee-result',async()=>{const r=await run({unknown:true});assert.ok(r.out.attendees_not_checked.includes('peer@example.test'));assert.ok(!r.summary.includes('calendars_read=peer@example.test'));});
 test('preserved-unavailable-gate-safe-miss',async()=>{const h=harness({unavailable:true}),r=await run({clean:true}),draft='Thursday 11:00 is an option.';assert.equal(await h.gates.runOutputGates(draft,ctx(r.summary)),draft);});

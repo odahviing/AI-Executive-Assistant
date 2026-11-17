@@ -1502,8 +1502,7 @@ async function runApproveCallback(
     : undefined;
   const replaySummary = calendarAction && typeof replayResult?.action_summary === 'string'
     ? (replayResult.action_summary as string)
-    : ctx.wasAwaitingColleague ? undefined
-      : messageScheduled ? 'The message is scheduled and awaiting delivery.' : messageSummary;
+    : ctx.wasAwaitingColleague ? undefined : messageSummary;
   return {
     ok: true, request_id: row.id, state: 'resolved',
     effect: messageScheduled ? 'approved — message scheduled and awaiting delivery'

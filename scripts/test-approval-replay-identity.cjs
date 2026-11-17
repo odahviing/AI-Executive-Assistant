@@ -127,7 +127,11 @@ test('audit R6 unavailable private anchor does not execute generic owner action'
 });
 test('audit R6 tracked scheduled action never announces completion',async()=>{
   const h=harness({row:{owner_dm_channel:'DOWNER',owner_dm_thread_ts:'owner.daily'},toolResult:{scheduled:true,jobId:'out_followup'}});
-  const r=await h.resolve({verdict:'approve',data:{tool:'message_colleague',args:{message:'Later'}}});assert.equal(r.ok,true);assert.match(r.effect,/not completed/);assert.match(h.effects.sends[0].body,/has not completed/);
+  const r=await h.resolve({verdict:'approve',data:{tool:'message_colleague',args:{message:'Later'}}});
+  assert.equal(r.ok,true);
+  assert.match(r.effect,/message scheduled and awaiting delivery/);
+  assert.match(h.effects.sends[0].body,/message.*awaiting delivery/);
+  assert.equal(r.action_summary,undefined);
 });
 test('audit R6 malformed chosen action remains pending',async()=>{
   const h=harness();const r=await h.resolve({verdict:'approve',data:{tool:'message_colleague',args:[]}});assert.equal(r.ok,false);assert.equal(h.effects.executes.length,0);

@@ -58,7 +58,7 @@ test('control scheduled message does not pretend requester received it', async (
   const h = setup({ execution: { status: 'tracked', result: { ok: true, scheduled: true, jobId: 'out_later' } } });
   const r = await h.resolve(); assert.equal(h.effects.sends.length, 1);
   assert.equal(r.effect,'approved — message scheduled and awaiting delivery');
-  assert.equal(r.action_summary,'The message is scheduled and awaiting delivery.');
+  assert.equal(r.action_summary,undefined,'a pending message must not carry the completed-action receipt');
   assert.match(h.effects.sends[0].body,/message.*scheduled.*delivery/);
   h.check();
 });
@@ -73,7 +73,8 @@ test('queued completion notice retains delivery status instead of reversing owne
   });
   const r = await h.resolve();
   assert.equal(h.effects.executes[0].args.message,'Idan signed the renewal quote.');
-  assert.equal(r.action_summary,'The message is scheduled and awaiting delivery.');
+  assert.equal(r.action_summary,undefined);
+  assert.match(r.effect,/message scheduled and awaiting delivery/);
   assert.match(h.effects.sends[0].body,/message.*scheduled.*delivery/);
   assert.doesNotMatch(h.effects.sends[0].body,/action.*not completed|scheduled to be signed/);
   const composed = h.effects.modelInputs.find(input=>input.messages[0].content.includes('Their request:'));
