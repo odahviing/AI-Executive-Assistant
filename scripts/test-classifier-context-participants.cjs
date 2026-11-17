@@ -535,6 +535,22 @@ test('directory spellings include a literal participant of the continuing reques
   assert.deepEqual(result.directorySpellings,[{name:'סימון',spelling:'Simon'}]);
   assert.ok(captured.tools[0].input_schema.required.includes('directory_spellings'));
 });
+
+test('an immediate hold requires an explicit extraction result in the classifier schema', async () => {
+  const message = 'Hold 17:15 now. I will confirm the invitation on Wednesday.';
+  const {result,captured}=await run({meeting_action:'hold',requested_hold_quote:message},{senderRole:'colleague',message});
+  const schema = captured.tools[0].input_schema;
+  assert.ok(schema.required.includes('requested_hold_quote'));
+  assert.deepEqual(Array.from(schema.properties.requested_hold_quote.type),['string','null']);
+  assert.equal(result.meetingAction,'hold');
+  assert.equal(result.requestedHoldQuote,message);
+});
+
+test('a null hold extraction retains the unresolved choice boundary', async () => {
+  const {result}=await run({meeting_action:'hold',requested_hold_quote:null},{senderRole:'colleague',message:'Hold 17:15 if the candidate passes first.'});
+  assert.equal(result.meetingAction,'explore');
+  assert.equal(result.requestedHoldQuote,undefined);
+});
 test('explicit source clock is normalized without a timezone conversion', async () => {
   const clock={clock:'19:00',zone:'Asia/Jerusalem',quote:'Book at 7pm Israel time'};
   const {result}=await run({meeting_action:'execute',exact_request_clock:clock},{message:clock.quote});

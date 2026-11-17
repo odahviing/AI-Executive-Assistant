@@ -25,13 +25,34 @@ test('owner decision candidates retain checked attendees and their individual co
  const summary = turn.summarizeToolCall('find_available_slots', {duration_minutes:25}, {
   slots: [], owner_approval_candidates: [{start:'2026-10-19T13:30:00+03:00', end:'2026-10-19T13:55:00+03:00',
    attendee_status:[{email:'einav@example.com',status:'free'},{email:'requester@example.com',status:'busy'},{email:'external@example.com',status:'unknown'}],
-   attendee_conflicts:[{email:'requester@example.com',reason:'busy',assumed:false}]}],
+   attendee_conflicts:[{email:'requester@example.com',reason:'busy',assumed:false}],broken_rules:['free_time_floor']}],
  }, 'Asia/Jerusalem');
  assert.ok(summary.includes('owner_decision_required (unapproved)'));
  assert.ok(summary.includes('attendee_status=einav@example.com:free+requester@example.com:busy+external@example.com:unknown'));
  assert.ok(summary.includes('attendee_conflicts=requester@example.com:busy'));
  assert.ok(summary.includes('calendars_read=einav@example.com+requester@example.com'));
  assert.ok(!summary.includes('calendars_read=external@example.com'));
+ assert.ok(summary.includes('owner_status=decision_required owner_rules=free_time_floor'));
+ assert.ok(!summary.includes('owner_status=available'));
+});
+test('normal search receipts preserve owner availability alongside additional people', () => {
+ const summary = turn.summarizeToolCall('find_available_slots', {duration_minutes:25}, {
+  slots:[{start:'2026-10-22T12:00:00+03:00',end:'2026-10-22T12:25:00+03:00',
+   attendee_status:[{email:'einav@example.com',status:'free'},{email:'oran@example.com',status:'busy'}]}],
+ }, 'Asia/Jerusalem');
+ assert.ok(summary.includes('owner_status=available'));
+ assert.ok(summary.includes('attendee_status=einav@example.com:free+oran@example.com:busy'));
+});
+test('recovered and held options preserve their owner conditions in the receipt', () => {
+ const summary = turn.summarizeToolCall('find_available_slots', {duration_minutes:25}, {
+  _relaxed_recovery:true,
+  slots:[{start:'2026-10-22T12:00:00+03:00',end:'2026-10-22T12:25:00+03:00',
+   broken_rules:['disturbs_floating_block','free_time_floor'],less_preferred_label:'less preferred'},
+   {start:'2026-10-22T13:00:00+03:00',end:'2026-10-22T13:25:00+03:00',on_hold:true}],
+ }, 'Asia/Jerusalem');
+ assert.ok(summary.includes('owner_status=conditional owner_rules=disturbs_floating_block+free_time_floor preference=less preferred'));
+ assert.ok(summary.includes('owner_status=conditional held=true'));
+ assert.ok(!summary.includes('owner_status=available'));
 });
 for(const [lang,whole,remaining] of [['Hebrew','את צודקת. לא יכולתי לקרוא את הלוח של לבנה בחיפוש ההוא.','את צודקת.'],['Russian','Вы правы. Я не смогла прочитать календарь Леваны в том поиске.','Вы правы.'],['Spanish','Tienes razón. No pude consultar el calendario de Levana en esa búsqueda.','Tienes razón.']])test('regression '+lang+' controlled verdict deletes only clause',async()=>{const h=harness({rewrite:{verdict:'rewrite',minimalRedaction:remaining,minimalRedactionPreservesRest:true}});assert.equal(await h.gates.__fact(ctx(),whole),remaining);});
 for(const [id,text] of [['current-outage','I read Levana’s calendar earlier, but I cannot access it now.'],['different-window','I could not confirm Levana’s calendar for next month.'],['disputed-slot','Those times still do not work for Levana.'],['external','I could not check the external attendee’s calendar.']])test('preserved false detector '+id+' existing veto keeps truthful reply',async()=>{const h=harness({verdict:{claimed_action:true,action_type:'denied_calendar_read',target_name:'levana.b@example.com',action_summary:'scripted false detector'},rewrite:{verdict:'keep'}});assert.equal(await h.gates.__fact(ctx(),text),text);assert.equal(h.calls.filter(c=>c.tools).length,1);});

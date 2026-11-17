@@ -699,19 +699,33 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           return `[find_available_slots candidate_validation dur=${durCV}m: ${parts.join(', ')}${scopeNote}]`;
         }
 
-        type SummarySlot = { start?: string; end?: string; attendee_status?: Array<{ email?: string; status?: string }>; attendee_conflicts?: Array<{ email?: string; reason?: string; assumed?: boolean }> };
+        type SummarySlot = {
+          start?: string;
+          end?: string;
+          broken_rules?: string[];
+          broken_rule?: string;
+          less_preferred_label?: string;
+          on_hold?: boolean;
+          attendee_status?: Array<{ email?: string; status?: string }>;
+          attendee_conflicts?: Array<{ email?: string; reason?: string; assumed?: boolean }>;
+        };
         const slots: SummarySlot[] =
           Array.isArray(result) ? result :
           (result && typeof result === 'object' && Array.isArray((result as any).slots)) ? (result as any).slots :
           [];
+        const recoveryResult = (result as { _relaxed_recovery?: unknown } | null)?._relaxed_recovery === true;
         // Only a finding attached to this offer establishes its attendee status.
         // Day-level rejection tallies describe other candidates in the search.
-        const formatSlot = (s: SummarySlot): string => {
+        const formatSlot = (s: SummarySlot, ownerDecision = false): string => {
           const conflicts = (s.attendee_conflicts ?? []).map(a => `${a.email}:${a.reason}${a.assumed ? '(assumed)' : ''}`);
           const statuses = (s.attendee_status ?? []).map(a => `${a.email}:${a.status}`);
-          return `${fmt(s)}${conflicts.length ? ` attendee_conflicts=${conflicts.join('+')}` : ''}${statuses.length ? ` attendee_status=${statuses.join('+')}` : ''}`;
+          const rules = s.broken_rules ?? (s.broken_rule ? [s.broken_rule] : []);
+          // Search's returned openings already include the owner. Attendee
+          // annotations describe additional people, never replace that check.
+          const ownerStatus = ownerDecision ? 'decision_required' : recoveryResult || rules.length || s.on_hold ? 'conditional' : 'available';
+          return `${fmt(s)} owner_status=${ownerStatus}${rules.length ? ` owner_rules=${rules.join('+')}` : ''}${s.on_hold ? ' held=true' : ''}${s.less_preferred_label ? ` preference=${s.less_preferred_label}` : ''}${conflicts.length ? ` attendee_conflicts=${conflicts.join('+')}` : ''}${statuses.length ? ` attendee_status=${statuses.join('+')}` : ''}`;
         };
-        const slotList = slots.map(formatSlot).join(', ');
+        const slotList = slots.map(slot => formatSlot(slot)).join(', ');
         const candidates = (result as { owner_approval_candidates?: SummarySlot[] })?.owner_approval_candidates;
         const pending = Array.isArray(candidates) ? candidates : [];
         const lengths = new Set(slots.map(slot => (Date.parse(slot.end ?? '') - Date.parse(slot.start ?? '')) / 60000));
@@ -853,12 +867,11 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
             }
           }
           const decisionPart = pending.length
-            ? ' owner_decision_required (unapproved): ' + pending.map(formatSlot).join(', ')
+            ? ' owner_decision_required (unapproved): ' + pending.map(slot => formatSlot(slot, true)).join(', ')
             : '';
           return `[find_available_slots${window} dur=${dur}m: 0 slots${scopeNote}${reasonPart}${offDaysPart}${preferredPart}${attendeesReadPart}${decisionPart}]`;
         }
-        const recovery = (result as { _relaxed_recovery?: unknown } | null)?._relaxed_recovery === true
-          ? '; strict=0; relaxed_recovery' : '';
+        const recovery = recoveryResult ? '; strict=0; relaxed_recovery' : '';
         return `[find_available_slots${window} dur=${dur}m → ${slots.length} slots: ${slotList}; owner_calendar=checked selection=non_exhaustive${scopeNote}${recovery}${offDaysPart}${attendeePartialPart}${attendeeBlockedPart}${attendeesReadPart}${preferredPart}]`;
       }
       case 'check_join_availability': {
