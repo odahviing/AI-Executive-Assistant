@@ -1275,7 +1275,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               const boundFailure = searchBoundFailure(cand.start, cand.end);
               if (boundFailure) return { start: cand.start, end: cand.end, ...boundFailure };
               try {
-                const slots = await findAvailableSlots({
+                const candidateParams = {
                   userEmail,
                   timezone,
                   durationMinutes: durationMin,
@@ -1295,7 +1295,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   viewer,
                   viewerEmail,
                   diagnosticsOut: diag,
-                });
+                };
+                const slots = await findAvailableSlots(candidateParams);
                 const startMs = DateTime.fromISO(cand.start, { zone: timezone }).toMillis();
                 const matches = slots.some(s => DateTime.fromISO(s.start, { zone: timezone }).toMillis() === startMs);
                 // v3.7.x (#143) — an away day is now walked normally (its stated
@@ -1303,6 +1304,16 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // real rejection reason in rejectedCounts — no WE special-casing.
                 const brokenRule = matches ? undefined : firstRejectReason(diag.rejectedCounts, diag.daySummary);
                 const brokenRules = matches ? [] : Object.keys(diag.rejectedCounts ?? {}) as SearchRejectReason[];
+                // The shared search can stop at an attendee's busy block before
+                // checking the owner. Preserve that joint verdict and check the
+                // owner separately through the same search and rule validator.
+                let ownerAvailable = matches ? true : undefined;
+                if (brokenRules.some(reason=>reason.startsWith('attendee_busy_collision:')
+                  || reason.startsWith('outside_attendee_work_hours:') || reason.startsWith('attendee_out_of_office:'))) {
+                  const ownerSlots = await findAvailableSlots({...candidateParams,
+                    attendeeBusyEmails:[],attendeeAvailability:undefined,diagnosticsOut:{}});
+                  ownerAvailable = ownerSlots.some(slot=>DateTime.fromISO(slot.start,{zone:timezone}).toMillis()===startMs);
+                }
                 // gh#200 — an all-day OOF rejects every instant on that day
                 // before checkSlot ever runs, so the away span's real end
                 // lives on the day_summary entry for this candidate's date
@@ -1339,6 +1350,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   start: cand.start,
                   end: cand.end,
                   available: matches,
+                  ...(ownerAvailable !== undefined ? {owner_available:ownerAvailable} : {}),
+                  ...(ownerAvailable && !matches ? {_attendee_decision_note:'The owner is available at this exact time. The joint check reports an attendee constraint. A calendar conflict can be accepted by the booker after disclosure; use the normal booking or move handler for their selection. Working-hours changes still require the appropriate consent.'} : {}),
                   ...(presentLocal ? presentationClockFields(presentLocal, groundTzStated ? 'requested' : 'attendee', cand.start, cand.end, ownerClockProfile) : {}),
                   ...(brokenRule ? { broken_rule: brokenRule, broken_rule_label: labelFor(brokenRule, brokenRuleUntilDisplay) } : {}),
                   ...(brokenRules.length ? { broken_rules: brokenRules, broken_rule_labels: brokenRules.map(reason => labelFor(reason, oofUntilDisplayFor(reason, diag.daySummary, cand.start.slice(0, 10)))) } : {}),

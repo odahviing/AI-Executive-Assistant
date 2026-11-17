@@ -110,6 +110,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // Defined only for a colleague's request to hold selected prior offers. An empty
   // map means no eligible offer (including after a restart or stash failure).
   let holdOnlyWindows: Map<number, number> | undefined;
+  let checkRequestedHold = false;
   // ── TWO questions, two names — never one flag ────────────────────────────
   // Pre-fix this file carried two competing definitions of "owner turn":
   // `input.senderRole === 'owner'` (post-clamp) and a looser
@@ -410,12 +411,15 @@ export async function buildTurnContext(input: OrchestratorInput) {
         senderRole: turnSenderRole,
         senderName: input.senderName,
         recentContext: recentContext || undefined,
-        priorMeetingRequest: activeRequest && {original:activeRequest.original,updates:activeRequest.updates,requiredDay:activeRequest.requiredDay,bookingInstruction:activeRequest.bookingInstruction?.localDate === DateTime.now().setZone(profile.user.timezone).toISODate() ? activeRequest.bookingInstruction : undefined},
+        priorMeetingRequest: activeRequest && {original:activeRequest.original,updates:activeRequest.updates,duration:activeRequest.duration,participantGroups:activeRequest.participantGroups,requiredDay:activeRequest.requiredDay,bookingInstruction:activeRequest.bookingInstruction?.localDate === DateTime.now().setZone(profile.user.timezone).toISODate() ? activeRequest.bookingInstruction : undefined},
         meetingContextMessages: isPrivateSlackDm ? meetingContextMessages : undefined,
         ...(holdCandidates.length ? { holdCandidates, holdOfferText:priorProse, holdSelectionText:input.typedUserMessage } : {}),
         inspectIndependentOrdinaryCreate,
         ordinaryCreateOwnerContext: inspectIndependentOrdinaryCreate ? privateOwnerContext : undefined,
-        approvalCandidates: classifierCandidates.length ? classifierCandidates.map(({ row, action }) => ({ subject: row.subject ?? '', action })) : undefined,
+        approvalCandidates: classifierCandidates.length ? classifierCandidates.map(({ row, action }) => {
+          const details = JSON.parse(row.details_json ?? '{}');
+          return {subject:row.subject ?? '',action,reason:details.honest_hard_reason ?? details.rule_label ?? details.rule};
+        }) : undefined,
       });
       const followsOffer = !!activeRequest && !activeRequest.batch && !!receipts?.some(line => line.startsWith('[find_available_slots ') && line.includes(' slots:'))
         && !!input.typedUserMessage && isClockReply(input.typedUserMessage);
@@ -563,7 +567,9 @@ export async function buildTurnContext(input: OrchestratorInput) {
         unresolvedHoldSelection = turnResult.unresolvedHoldSelection === true;
         meetingExplorationOnly = turnResult.meetingAction === 'explore'
           || (!turnResult.meetingAction && (!!refusedBooking || holdCandidates.length > 0));
-        if (turnResult.meetingAction === 'hold') {
+        checkRequestedHold = turnResult.meetingAction === 'hold' && !!turnResult.requestedHoldQuote
+          && !turnResult.selectedHoldCandidateIndices?.length;
+        if (turnResult.meetingAction === 'hold' && !checkRequestedHold) {
           holdOnlyWindows = new Map();
           const indices = turnResult.selectedHoldCandidateIndices;
           if (indices?.length && new Set(indices).size === indices.length
@@ -638,11 +644,15 @@ export async function buildTurnContext(input: OrchestratorInput) {
           const covered = new Set(groups.flat().map(normalize));
           meetingPeopleGroups = [...accepted].every(name => covered.has(name)) ? groups : [];
         }
-        if (meetingRequest && turnResult.participantsUnchanged && turnResult.meetingContinuation && requestUpdate?.relation==='continue'
-          && !currentMessageMeetingPeople.length && meetingRequest.participantGroups?.length) {
-          // A date, duration or address answer keeps the participants of the
-          // same request. The stored names came from authenticated human text.
-          meetingPeopleGroups = meetingRequest.participantGroups.map(group=>[...group]);
+        const priorGroups = meetingRequest?.participantGroups;
+        const correctedGroups = priorGroups?.map((group,index)=>group.map(name=>
+          turnResult.participantCorrections?.find(c=>c.group===index && c.from===name)?.to ?? name));
+        if (meetingRequest && turnResult.meetingContinuation && requestUpdate?.relation==='continue' && correctedGroups?.length
+          && (turnResult.participantsUnchanged || (turnResult.participantCorrections?.length
+            && currentMessageMeetingPeople.every(name=>[...priorGroups!.flat(),...correctedGroups.flat()].some(member=>normalize(member)===normalize(name)))))) {
+          // The same meeting retains its human-specified membership. Explicit
+          // quoted corrections replace that member in its own stored group.
+          meetingPeopleGroups = correctedGroups;
           turnMeetingPeople = [...new Set(meetingPeopleGroups.flat())];
         }
         if (meetingRequest && meetingPeopleGroups?.length) {
@@ -1244,6 +1254,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // legitimate grounding instead of rewriting a correct precheck-backed answer
   // into "let me check and get back to you".
   let availabilityPrecheckToolSummaries: string[] = [];
+  let availabilityChecks: Array<Record<string,unknown>> = [];
   // v4.4.x (#154) — gated on `authority`, not the surface-clamped `senderRole`.
   // This precheck's own rendered text names the asker "this colleague's
   // question" (availabilityPreCheck.ts) — true for a genuine colleague, false
@@ -1283,7 +1294,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getPersonMemory } = require('../../db') as typeof import('../../db');
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { loadAttendeeAvailabilityForPerson } = require('../../utils/attendeeAvailability') as
+      const { loadAttendeeAvailabilityForPerson, attendeeTzForDay } = require('../../utils/attendeeAvailability') as
         typeof import('../../utils/attendeeAvailability');
       const asker = input.userId ? getPersonMemory(input.userId) ?? undefined : undefined;
       const requesterAvailability = loadAttendeeAvailabilityForPerson(asker, profile.user.timezone);
@@ -1343,6 +1354,17 @@ export async function buildTurnContext(input: OrchestratorInput) {
       requestedSearchWindow = result.searchWindow;
       availabilityQuestionDetected = result.ran;
       availabilityPrecheckToolSummaries = result.toolSummaryLines;
+      availabilityChecks = result.verdicts.flatMap(verdict => [verdict, ...(verdict.other ? [verdict.other] : [])]
+        .flatMap(slot => {
+          const start = DateTime.fromISO(slot.instantIso ?? `${slot.date}T${slot.time}`, {zone:profile.user.timezone});
+          if (!start.isValid) return [];
+          const requesterZone = requesterAvailability ? attendeeTzForDay(requesterAvailability,start.toISO()!) : asker?.timezone;
+          return [{owner_clock:start.setZone(profile.user.timezone).toFormat('ccc d LLL HH:mm ZZZZ'),
+            owner_zone:profile.user.timezone,
+            requester_clock:requesterZone ? start.setZone(requesterZone).toFormat('ccc d LLL HH:mm ZZZZ') : undefined,
+            requester_zone:requesterZone, available:slot.bookable, reason:slot.rejection_reason,
+            ambiguous:!!verdict.other, duration_minutes:verdict.durationMin}];
+        }));
       // A slot the colleague ASKED about that we confirmed bookable IS a slot
       // we offered them — record it into the SAME stash find_available_slots
       // feeds, so the hold gate (which validates "was this offered?") passes on
@@ -1360,6 +1382,9 @@ export async function buildTurnContext(input: OrchestratorInput) {
             return [{ start: dt.toISO()!, ...(minutes && minutes > 0 ? { end: dt.plus({ minutes }).toISO()! } : {}) }];
           });
         if (bookableSlots.length > 0) {
+          if (checkRequestedHold && bookableSlots.length === 1 && bookableSlots[0].end) {
+            holdOnlyWindows = new Map([[Date.parse(bookableSlots[0].start), Date.parse(bookableSlots[0].end)]]);
+          }
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { recordOfferedSlots } = require('../../utils/offeredSlotsStash') as
             typeof import('../../utils/offeredSlotsStash');
@@ -1718,7 +1743,7 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
       ]
     : [{ type: 'text', text: systemBlocksDynamic } as Anthropic.TextBlockParam];
   if (priorMeetingState && (priorMeetingState.approvals.length || priorMeetingState.holds.length)) {
-    systemBlocks.push({type:'text',text:'Open calendar decisions and holds belonging to this requester in this conversation: '+JSON.stringify(priorMeetingState)+
+    systemBlocks.push({type:'text',text:'Open calendar decisions and holds belonging to this authenticated requester across their conversations: '+JSON.stringify(priorMeetingState)+
       '. Match the current request by meeting and time. A shorter fallback leaves the original pending unless the person asks to replace it. A pending decision about another meeting does not require another approval or prevent a new search.'});
   }
 
@@ -1737,6 +1762,10 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
   // the owner, so his book/move/cancel/approve authority survives the room
   // clamp even though his DATA access does not (registry.ts getSkillTools).
   let tools = getSkillTools(profile, input.senderRole, toolScopes, input.channel, input.authority);
+  // Role capabilities describe what a subsequent authorized request can do.
+  // Intent filters below govern execution on this turn only.
+  const supportedOperations = getSkillTools(profile, input.senderRole, undefined, input.channel, input.authority)
+    .map(tool => tool.name);
   // Carry the same per-turn write boundary into dispatch. Tool descriptions
   // alone cannot prevent a stale or invented tool_use from reaching a handler.
   const blockedWriteTools = new Set<string>();
@@ -1763,6 +1792,14 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
   if (existingInviteSubject) logger.info('Checking organizer invitation', { threadTs });
   if (existingInviteSubject) systemBlocks.push({type:'text',text:'The requester wants the owner to join their existing invitation. Check the stated meeting with check_join_availability using the original subject. The organizer keeps the invitation. The check can route a needed attendance decision. Report its actual result in one or two sentences.'});
   if (negativeReaction || !tools.some(t => t.name === 'create_approval')) consultOwnerQuote = undefined;
+  // A new explicit hold is authorized only for the unambiguous interval just
+  // validated by the same availability spine. Failure leaves an empty allowlist.
+  if (checkRequestedHold) {
+    holdOnlyWindows ??= new Map();
+    systemBlocks.push({type:'text',text:holdOnlyWindows.size
+      ? 'The requester explicitly asked to hold this time now. Its exact interval has been checked and is available. Place the internal hold now using the checked interval, then report its actual expiry. The later decision about an invitation remains separate.'
+      : 'The requested hold has no unambiguous verified available interval yet. Explain the actual check result or clarify the unresolved clock. A hold has not been placed.'});
+  }
   const readOnly = !!consultOwnerQuote || !!existingInviteSubject || input.proseOnly === true || meetingExplorationOnly || !!requestedException || negativeReaction;
   if (readOnly || holdOnlyWindows) {
     const canHold = !readOnly && !!holdOnlyWindows?.size && tools.some(t => t.name === 'hold_slot');
@@ -1935,6 +1972,7 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     messages,
     systemBlocks,
     tools,
+    supportedOperations,
     blockedWriteTools,
     holdOnlyWindows,
     continuedRefusal,
@@ -1968,6 +2006,7 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     meetingRequest,
     availabilityQuestionDetected,
     availabilityPrecheckToolSummaries,
+    availabilityChecks,
     bookingClockQuestion,
   };
 }

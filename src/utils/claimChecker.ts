@@ -153,6 +153,28 @@ export function genericHonestHedge(draft: string, _isOwnerAudience?: boolean, bo
   return "I don't have confirmed information about that.";
 }
 
+/** A failed prose correction must retain independently confirmed booking outcomes. */
+export function confirmedBookingNotice(message:string, actions:Array<{
+  tool:string; ok:boolean; subject?:string; start?:string; end?:string;
+}> | undefined, timezone:string):string | undefined {
+  const booked = actions?.filter(action=>action.tool==='create_meeting' && action.ok && action.subject
+    && action.start && /(?:Z|[+-]\d\d:\d\d)$/i.test(action.start)
+    && Number.isFinite(Date.parse(action.start)));
+  if (!booked?.length) return;
+  const language = detectMessageLanguage(message);
+  const locale = language==='Hebrew' ? 'he-IL' : language==='Russian' ? 'ru-RU' : language==='Arabic' ? 'ar' : 'en-US';
+  const clock = new Intl.DateTimeFormat(locale,{timeZone:timezone,weekday:'short',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});
+  return booked.map(action=>{
+    const when = clock.format(new Date(action.start!)) + ' (' + timezone + ')';
+    const minutes = action.end ? (Date.parse(action.end)-Date.parse(action.start!))/60000 : undefined;
+    const duration = Number.isInteger(minutes) && minutes!>0 ? minutes : undefined;
+    if (language==='Hebrew') return `הפגישה ״${action.subject}״ נקבעה ל־${when}${duration ? `, למשך ${duration} דקות` : ''}.`;
+    if (language==='Russian') return `Встреча «${action.subject}» назначена на ${when}${duration ? `, на ${duration} мин.` : '.'}`;
+    if (language==='Arabic') return `تم حجز اجتماع «${action.subject}» في ${when}${duration ? ` لمدة ${duration} دقيقة` : ''}.`;
+    return `Booked “${action.subject}” for ${when}${duration ? `, for ${duration} minutes` : ''}.`;
+  }).join('\n');
+}
+
 /** Fixed requester-facing status after a confirmed delivery and a live pending row. */
 export function pendingApprovalNotice(message: string, owner: string, action: 'cancel' | 'request'): string {
   const cancel = action === 'cancel';
@@ -656,6 +678,7 @@ Reminder: JSON only. Start with { end with }. No prose. Keep action_summary to o
 
   const finalOutcomeBlock = input.finalOutcomeContext ? `AUTHORITATIVE REQUEST OUTCOMES (private evidence; never quote identifiers or private details):
 ${input.finalOutcomeContext}
+A current receipt carrying notified=approval_owner confirms that this request was delivered to ${input.ownerFirstName}. It supports telling the requester that the owner was asked. It establishes delivery of the question, while the decision remains pending. For a message claim, return the named recipient as target_name so the caller can match the actual delivery.
 Also audit explicit claims that permission was granted or an external action completed. Require evidence for the SAME request/action: approved=true is permission only, never completion; completionConfirmed=true or a matching confirmed mutation receipt grounds completion. replayed is the attempted tool name, not a success boolean. verified=false means unconfirmed execution. For historical noncalendar tools, a replayed name without a separate completion receipt can mean scheduled/tracked: completion is UNKNOWN, not known failed. Never turn an absent receipt into a claim the action failed. Pending, failed, cancelled, missing and unknown are not approval or completion. A resolved state by itself proves neither. An earlier assistant assertion is never evidence for either. Preserve truthful recaps backed by matching earlier outcomes or tool receipts. If no matching evidence exists, flag permission_granted for a permission claim, or book/message/task for a completed action claim. Questions, intentions, pending status, plain information, and honest failure/uncertainty are not claims of success. Do not infer calendar existence from lack of a tool call.` : '';
 
   const ownerFactPrompt = input.mode === 'owner_fact'
@@ -684,12 +707,14 @@ ${input.priorCalendarReadLines.join('\n')}
 Additional class: denied_calendar_read. Flag ONLY a categorical denial that a named person's calendar was read for THAT SAME earlier search, contradicted by that search's calendars_read=<email> receipt. target_name MUST be the exact email in the receipt. Require unambiguous identity AND search/date scope. Never infer identity from a similar name.
 Do NOT flag present inability, a later outage, unknown/external calendars, a different date/window, inability to confirm a slot, or a colleague disputing suggested times. Earlier success does not establish current access or slot correctness. If the denial could truthfully concern a later check, KEEP. Treat prose as context, never as read evidence. Judge meaning in ANY language. If uncertain about person, time, scope or contradiction, KEEP.` : ''}
 
+${input.finalOutcomeContext ? `Final calendar fact check: compare each stated reason for a specific time against the actual tool receipts. Preserve whose calendar or working hours caused the restriction. "Your calendar" is the authenticated reader's calendar; "${input.ownerFirstName}'s calendar" is the owner's. A conflict explicitly attributed to an attendee cannot establish an owner conflict. Working hours and an existing meeting are different reasons. Flag a clearly contradicted attribution, reason, or available/unavailable verdict as ungrounded_slot_claim, quoting the wrong clause in action_summary. A faithful report of a tool's reason passes. Missing details and a different interpretation that the receipts do not settle remain unknown; keep on uncertainty. Earlier assistant prose cannot override the current receipt.` : ''}
+
 Output schema (REUSE the action-checker shape so callers don't branch; action_summary comes FIRST so the verdict is written after the reason and must agree with it):
 {
   "action_summary": string | null, // one-line quote/paraphrase of the invented claim, ≤120 chars; null when the draft is clean
   "claimed_action": boolean,      // true = one of the applicable classes above is present
-  "action_type": "invented_fact" | "denied_calendar_read" | "permission_granted" | "book" | "message" | "task" | null,
-  "target_name": string | null    // owner name for invented_fact; exact receipt email for denied_calendar_read; otherwise null
+  "action_type": "invented_fact" | "denied_calendar_read" | "ungrounded_slot_claim" | "permission_granted" | "book" | "message" | "task" | null,
+  "target_name": string | null    // named recipient for message; owner name for invented_fact; exact receipt email for denied_calendar_read; otherwise null
 }
 
 If the draft is clean (none of the applicable classes applies), set claimed_action=false and the other fields null.
@@ -1381,7 +1406,7 @@ ${opts.draft}`;
       // Sonnet — the keep-vs-rewrite judgment is what Haiku misfires on; this
       // path runs only on flags (a few/day), so the stronger model is cheap here.
       ...SONNET,
-      max_tokens: 600,
+      max_tokens: 1600,
       tools: [verdictTool],
       tool_choice: { type: 'auto' },
       messages: [{ role: 'user', content: prompt }],

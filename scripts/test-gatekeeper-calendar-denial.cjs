@@ -57,3 +57,23 @@ test('a shared calendar observation survives a false booking claim flag only in 
   assert.notEqual(await h.gates.__fact(ctx({result,isChannel:true}),draft), observed.reply);
   assert.notEqual(await h.gates.__fact(ctx({result}),'I booked another meeting.'), observed.reply);
 });
+
+test('a failed prose correction preserves the actual current booking without its unsupported claim', async () => {
+  const h = harness({verdict:{claimed_action:true,action_type:'invented_fact'},rewrite:{verdict:'rewrite',minimalRedaction:'New unsupported prose',minimalRedactionPreservesRest:true}});
+  const action = {tool:'create_meeting',ok:true,subject:'Release schedule',start:'2026-11-10T09:15:00-05:00',end:'2026-11-10T09:40:00-05:00'};
+  const result = {toolSummaries:['[create_meeting OK — Booked Release schedule] mutated=book'],mutationActions:[action]};
+  const reply = await h.gates.__fact(ctx({result}), 'Booked Release schedule. Idan always enjoys early calls.');
+  assert.match(reply, /Booked “Release schedule”/);
+  assert.match(reply, /25 minutes/);
+  assert.ok(!reply.includes('always enjoys'));
+});
+
+test('booking fallback uses only successful current results and stays inside private conversations', async () => {
+  const h = harness({verdict:{claimed_action:true,action_type:'book'}});
+  const action = {tool:'create_meeting',ok:true,subject:'Release schedule',start:'2026-11-10T09:15:00-05:00',end:'2026-11-10T09:40:00-05:00'};
+  assert.equal(h.checker.confirmedBookingNotice('Booked', [{...action,ok:false}], 'America/New_York'), undefined);
+  assert.equal(h.checker.confirmedBookingNotice('Booked', [{...action,start:'2026-11-10T09:15'}], 'America/New_York'), undefined);
+  assert.equal(h.checker.confirmedBookingNotice('Booked', undefined, 'America/New_York'), undefined);
+  const result = {toolSummaries:[],mutationActions:[action]};
+  assert.ok(!(await h.gates.__fact(ctx({result,isChannel:true,channelId:'CPEER'}),'I booked it')).includes('Release schedule'));
+});

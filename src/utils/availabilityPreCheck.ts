@@ -153,6 +153,7 @@ async function normalizeAvailabilitySlotsWithHaiku(
   message: string,
   profile: UserProfile,
   recentThread?: Array<{ role: 'user' | 'assistant'; content: string }>,
+  requestContext?: {requiredDay?:{date:string;zone:string}; requestZone?:string},
 ): Promise<{ slots: NormalizedSlot[]; category: string | null; searchWindow?: RequestedSearchWindow }> {
   const anthropic = getAnthropicClient();
   const ownerFirst = profile.user.name.split(' ')[0];
@@ -166,35 +167,20 @@ async function normalizeAvailabilitySlotsWithHaiku(
   const todayWeekday = now.toFormat('EEEE');
   const ownerOffset = now.toFormat('ZZ');
 
-  // v3.3.7 (#125b) — thread context. The DAY a time refers to often lives in
-  // an EARLIER message ("מחר יש לי סינק ב-17:00" … next message: "13:00/13:30
-  // לא פנוי?"). Without it, time-only asks fell back to TODAY and the verdict
-  // was computed for the wrong day (the false "13:30 works" told to Yael).
-  //
-  // v4.2.x — strip the transport envelope BEFORE the 400-char cut, or the cut
-  // eats the very thing this block exists to carry. A group-DM turn arrives
-  // prefixed with the machine-written `<<GROUP DM — participants: … >>` preamble
-  // (`buildGroupDmPreamble`, helpers.ts, ~364 chars) and optionally `[THREAD PARTICIPANTS: …]`
-  // (handlers.ts:1097) — so on EVERY MPIM follow-up, `slice(0, 400)` returned the
-  // preamble and about thirty characters of the human's actual words. Measured on
-  // the 2026-07-27 incident: the earlier turn read "Bunnings next week -
-  // important call- do you have a pref" and the bullet list holding "Tuesday 11
-  // August" was cut off, so "Tuesday or Wednesday?" resolved against nothing and
-  // the pre-check queried the CURRENT week (log :208, start 2026-07-26) while the
-  // conversation was about 11-13 August. Two verdicts, both for the wrong days.
-  // Structural strip of a machine-generated envelope, not natural language — the
-  // same shape processMessage.ts's `framedText` split already uses for the same preamble (G8).
+  // Preserve recent appointment details, including a prior reply’s final date.
+  // Strip transport framing before retaining the bounded authored text.
   const threadBlock = (recentThread ?? [])
-    .slice(-4)
-    .map(m => `${m.role === 'assistant' ? 'YOU' : 'COLLEAGUE'}: ${stripTransportEnvelope(m.content).slice(0, 400)}`)
+    .slice(-6)
+    .map(m => `${m.role === 'assistant' ? 'YOU' : 'COLLEAGUE'}: ${stripTransportEnvelope(m.content).slice(-1600)}`)
     .join('\n');
 
-  const systemPrompt = `You extract the specific time slots a colleague proposed in an availability question. You report WHAT was said and IN WHOSE TIMEZONE. You never convert between timezones — code does that.
+  const systemPrompt = `You extract the specific time slots a colleague proposed in an availability question, booking request or explicit request to hold a time internally. A hold requested now is a point to check even when the invitation depends on a later decision. You report WHAT was said and IN WHOSE TIMEZONE. You never convert between timezones — code does that.
 
 OWNER context:
 - Name: ${ownerFirst}
 - Timezone: ${tz} (current offset ${ownerOffset})
 - Today's date: ${today} (${todayWeekday})
+ACTIVE REQUEST: ${JSON.stringify(requestContext ?? {})}
 ${threadBlock ? `\nRECENT THREAD (older → newer; for resolving which DAY the times refer to):\n${threadBlock}\n` : ''}
 First classify the request. A search for 30 minutes between 9 and 12 CT is a search_window: the two bounds are not proposed meetings. A request to meet from 11:00 to 11:30 proposes one exact meeting: return its start and duration as points. A window with a preferred start still belongs to search_window. For search_window or other, return no slots. For ONE explicitly bounded window on one date, with a named timezone and no invitation to search other dates, also supply search_window with the dated start and end as local wall clocks, the named zone, and the requested meeting length if specified. Omit search_window for multiple windows or meetings, flexible preferences or unspecified zones.
 
@@ -209,6 +195,7 @@ RULES:
 - When the colleague named a meeting LENGTH — a range ("11:00-11:15" → start 11:00, duration_minutes 15) or an explicit duration ("for 20 min", "חצי שעה" → 30) — include duration_minutes. Omit it when only a start time was given.
 - When the colleague is asking HOW MUCH time is free — the SIZE of a gap ("how much is free there?", "how long do we have then?", "how big is that window?") — rather than whether a specific slot works, set gap_query=true and use the START of the window/slot they mean (resolve "there"/"then" from the RECENT THREAD). Omit gap_query for a normal "does X work?" ask.
 - Resolve relative day words in ANY language — "tomorrow"/"מחר", weekday names ("Tuesday"/"ביום שלישי"), "next week" — against today's date above.
+- Identify the appointment date separately from a deadline to reply or confirm. “Hold Thursday at 17:15; I will confirm Wednesday” checks Thursday. An existing appointment day remains in force when the current message only changes the time or gives a response deadline.
 - When a time carries NO day in the current message, use the day under discussion in the RECENT THREAD (e.g. the colleague said "tomorrow at 17:00" a message earlier, then asks "13:00/13:30?" — those are TOMORROW). When a clock-only inquiry could refer both to the day the colleague requested and to a different day YOU offered at that clock, check the clock on both plausible dates. An explicit weekday or clear acceptance of a particular offer selects only that date. Only when no day reference exists anywhere, assume today.
 - If the message contains no specific slot proposals, return an empty list.
 ${categoryNames.length > 0 ? `- Also set \`category\` to the meeting's TYPE when the message makes it clear — the single best match from: ${categoryNames.join(', ')}. E.g. an external candidate / "interview" / "candidate" → the interview category. Omit when the type is unclear or it's not one of these.` : ''}
@@ -665,7 +652,8 @@ export async function precheckAvailability(params: {
     // The gate above already confirmed a schedulable signal (incl. a bare "?"
     // gap question with no time), so always let the language-agnostic Haiku
     // normalizer read it — it returns empty for non-availability messages.
-    const { slots, category, searchWindow } = await normalizeAvailabilitySlotsWithHaiku(params.message, params.profile, params.recentThread);
+    const { slots, category, searchWindow } = await normalizeAvailabilitySlotsWithHaiku(params.message, params.profile, params.recentThread,
+      {requiredDay:params.requiredDay,requestZone:params.requestZone});
     if (searchWindow) return { ...empty, searchWindow };
     detectedCategory = category;
     if (slots.length > 0) {
@@ -690,7 +678,7 @@ export async function precheckAvailability(params: {
           startIso: slot.wall_clock, statedZone: slot.stated_timezone,
           homeTz: tz, personTimezone: personZone,
         }) : undefined;
-        const frame = explicit ? { zone: tz } : resolveFrame(stated ?? (bareClock ? params.requestZone : undefined), requesterTzForDate(slot.wall_clock), tz);
+        const frame = explicit ? { zone: tz } : resolveFrame(stated ?? params.requestZone, requesterTzForDate(slot.wall_clock), tz);
         const primary = readClockIn(slot.wall_clock, frame.zone, tz);
         if (!primary) continue;
         if (stated) statedZones.add(stated);

@@ -501,6 +501,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // ≤5-min mismatch ("1 hour"→55) snaps silently for everyone.
         const startIsoIn = args.start as string | undefined;
         let endIsoIn = args.end as string | undefined;
+        let appliedDurationPreset: {requested_minutes:number; booked_minutes:number} | undefined;
         const requestedMinutes = context.requestDurationMinutes;
         if (requestedMinutes && args.is_all_day !== true && typeof startIsoIn === 'string'
           && typeof endIsoIn === 'string' && /(?:Z|[+-]\d{2}:\d{2})$/i.test(startIsoIn)
@@ -518,6 +519,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             };
           }
           if (dur && dur.endIso !== endIsoIn) {
+            appliedDurationPreset = {requested_minutes:dur.requestedMin,booked_minutes:dur.durationMin};
             logger.info('create_meeting — snapped duration to allowed_durations', {
               requested: dur.requestedMin, snappedTo: dur.durationMin,
               start: startIsoIn, endWas: endIsoIn, endNow: dur.endIso,
@@ -2411,6 +2413,10 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             // the meeting TRULY landed — not the pre-snap arg Sonnet passed.
             booked_start: args.start as string,
             booked_end: args.end as string,
+            invited_attendees: attendees.map(a=>({name:a.name,email:a.email})),
+            ...(appliedDurationPreset ? {duration_preset:appliedDurationPreset,
+              _duration_note:'The configured duration preset was applied successfully. Report the actual booked length. This is the completed booking, so a separate duration change needs a new human instruction.'} : {}),
+            ...(requesterEmail ? {requester_invited:attendees.some(a=>a.email?.toLowerCase()===requesterEmail)} : {}),
             // v1.8.3 — past-tense summary the reply can quote verbatim. Prevents
             // Sonnet from narrating the post-action calendar state as a fresh
             // discovery instead of the result of her own action (issue #26 bug 1).

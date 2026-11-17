@@ -354,6 +354,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     messages,
     systemBlocks,
     tools,
+    supportedOperations,
     model,
     maxTokens,
     turnSenderRole,
@@ -387,6 +388,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     standaloneBookingApproval,
     availabilityQuestionDetected,
     availabilityPrecheckToolSummaries,
+    availabilityChecks,
     bookingClockQuestion,
   } = await buildTurnContext(input);
 
@@ -543,7 +545,8 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   const MAX_ITERATIONS = 10;
 
   let recheckedBooking = false;
-  const schedulingEvidence: Array<Record<string,unknown>> = [];
+  const schedulingEvidence: Array<Record<string,unknown>> = availabilityChecks?.length
+    ? [{tool:'availability_precheck',checks:availabilityChecks}] : [];
   const notifiedApprovals = new Set<string>();
   let hasWindowException = false;
   let scheduledOutcomeReviewed = false;
@@ -640,7 +643,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         systemBlocks.push({ type: 'text', text: 'The calendar check has completed, but the requested booking or its approval has not yet been attempted. Use create_meeting if the requested slot and attendees are known. If essential information is missing, ask only for that detail. Preserve all calendar and permission checks.' });
         continue;
       }
-      const schedulingReceipts = toolCallSummaries.some(line => /^\[(?:find_available_slots|check_join_availability|get_calendar|create_meeting|move_meeting|update_meeting|hold_slot|resolve_approval|check_calendar_health|get_person_memory|update_person_profile)\b/.test(line));
+      const schedulingReceipts = toolCallSummaries.some(line => /^\[(?:find_available_slots|check_join_availability|get_calendar|create_meeting|move_meeting|update_meeting|hold_slot|create_approval|resolve_approval|check_calendar_health|get_person_memory|update_person_profile)\b/.test(line));
       if (pendingBookingReply && toolCallSummaries.at(-1)?.endsWith(' notified=approval_owner')
         && toolCallSummaries.filter(line => line.startsWith('[create_approval')).length === 1
         && toolCallSummaries.every(line => /^\[(?:create_approval|find_available_slots|create_meeting FAILED: not_rule_compliant)/.test(line))) {
@@ -653,12 +656,12 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         && !input.proseOnly && !input.extraInstruction && !input.forceToolOnFirstTurn && !input.images?.length
         && input.channel === 'slack' && input.interactive !== false && input.typedUserMessage === userMessage) {
         scheduledOutcomeReviewed = true;
-        const attempted = new Set(toolCallSummaries.map(line => line.match(/^\[([a-z_]+)/)?.[1]));
         const remainingTools = tools.map(tool => tool.name).filter(name =>
-          !attempted.has(name) && !blockedWriteTools?.has(name) && (!WRITE_TOOLS.has(name)
+          !blockedWriteTools?.has(name) && (!WRITE_TOOLS.has(name)
             || (input.surface==='owner_dm' && input.authority==='owner' && input.userId===profile.user.slack_user_id)
             || (name === 'create_approval' && !!lastDeferredActionHint && !raisedExceptionThisTurn)
-            || (name === 'create_meeting' && (exactBookingRequested || (firmWindowBooking && hasWindowException)) && ![...attempted].some(tool => tool && WRITE_TOOLS.has(tool)))));
+            || (name === 'create_meeting' && (exactBookingRequested || (firmWindowBooking && hasWindowException))
+              && !mutationActions.some(action=>action.tool==='create_meeting' && action.ok))));
         try {
           const {composeSchedulingOutcome} = await import('./composeSchedulingOutcome');
           const available = iteration < MAX_ITERATIONS && !outcomeRequestedAction ? remainingTools : [];
@@ -672,7 +675,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
             requiredRead,priorMeetingState:priorMeetingState
               ? (await import('./requesterMeetingState')).requesterMeetingState(profile.user.slack_user_id,input.userId,input.channelId,threadTs)
               : undefined,readerName:input.senderName,
-            readTools,remainingTools:available.filter(name => !readTools.some(tool => tool.name === name)),owner:profile.user.name,ownerZone:profile.user.timezone,isOwner:input.authority === 'owner',offeredSlotCount:profile.meetings.offered_slot_count,
+            readTools,supportedOperations,availableOperations:tools.map(tool=>tool.name),remainingTools:available.filter(name => !readTools.some(tool => tool.name === name)),owner:profile.user.name,ownerZone:profile.user.timezone,isOwner:input.authority === 'owner',offeredSlotCount:profile.meetings.offered_slot_count,
             allowedDurations:profile.meetings.allowed_durations});
           if (outcome.read) {
             outstandingRead = outcome.read;
@@ -1479,11 +1482,11 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         && result && typeof result === 'object') {
         const output = result as Record<string,unknown>;
         const facts: Record<string,unknown> = {tool:toolUse.name};
-        for (const key of ['success','ok','sent','error','found','count','summary','message','issues','fixes_applied','overrides','recent_exchange','interactions','person','timezone','currently_traveling','working_hours','scheduling_hours','updated','name','colleague_name','attachments_failed','await_reply']) {
+        for (const key of ['success','ok','sent','error','found','count','summary','message','issues','fixes_applied','overrides','recent_exchange','interactions','person','timezone','owner_schedule','currently_traveling','working_hours','scheduling_hours','updated','name','colleague_name','attachments_failed','await_reply']) {
           if (output[key] !== undefined) facts[key] = output[key];
         }
         if (toolUse.name === 'list_pending_approvals' && Array.isArray(output.approvals)) {
-          facts.approvals = output.approvals.map(a=>({subject:a.subject, state:a.state, description:a.description}));
+          facts.approvals = output.approvals.map(a=>({kind:a.kind,subject:a.subject,state:a.state,description:a.description,payload:a.payload}));
         }
         if (toolUse.name==='check_calendar_health' && Array.isArray(output.issues)) {
           const counts:Record<string,number> = {};
@@ -1503,10 +1506,18 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           events:events.map(event => ({
             subject:event.subject, date:event._localDate, start:event._localStartTime, end:event._localEndTime,
             allDay:event.isAllDay, cancelled:event.isCancelled,
+            location:event.location, online:event.isOnlineMeeting,
+            ...(scopedToRequester ? {requester_on_invitation:true} : {}),
             ...(privateOwnerRead ? {categories:event.categories,status:event.showAs,organizer:event.organizer,
               attendee_emails:event.attendee_emails,attendees:event.attendees} : {}),
           })),
         });
+      }
+      if (privateOwnerRead && toolUse.name === 'get_free_busy' && result && typeof result === 'object') {
+        const busy = Object.fromEntries(Object.entries(result).filter(([email,blocks])=>email.includes('@') && Array.isArray(blocks)));
+        const missing = (result as {not_checked?:unknown}).not_checked;
+        schedulingEvidence.push({tool:'get_free_busy',busy,not_checked:missing,
+          scope:'Raw per-person busy intervals. Meeting feasibility also requires the normal slot validator.'});
       }
       if (result && typeof result === 'object' && /^(?:create_meeting|move_meeting|update_meeting|hold_slot|resolve_approval|create_approval|find_available_slots|check_join_availability)$/.test(toolUse.name)) {
         // Operational instructions and private event objects do not belong
@@ -1534,9 +1545,11 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         }
         for (const key of ['success','ok','booked','booked_start','booked_end','action_summary','clock_display','presentation_local',
           'availability_scope','other_participants','owner_notified','requester_notify_outcome','broken_rule','reason','error',
-          'can_join','start_iso','end_iso','expires_at','access_mode','state','effect','requester_notice','unchanged','moved','attendee_conflict_disposition']) {
+          'can_join','start_iso','end_iso','expires_at','access_mode','state','effect','requester_notice','unchanged','moved','attendee_conflict_disposition','requester_invited']) {
           if (typeof raw[key] === 'string' || typeof raw[key] === 'boolean') facts[key] = raw[key];
         }
+        if (toolUse.name === 'create_meeting' && raw.success === true && raw.duration_preset) facts.duration_preset = raw.duration_preset;
+        if (toolUse.name === 'create_meeting' && raw.success === true && Array.isArray(raw.invited_attendees)) facts.invited_attendees = raw.invited_attendees;
         if (toolUse.name === 'resolve_approval' && privateOwnerRead) {
           for (const key of ['subject','start','end']) if (typeof raw[key] === 'string') facts[key] = raw[key];
           if (typeof raw.start === 'string') {
@@ -1577,7 +1590,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           // A receipt that merely says "checked" cannot support a time or a conflict claim.
           for (const key of ['slots','results'] as const) {
             if (Array.isArray(raw[key])) facts[key] = raw[key].map(slot => ({
-              start:slot.start, end:slot.end, available:slot.available, presentation_local:slot.presentation_local,
+              start:slot.start, end:slot.end, available:slot.available, owner_available:slot.owner_available, presentation_local:slot.presentation_local,
               reasons:slot.broken_rules ?? slot.broken_rule, held:!!slot.on_hold,
               conflicts:slot.attendee_conflicts?.map((person:{email:string;reason:string;line:string})=>({email:person.email,reason:person.reason,line:person.line})),
               attendees:slot.attendee_status?.map((person:{email:string;status:string;kind:string}) => ({

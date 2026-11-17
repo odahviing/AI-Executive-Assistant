@@ -1,6 +1,18 @@
 // Retained identity/authority regressions; canonical-store cases live in test-canonical-person-memory.cjs.
 const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
 const {harness,chris}=require('./person-memory-test-harness.cjs');
+test('the owner’s scheduling timezone comes from the live profile while other people retain their records',async()=>{
+  const h=harness([{slack_id:'UOWNER99',name:'Owner Example',email:'owner@example.com',timezone:'Asia/Jerusalem'},chris]);
+  h.profile.user.timezone='America/New_York';
+  h.profile.schedule={work_hours:{Wednesday:'05:30-14:30'}};
+  const owner=await h.tool('get_person_memory',{person:'Owner Example'},'owner');
+  assert.equal(owner.timezone,'America/New_York');
+  assert.equal(owner.timezone_set_by,'owner_config');
+  assert.deepEqual(owner.owner_schedule,h.profile.schedule);
+  const person=await h.tool('get_person_memory',{person:chris.name},'owner');
+  assert.equal(person.owner_schedule,undefined);
+  assert.equal(h.p().getPersonMemory('UOWNER99').timezone,'Asia/Jerusalem');
+});
 test('I1 substring and conflicting email never bind',()=>{
   const h=harness([{name:'Idan Cohen',email:'idan@example.com'},{name:'Chris Ray',email:'one@example.com'}]);
   assert.equal(h.p().resolvePerson({name:'Dan'}),null);

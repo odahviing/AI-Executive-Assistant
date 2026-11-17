@@ -692,10 +692,10 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // each candidate's own real verdict instead so the slot-grounding
         // check (and the claim-checker generally) has real ground truth.
         if (result && typeof result === 'object' && (result as any).mode === 'candidate_validation') {
-          const results: Array<{ start?: string; end?: string; available?: boolean; broken_rule?: string; broken_rule_label?: string }> =
+          const results: Array<{ start?: string; end?: string; available?: boolean; owner_available?:boolean; broken_rule?: string; broken_rule_label?: string }> =
             Array.isArray((result as any).results) ? (result as any).results : [];
           const durCV = (result as any).duration_minutes ?? (input as any).duration_minutes;
-          const parts = results.map(r => `${fmt(r)} ${verdictWord(r)}`);
+          const parts = results.map(r => `${fmt(r)} ${verdictWord(r)}${typeof r.owner_available==='boolean' ? ' owner_available='+r.owner_available : ''}`);
           return `[find_available_slots candidate_validation dur=${durCV}m: ${parts.join(', ')}${scopeNote}]`;
         }
 
@@ -977,9 +977,12 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
             ? ((result as { added_attendees: unknown[] }).added_attendees.filter(e => typeof e === 'string') as string[])
             : [];
           const addedPart = addedEmails.length ? ` [added: ${addedEmails.join(', ')}]` : '';
+          const invited = (result as {invited_attendees?:Array<{email?:string}>}).invited_attendees;
+          const invitedEmails = Array.isArray(invited) ? invited.map(person=>person.email).filter(Boolean) : [];
+          const invitedPart = invitedEmails.length ? ` [invited: ${invitedEmails.join(', ')}]` : '';
           return changes
-            ? `[${toolName} OK — ${changes}${localPart}${addedPart}${busyNotePart}${movedBlocksPart}${idPart}]`
-            : `[${toolName} OK ${String((input as any).new_subject ?? (input as any).meeting_subject ?? '').slice(0, 40)}${localPart}${addedPart}${busyNotePart}${movedBlocksPart}${idPart}]`;
+            ? `[${toolName} OK — ${changes}${localPart}${addedPart}${invitedPart}${busyNotePart}${movedBlocksPart}${idPart}]`
+            : `[${toolName} OK ${String((input as any).new_subject ?? (input as any).meeting_subject ?? '').slice(0, 40)}${localPart}${addedPart}${invitedPart}${busyNotePart}${movedBlocksPart}${idPart}]`;
         }
 
         // v3.4.2 (NEW-1) — NEVER fall back to meeting_id here. It was rendered

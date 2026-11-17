@@ -813,6 +813,18 @@ async function requestOutcomeEvidence(ctx: OutputGateContext): Promise<{
   return { context: 'unavailable' };
 }
 
+/** Report only this turn's verified result when a prose repair cannot complete. */
+async function confirmedOutcomeFallback(ctx:OutputGateContext, message:string):Promise<string|undefined> {
+  if (ctx.transport==='email' || ctx.isMpim || ctx.isChannel || !/^D[A-Z0-9]+$/.test(ctx.channelId)) return;
+  const {confirmedBookingNotice,pendingApprovalNotice} = await import('../claimChecker');
+  const booking = confirmedBookingNotice(message,ctx.result.mutationActions,ctx.profile.user.timezone);
+  if (booking) return booking;
+  if (ctx.result.notifiedApprovalId) {
+    const evidence = await requestOutcomeEvidence(ctx);
+    if (evidence.pendingForRequester) return pendingApprovalNotice(message,ctx.profile.user.name.split(' ')[0],evidence.pendingForRequester);
+  }
+}
+
 /** Shared receipt safeguards for action verdicts, independent of checker mode. */
 function actionClaimEvidence(ctx: OutputGateContext, verdict: import('../claimChecker').ClaimCheckResult) {
   const { profile, result } = ctx;
@@ -978,7 +990,7 @@ async function runClaimCheckAndMaybeRewrite(
     // in the system prompt. Only RULE A (claimed_action — false action claim)
     // drives retries from here.
     if (verdict.failed_open) return cleanReply === originalDraft
-      ? cleanReply : genericHonestHedge(originalDraft, isOwnerDirectAudience(ctx));
+      ? cleanReply : (await confirmedOutcomeFallback(ctx,originalDraft)) ?? genericHonestHedge(originalDraft, isOwnerDirectAudience(ctx));
     if (!verdict.claimed_action) return cleanReply;
     // Approval truth is now request-specific. Never infer a grant from any
     // resolved row or substitute a generative rewrite for a missing decision.
@@ -1068,7 +1080,8 @@ async function runClaimCheckAndMaybeRewrite(
       // twice. The rewrite is still made visible to the owner where it always was:
       // the warn above.
       if (rewritten && rewritten.trim().length > 0) {
-        cleanReply = normalizeForTransport(ctx, rewritten);
+        cleanReply = normalizeForTransport(ctx,rewritten === genericHonestHedge(cleanReply,isOwnerDirectAudience(ctx))
+          ? (await confirmedOutcomeFallback(ctx,originalDraft)) ?? rewritten : rewritten);
 
       }
     } catch (rwErr) {
@@ -1239,7 +1252,10 @@ async function runOwnerFactCheckAndMaybeRewrite(
         && !/^\[find_available_slots FAILED:/.test(line) && / calendars_read=/.test(line))
       : [];
     const requestEvidence = await requestOutcomeEvidence(ctx);
-    const finalOutcomeContext = `Requests: ${requestEvidence.context}. Earlier tool receipts: ${JSON.stringify(latestSummaries)}`;
+    let readerEmail:string | undefined;
+    try { readerEmail = (await import('../../db/people')).getPersonMemory(ctx.senderId)?.email ?? undefined; }
+    catch { /* The check can still use the authenticated reader's name and receipts. */ }
+    const finalOutcomeContext = `Reader: ${ctx.colleagueName ?? ctx.senderId}, email=${readerEmail ?? 'unknown'}. Owner: ${profile.user.name}, email=${profile.user.email}. Requests: ${requestEvidence.context}. Earlier tool receipts: ${JSON.stringify(latestSummaries)}`;
     const verdict = await checkReplyClaims({
       reply: cleanReply,
       toolSummaries: result.toolSummaries ?? [],
@@ -1254,7 +1270,7 @@ async function runOwnerFactCheckAndMaybeRewrite(
     // Unknown is distinct from clear. Preserve an unchanged legitimate reply;
     // never accept an unverified semantic rewrite when the check is unavailable.
     if (verdict.failed_open) return cleanReply === originalDraft
-      ? cleanReply : genericHonestHedge(originalDraft, isOwnerDirectAudience(ctx));
+      ? cleanReply : (await confirmedOutcomeFallback(ctx,originalDraft)) ?? genericHonestHedge(originalDraft, isOwnerDirectAudience(ctx));
     if (!verdict.claimed_action) return cleanReply;
     if (['permission_granted', 'book', 'message', 'task'].includes(verdict.action_type ?? '')) {
       // A grant is request-specific, never established by a mutation receipt.
@@ -1281,7 +1297,7 @@ async function runOwnerFactCheckAndMaybeRewrite(
         && !ctx.isChannel && !ctx.isMpim && observed && cleanReply.includes(observed.subject)) return observed.reply;
       const failedBooking = !result.bookingOccurred && (result.toolSummaries ?? [])
         .some(line => line.startsWith('[create_meeting FAILED:'));
-      return genericHonestHedge(cleanReply, isOwnerDirectAudience(ctx), failedBooking);
+      return (await confirmedOutcomeFallback(ctx,originalDraft)) ?? genericHonestHedge(cleanReply, isOwnerDirectAudience(ctx), failedBooking);
     }
 
     let rewriteSummaries = result.toolSummaries ?? [];
@@ -1324,10 +1340,12 @@ async function runOwnerFactCheckAndMaybeRewrite(
       targetName: verdict.target_name,
       ownerFirstName: profile.user.name.split(' ')[0],
       toolSummaries: rewriteSummaries,
+      groundedToolLines:verdict.action_type==='ungrounded_slot_claim' ? [...rewriteSummaries,...priorTurnAvailabilityLines(ctx)] : undefined,
       isOwnerAudience: isOwnerDirectAudience(ctx),
     });
     if (rewritten && rewritten.trim().length > 0) {
-      cleanReply = normalizeForTransport(ctx, rewritten);
+      cleanReply = normalizeForTransport(ctx,rewritten === genericHonestHedge(cleanReply,isOwnerDirectAudience(ctx))
+        ? (await confirmedOutcomeFallback(ctx,originalDraft)) ?? rewritten : rewritten);
     }
   } catch (err) {
     logger.warn('Owner-fact check threw — leaving draft unchanged', { err: String(err).slice(0, 200) });

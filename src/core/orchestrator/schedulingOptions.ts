@@ -44,11 +44,15 @@ export function renderSchedulingParts(parts:unknown, options:Map<number,Option>)
   if (!Array.isArray(parts) || !parts.length) return;
   const output:string[] = [];
   for (const part of parts) {
-    if (typeof part?.text === 'string' && part.text.trim() && part.options === undefined) {
+    if (part?.text !== undefined && typeof part.text !== 'string') return;
+    if (typeof part?.text === 'string' && part.text.trim()) {
       output.push(part.text.trim());
+    }
+    if (part?.options === undefined) {
+      if (!part?.text?.trim()) return;
       continue;
     }
-    if (part?.text !== undefined || !Array.isArray(part?.options) || !part.options.length) return;
+    if (!Array.isArray(part.options) || !part.options.length) return;
     const rows:Option[] = [];
     for (const id of new Set<number>(part.options)) {
       const row = options.get(id);

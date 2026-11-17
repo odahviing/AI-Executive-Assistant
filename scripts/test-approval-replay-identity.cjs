@@ -300,3 +300,30 @@ test('a new contact approval stays separate from a pending calendar exception fr
   assert.equal(h.effects.creates[0].subkind, 'unknown_person');
   assert.equal(h.effects.executes.length, 0);
 });
+
+test('one calendar request retains its approval identity when the title changes',async()=>{
+  const id='meeting-request-1';
+  const h=harness({semanticRepeat:true,details:{meeting_request_id:id}});
+  const action={tool:'create_meeting',args:{subject:'Corrected subject',start:'2026-09-20T12:00:00Z',end:'2026-09-20T12:25:00Z'}};
+  const r=await h.create({...action.args,attendees:[{email:'paul@example.test'}],subject:'Corrected subject',rule:'Needs owner decision',context:'Correction to the same booking',deferred_action:action},{meetingRequestId:id},{kind:'policy_exception'});
+  assert.equal(r.reused_existing,true,JSON.stringify(r));
+  assert.equal(h.effects.creates.length,0);
+  assert.equal(h.effects.judges.length,0);
+  assert.equal(JSON.parse(h.row().details_json).deferred_action.args.subject,'Corrected subject');
+  assert.equal(JSON.parse(h.row().details_json).meeting_request_id,id);
+  assert.equal(h.effects.ownerPosts.length,1);
+});
+test('a distinct calendar request cannot merge with a prior identified request through prose dedup',async()=>{
+  const h=harness({semanticRepeat:true,details:{meeting_request_id:'old-request'}});
+  const action={tool:'create_meeting',args:{subject:'Another meeting',start:'2026-09-21T12:00:00Z',end:'2026-09-21T12:25:00Z'}};
+  const r=await h.create({...action.args,attendees:[{email:'paul@example.test'}],subject:'Another meeting',rule:'Needs owner decision',context:'A separate booking',deferred_action:action},{meetingRequestId:'new-request'},{kind:'policy_exception'});
+  assert.equal(r.created,true,JSON.stringify(r));
+  assert.equal(h.effects.creates.length,1);
+  assert.equal(h.effects.judges.length,0);
+  assert.equal(JSON.parse(h.row().details_json).meeting_request_id,'new-request');
+});
+test('a model-provided meeting request identity is removed without authenticated context',async()=>{
+  const h=harness();
+  await h.create({subject:'Another question',meeting_request_id:'forged'});
+  assert.equal(JSON.parse(h.row().details_json).meeting_request_id,undefined);
+});

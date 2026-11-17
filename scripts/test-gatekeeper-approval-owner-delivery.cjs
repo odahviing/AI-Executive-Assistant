@@ -61,6 +61,7 @@ function loadGate({ verdict, rewrite = 'I did not send that yet.' } = {}) {
   const claimChecker = {
     checkReplyClaims: async () => { calls.check++; return verdict; },
     rewriteOwningTheMiss: async () => { calls.rewrite++; return rewrite; },
+    genericHonestHedge: () => "I don't have confirmed information about that.",
   };
   const deps = {
     '../../llm/client': { getAnthropicClient: () => ({ messages: { create: async () => { throw new Error('forbidden LLM call'); } } }) },

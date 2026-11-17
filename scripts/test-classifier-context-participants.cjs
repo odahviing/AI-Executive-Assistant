@@ -173,7 +173,7 @@ test('one colleague classification carries a selected internal hold separately f
   const schema = captured.tools[0].input_schema;
   assert.ok(schema.properties.meeting_action.enum.includes('hold'));
   assert.ok(schema.required.includes('meeting_action'));
-  assert.match(captured.system, /previously offered slot internally now/);
+  assert.match(captured.system, /reserve a specific time internally now/);
   assert.match(captured.system, /actual calendar invitation is execute/);
   assert.match(captured.system, /colleague already sent it, is scheduling status \(explore\)/);
 });
@@ -480,10 +480,11 @@ for (const [label,scopeChanges] of [
   });
 }
 for (const message of ['Yes','כן','thanks','']) {
-  test('established zero-call shortcut retained: '+JSON.stringify(message),async()=>{
+  test('pending approval keeps contextual interpretation for nonempty replies: '+JSON.stringify(message),async()=>{
     const {result,calls} = await run(acceptance(message),{...currentBooking,message});
-    assert.equal(calls,0);
-    assert.equal(result.standaloneApprovalQuote,undefined);
+    const accepts = message === 'Yes' || message === 'כן';
+    assert.equal(calls,accepts ? 1 : 0);
+    assert.equal(result.standaloneApprovalQuote,accepts ? message : undefined);
   });
 }
 for (const [label,response] of [
@@ -496,3 +497,33 @@ for (const [label,response] of [
     assert.equal(result.standaloneApprovalQuote,undefined);
   });
 }
+
+test('an explicit new hold time proceeds to the current availability check without an earlier offer', async () => {
+  const message='תשמרי לי את 17:15 כרגע, ביום רביעי אגיד אם המועמד עבר.';
+  const {result}=await run({meeting_action:'hold',requested_hold_quote:message},{senderRole:'colleague',message});
+  assert.equal(result.meetingAction,'hold');
+  assert.equal(result.requestedHoldQuote,message);
+  assert.equal(result.unresolvedHoldSelection,false);
+  assert.equal(result.selectedHoldCandidateIndices,undefined);
+});
+for(const [label,message,quote] of [
+  ['invented source','Hold 17:15 now','Hold 17:45 now'],
+  ['no concrete clock','Hold the other one','Hold the other one'],
+  ['ambiguous alternatives','Hold 17:15 or 17:45','Hold 17:15 or 17:45'],
+]) test('new hold needs a single quoted clock: '+label,async()=>{
+  const {result}=await run({meeting_action:'hold',requested_hold_quote:quote},{senderRole:'colleague',message});
+  assert.equal(result.meetingAction,'explore');
+  assert.equal(result.requestedHoldQuote,undefined);
+});
+test('participant correction binds the old group member to a current human quote',async()=>{
+  const correction={group:0,from:'Ayalla',to:'Ayala',quote:'2. Ayala is better'};
+  const {result}=await run({meeting_action:'execute',participant_corrections:[correction]},
+    {message:'2. Ayala is better',priorMeetingRequest:{participantGroups:[['Ayalla','Idan'],['Alex','Idan']]}});
+  assert.deepEqual(result.participantCorrections,[correction]);
+});
+for(const patch of [{group:1},{from:'Other'},{to:'Alex'},{quote:'not in message'}]) test('participant correction rejects ungrounded change '+JSON.stringify(patch),async()=>{
+  const correction={group:0,from:'Ayalla',to:'Ayala',quote:'2. Ayala is better',...patch};
+  const {result}=await run({meeting_action:'execute',participant_corrections:[correction]},
+    {message:'2. Ayala is better',priorMeetingRequest:{participantGroups:[['Ayalla','Idan'],['Alex','Idan']]}});
+  assert.deepEqual(result.participantCorrections,[]);
+});

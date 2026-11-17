@@ -410,6 +410,7 @@ export async function createApprovalRequest(
         // Routing state is code-authored, never a caller's cap-exemption claim.
         if (payload.rule === 'freeform_needs_clarification') delete payload.rule;
         delete payload.organizer_invitation;
+        delete payload.meeting_request_id;
         if (handoff?.existingInviteDecision && subkind === 'freeform') payload.organizer_invitation = true;
         const askText = args.ask_text as string;
         const replacementId = handoff?.replacingOutreachRequestId;
@@ -612,6 +613,10 @@ export async function createApprovalRequest(
         // Already bound to the authenticated caller (or owner-nominated recipient)
         // above, before dedup, persistence and requester-dependent lookups.
         const requesterSlackId = typeof payload.requester_slack_id === 'string' ? payload.requester_slack_id : undefined;
+        const meetingRequestId = context.surface === 'colleague_dm' && context.authority === 'colleague'
+          && requesterSlackId === context.userId && context.meetingRequestId && approvalAction
+          ? context.meetingRequestId : undefined;
+        if (meetingRequestId) payload.meeting_request_id = meetingRequestId;
         // v2.9.4 (#107d) — when Sonnet doesn't pass requester_name, auto-populate
         // it from people_memory using requester_slack_id. Pre-fix the row stored
         // requester_name=null, and `notifyRequesterOfDecision` rendered "Hey"
@@ -950,6 +955,8 @@ export async function createApprovalRequest(
         };
         const keyForApproval = (): string => {
           const parts = {ownerUserId, requesterSlackId: requesterSlackId ?? null, subject};
+          if (meetingRequestId) return buildIdempotencyKey({...parts,subject:meetingRequestId,
+            kind:'approval:' + subkind + ':' + approvalAction!.tool + ':' + channelId + ':' + (threadTs ?? '')});
           const legacyKey = buildIdempotencyKey({...parts, kind:'approval'});
           const legacy = getRequestByIdempotencyKey(legacyKey);
           if (legacy && sameApprovalOperation(legacy)) return legacyKey;
@@ -971,8 +978,17 @@ export async function createApprovalRequest(
             ORDER BY created_at DESC
             LIMIT 8
           `).all(ownerUserId, requesterSlackId) as RequestRow[];
-          const candidates = rows.filter(sameApprovalOperation);
-          if (candidates.length > 0) {
+          // The conversation's stable request identity survives corrections to
+          // title, time and attendees. Those edits refresh one approval. Separate
+          // requests keep separate decisions, even if their prose looks alike.
+          const candidates = rows.filter(row => sameApprovalOperation(row)
+            && (!meetingRequestId || !parseDetails(row)?.meeting_request_id
+              || parseDetails(row)?.meeting_request_id === meetingRequestId));
+          const bound = meetingRequestId && candidates.find(row => row.state === 'awaiting_owner'
+            && row.origin_channel === channelId && (row.origin_thread_ts ?? '') === (threadTs ?? '')
+            && parseDetails(row)?.meeting_request_id === meetingRequestId);
+          if (bound) existingId = bound.id;
+          if (!existingId && candidates.length > 0) {
             const judged = await judgeRequestDedup({
               proposed: { kind: 'approval', subkind, subject, description: askText },
               candidates,
@@ -1181,7 +1197,7 @@ export async function createApprovalRequest(
           // made. Best-effort: a collision with a different open row's key is
           // left alone (logged) rather than crashing this tool call over a
           // low-stakes housekeeping update.
-          if (row.subject !== subject) {
+          if (row.subject !== subject || meetingRequestId) {
             try {
               const refreshedKey = keyForApproval();
               if (refreshedKey !== row.idempotency_key) {

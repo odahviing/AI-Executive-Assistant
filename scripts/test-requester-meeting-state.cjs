@@ -8,7 +8,7 @@ function fixture(rows=[],holds=[]){
   const file=path.join(__dirname,'../src/core/orchestrator/requesterMeetingState.ts');
   const js=ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
   const deps={
-    '../../db/requests':{getOpenRequestsForThread:()=>rows},
+    '../../db/requests':{getOpenRequestsForColleague:()=>rows},
     '../../db/slotHolds':{getActiveSlotHolds:()=>holds},
     '../requests/types':{parseDetails:row=>JSON.parse(row.details_json)},
     '../approvals/approvalCallbacks':{extractCallbacks:d=>d.callbacks??{on_approve:d.deferred_action}},
@@ -39,18 +39,23 @@ test('counter terms replace the original pending time without claiming a booking
   assert.equal(result.approvals[0].state,'awaiting_colleague');
   assert.equal(result.approvals[0].ownerNotificationDelivered,false);
 });
-test('other people, owners, rooms, threads, terminal requests and unrelated tasks are excluded',()=>{
-  const changes=[{requester_slack_id:'UOTHER'},{owner_user_id:'UOTHER'},{origin_channel:'DOTHER'},
-    {origin_thread_ts:'other'},{kind:'task'},{state:'resolved'},
+test('other people, owners, rooms, terminal requests and unrelated tasks are excluded',()=>{
+  const changes=[{requester_slack_id:'UOTHER'},{owner_user_id:'UOTHER'},{kind:'task'},{state:'resolved'},
     {details_json:JSON.stringify({deferred_action:{tool:'send_email',args:{}}})}];
   const state=fixture(changes.map(change=>({...request,...change})));
   assert.deepEqual(state('UOWNER','UPEER','DPEER','thread'),{approvals:[],holds:[]});
   assert.equal(state('UOWNER','UOWNER','DOWNER','thread'),undefined);
   assert.equal(state('UOWNER','UPEER','CROOM','thread'),undefined);
 });
-test('holds are scoped to the authenticated holder and originating conversation',()=>{
+test('holds follow the authenticated holder across conversations',()=>{
   const hold={holder_slack_id:'UPEER',origin_channel:'DPEER',origin_thread_ts:'thread',subject:'Interview',
     start_iso:'2026-12-01T15:00:00Z',end_iso:'2026-12-01T15:25:00Z',expires_at:'2026-11-30T15:00:00Z'};
   const state=fixture([],[hold,{...hold,holder_slack_id:'UOTHER'},{...hold,origin_thread_ts:'other'}]);
-  assert.deepEqual(state('UOWNER','UPEER','DPEER','thread').holds,[{subject:hold.subject,start:hold.start_iso,end:hold.end_iso,expires:hold.expires_at}]);
+  assert.deepEqual(state('UOWNER','UPEER','DPEER','thread').holds,[{subject:hold.subject,start:hold.start_iso,end:hold.end_iso,expires:hold.expires_at},{subject:hold.subject,start:hold.start_iso,end:hold.end_iso,expires:hold.expires_at}]);
+});
+
+
+test('a requester can follow the same pending decision from a new private conversation',()=>{
+  const state=fixture([{...request,origin_channel:'DOLDER',origin_thread_ts:'older'}]);
+  assert.equal(state('UOWNER','UPEER','DPEER','thread').approvals.length,1);
 });

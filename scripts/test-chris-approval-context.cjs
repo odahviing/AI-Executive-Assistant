@@ -79,9 +79,9 @@ test('stored counter supplies actual effective action snapshot',async t=>{
  const f=approvalFixture(t,{approval_decisions:accepted},{rows:changed});const r=await f.run({userMessage:message,conversationHistory:conversation});
  assert.equal(r.contextualApprovalDecisions[0].action.args.start,'2026-11-16T15:50:00');assert.equal(r.contextualApprovalDecisions[0].requestDetailsJson,changed[0].details_json);
 });
-test('bare yes with two pending requests remains unbound without classifier call',async t=>{
+test('bare yes with two pending requests is classified and remains unbound without valid evidence',async t=>{
  const f=approvalFixture(t,{approval_decisions:accepted});const r=await f.run({userMessage:'yes',conversationHistory:conversation});
- assert.equal(r.contextualApprovalDecisions,undefined);assert.equal(f.requests.length,0);
+ assert.equal(r.contextualApprovalDecisions,undefined);assert.equal(f.requests.length,1);
 });
 for(const [label,raw] of [['unknown index',[{...accepted[0],candidateIndex:99}]],['invented instruction',[{...accepted[0],instructionQuote:'approve both'}]],['invented source',[{...accepted[0],sourceQuote:'invented Adam'}]],['duplicate',[accepted[0],accepted[0]]],['invalid disposition',[{...accepted[0],disposition:'approve'}]],['malformed','Adam']]) test(label+' produces no decision evidence',async t=>{
  const f=approvalFixture(t,{approval_decisions:raw});const r=await f.run({userMessage:message,conversationHistory:conversation});assert.ok(!r.contextualApprovalDecisions?.length);
