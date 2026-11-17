@@ -276,7 +276,7 @@ Binding rules (critical):
     ? (() => {
         const awaitingOwnerLines: string[] = [];
         const amendingLines: string[] = [];
-        for (const r of pendingRequests.slice(0, 5)) {
+        for (const r of pendingRequests.slice(-5)) {
           const det = parseDetails<Record<string, unknown>>(r) ?? {};
           const subject = r.subject ? `"${r.subject}"` : `(${r.subkind ?? r.kind})`;
           const slotsArr = Array.isArray(det.slots) ? (det.slots as any[]) : [];
@@ -308,7 +308,7 @@ Do NOT re-raise these. If the colleague's current message is just acknowledging 
           sections.push(`AMENDING APPROVALS — ${firstName} GAVE A COUNTER, WAITING ON COLLEAGUE:
 ${amendingLines.join('\n')}
 
-The colleague's current reply is responding to ${firstName}'s counter offer. Pick which:
+For a reply clearly about one of these counters, apply the colleague's decision below. For a new question, another meeting or a status inquiry, answer that request and leave the counter pending.
 - Colleague says yes / "works for me" / "ok, let's do it" → call resolve_approval(approval_id, verdict='approve'). The resolver fires ${firstName}'s on_approve with the counter merged in.
 - Colleague says no / "can't do that time" / "won't work" → call resolve_approval(approval_id, verdict='reject', reason=...). The resolver closes and ${firstName} gets a tombstone DM with the reason.
 - Colleague counters again ("how about 15:00 instead?") → call resolve_approval(approval_id, verdict='amend', counter={slot_iso: ..., or other key}, reason=...). The request bounces back to ${firstName}.`);

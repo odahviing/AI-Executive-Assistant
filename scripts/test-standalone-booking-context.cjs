@@ -55,7 +55,7 @@ function setup(t, { text = 'Sí', quote = text, held = false, others = [], input
   } };
 }
 
-for (const text of ['Sí', 'Да', 'Ja', 'نعم', 'Yes, please.', 'Yes', 'כן']) {
+for (const text of ['OK', 'ok', 'yes', 'Yes.', 'Sí', 'Да', 'Ja', 'نعم', 'Yes, please.', 'Yes', 'כן']) {
   test('private owner reply replays the displayed booking once: ' + text, async t => {
     const { booking, resolve } = setup(t, { text, input: { extraInstruction: 'Resolve only the current thread request.' } });
     assert.equal((await resolve()).ok, true);

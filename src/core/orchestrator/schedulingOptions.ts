@@ -31,7 +31,7 @@ export function schedulingOptions(results: Array<Record<string, unknown>>, owner
       let alternate = '';
       if (isOwner && local !== home) alternate = local;
       const id = options.size + 1;
-      const qualifications = JSON.stringify([slot.reasons,slot.attendees,slot.preference,end.diff(start,'minutes').minutes]);
+      const qualifications = JSON.stringify([slot.reasons,slot.attendees,slot.conflicts,slot.preference,end.diff(start,'minutes').minutes]);
       options.set(id,{id,search,start:start.toMillis(),day:parts[1] + ' (' + zone + ')',clock,alternate,qualifications});
       return {...slot,option:id};
     });
@@ -54,6 +54,12 @@ export function renderSchedulingParts(parts:unknown, options:Map<number,Option>)
       const row = options.get(id);
       if (!row || (rows.length && (row.search !== rows[0].search || row.qualifications !== rows[0].qualifications))) return;
       rows.push(row);
+    }
+    // A selected group represents this search's equivalent viable choices.
+    // Retain every returned choice with those same attendee qualifications.
+    for (const row of options.values()) {
+      if (row.search===rows[0].search && row.qualifications===rows[0].qualifications
+        && !rows.some(selected=>selected.id===row.id)) rows.push(row);
     }
     const groups = new Map<string, string[]>();
     for (const row of rows.sort((a,b)=>a.start-b.start)) {

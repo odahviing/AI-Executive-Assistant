@@ -81,7 +81,7 @@ function harness(t, options = {}) {
   }
   const sweep = () => load('src/core/background.ts').sweepExpiredSlotHolds(options.profileMissing ? new Map() : new Map([['UOWNER', profile]]));
   const row = id => sqlite.prepare('SELECT * FROM slot_holds WHERE id = ?').get(id);
-  return { hold, sweep, row, posts, delivered, logs, calls };
+  return { hold, sweep, row, posts, delivered, logs, calls, holds:load('src/db/slotHolds.ts') };
 }
 async function expiredOnce(h, hold) {
   await h.sweep();
@@ -92,6 +92,17 @@ async function expiredOnce(h, hold) {
   await h.sweep(); // terminal row prevents repeated notifications after restart/tick
   assert.equal(h.posts.length, count);
 }
+test('unswept expired holds release availability and both caps immediately', t => {
+  const h=harness(t);
+  h.hold();
+  assert.equal(h.holds.getActiveSlotHolds('UOWNER').length,0);
+  assert.equal(h.holds.countActiveHoldsForHolder('UOWNER','UCOLLEAGUE'),0);
+  assert.equal(h.holds.countActiveHoldsForHolderSubject('UOWNER','UCOLLEAGUE','Planning'),0);
+  h.hold({expiresAt:'2099-01-01T11:00:00Z'});
+  assert.equal(h.holds.getActiveSlotHolds('UOWNER').length,1);
+  assert.equal(h.holds.countActiveHoldsForHolder('UOWNER','UCOLLEAGUE'),1);
+  assert.equal(h.holds.countActiveHoldsForHolderSubject('UOWNER','UCOLLEAGUE','Planning'),1);
+});
 for (const [name, originChannel, originThreadTs] of [
   ['public-room', 'CROOM', '900.000001'], ['group-dm', 'GROOM', '800.000001'],
   ['other-person-dm', 'DOWNER', '200.000001'], ['missing-channel', null, '900.000001'],

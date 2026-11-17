@@ -438,6 +438,8 @@ export async function buildTurnContext(input: OrchestratorInput) {
           requiredDay:previous?.requiredDay,
           bookingInstruction:previous?.bookingInstruction,
           individualSearchEmails:previous?.individualSearchEmails,
+          requesterPair:!batch && input.surface==='colleague_dm' && turnResult.requesterPair === true,
+          participantGroups:previous?.participantGroups,
           clockZone:batch ? undefined : update.clockZone && text.includes(update.clockZone.quote) ? update.clockZone : previous?.clockZone,
           duration: batch ? undefined : update.duration && text.includes(update.duration.quote) ? update.duration : previous?.duration,
         };
@@ -635,6 +637,16 @@ export async function buildTurnContext(input: OrchestratorInput) {
           )]).filter(group => group.length > 0);
           const covered = new Set(groups.flat().map(normalize));
           meetingPeopleGroups = [...accepted].every(name => covered.has(name)) ? groups : [];
+        }
+        if (meetingRequest && turnResult.participantsUnchanged && turnResult.meetingContinuation && requestUpdate?.relation==='continue'
+          && !currentMessageMeetingPeople.length && meetingRequest.participantGroups?.length) {
+          // A date, duration or address answer keeps the participants of the
+          // same request. The stored names came from authenticated human text.
+          meetingPeopleGroups = meetingRequest.participantGroups.map(group=>[...group]);
+          turnMeetingPeople = [...new Set(meetingPeopleGroups.flat())];
+        }
+        if (meetingRequest && meetingPeopleGroups?.length) {
+          meetingRequest.participantGroups = meetingPeopleGroups.map(group=>[...group]);
         }
       }
       // v3.x (Block 3 — calendar prose lazy-load). A free-time / buffer / "how
@@ -1683,7 +1695,20 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
 
   const schedulingDm = !!meetingRequest && input.channel === 'slack' && !input.isChannel && !input.isMpim && input.authority === 'colleague'
     && input.surface === 'colleague_dm' && !input.images?.length && !input.forceToolOnFirstTurn;
-  const staticInstructions = schedulingDm
+  let priorMeetingState:ReturnType<typeof import('./requesterMeetingState').requesterMeetingState>;
+  if (input.channel==='slack' && input.surface==='colleague_dm' && input.authority==='colleague'
+    && !input.isChannel && !input.isMpim && input.userId && input.channelId && threadTs) {
+    try {
+      priorMeetingState = (await import('./requesterMeetingState')).requesterMeetingState(profile.user.slack_user_id,input.userId,input.channelId,threadTs);
+    } catch (err) { logger.warn('Requester meeting state unavailable',{threadTs,error:String(err).slice(0,120)}); }
+  }
+  const ownerSchedulingDm = (meetingRequest || standaloneBookingApproval || contextualApprovalDecisions?.length)
+    && input.channel==='slack' && input.surface==='owner_dm' && input.authority==='owner'
+    && input.userId===profile.user.slack_user_id && !input.isChannel && !input.isMpim
+    && !input.images?.length && !input.forceToolOnFirstTurn && !input.proseOnly && !input.extraInstruction;
+  const staticInstructions = ownerSchedulingDm
+    ? (await import('./ownerSchedulingPrompt')).ownerSchedulingPrompt(profile.user.name,profile.assistant.name,profile.meetings?.default_meeting_duration ?? 25) + '\n\n' + promptParts.audienceRules
+    : schedulingDm
     ? (await import('./colleagueSchedulingPrompt')).colleagueSchedulingPrompt(profile.user.name, profile.assistant.name, profile.meetings?.default_meeting_duration ?? 25) + '\n\n' + promptParts.audienceRules
     : promptParts.static;
   const systemBlocks: Anthropic.TextBlockParam[] = staticInstructions
@@ -1692,6 +1717,10 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
         { type: 'text', text: systemBlocksDynamic } as Anthropic.TextBlockParam,
       ]
     : [{ type: 'text', text: systemBlocksDynamic } as Anthropic.TextBlockParam];
+  if (priorMeetingState && (priorMeetingState.approvals.length || priorMeetingState.holds.length)) {
+    systemBlocks.push({type:'text',text:'Open calendar decisions and holds belonging to this requester in this conversation: '+JSON.stringify(priorMeetingState)+
+      '. Match the current request by meeting and time. A shorter fallback leaves the original pending unless the person asks to replace it. A pending decision about another meeting does not require another approval or prevent a new search.'});
+  }
 
   // v2.7.7 (Module G) — intent-aware tool scoping. `toolScopes` was resolved
   // in the v3.0.6 merged classifier pre-pass above (classifyTurn), gated on
@@ -1916,6 +1945,7 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     firmWindowBooking,
     searchBeforeReply,
     decisionReportLocale,
+    priorMeetingState,
     requestedOptionCount,
     consultOwnerQuote,
     consultBackground,

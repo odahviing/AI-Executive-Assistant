@@ -241,11 +241,22 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // bare {name} with no email) recovers the single known meeting roster;
         // multiple or incomplete groups require a unique explicit match.
         const callerNamedAnAttendee = attendees.length > 0;
-        const resolvedAttendees = !callerNamedAnAttendee ? []
+        let resolvedAttendees = !callerNamedAnAttendee ? []
           : context.resolvedMeetingAttendeeGroups === undefined
             ? context.resolvedMeetingAttendees ?? []
             : meetingScopedAttendees(context.resolvedMeetingAttendeeGroups,
                 attendees.map(a => a.email ?? '').filter(Boolean), userEmail, getPersonMemory(context.userId)?.email);
+        // An incomplete partition can include the company mentioned in the
+        // meeting subject. It cannot displace a positively identified 1:1.
+        if (resolvedAttendees === null && context.meetingRequestId && context.requesterPair
+          && context.authority === 'colleague' && context.surface === 'colleague_dm'
+          && context.userId !== context.profile.user.slack_user_id && args.requester_is_attending !== false) {
+          const requester = getPersonMemory(context.userId)?.email?.toLowerCase();
+          if (requester && attendees.length && attendees.every(a=>a?.email?.toLowerCase() === requester)
+            && (context.resolvedMeetingAttendees ?? []).every(address=>address.toLowerCase() === requester)) {
+            resolvedAttendees = [requester];
+          }
+        }
         if (resolvedAttendees === null) {
           return { success: false, error: 'ambiguous_meeting_roster', message: 'Identify which meeting this booking is for and supply its participants; separate meeting rosters must not be combined into one invite.' };
         }

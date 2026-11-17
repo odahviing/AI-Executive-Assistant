@@ -252,10 +252,26 @@ function inferIntentFromTool(toolName: string): BookingIntent {
 export function emailStatedByHuman(email: string, context: SkillContext): boolean {
   const needle = (email ?? '').trim().toLowerCase();
   if (!needle.includes('@')) return false;
-  const containsAddress = (text: string) => (text.match(/[A-Z0-9.!#$%&'*+/=?^_{}|~-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)+/gi) ?? [])
-    .some(address => address.toLowerCase() === needle);
+  const containsAddress = (text: string) => literalAddresses(text).some(address => address.toLowerCase() === needle);
   return containsAddress(context.currentUserMessage ?? '') || (context.conversationHistory ?? [])
     .some(message => message.role === 'user' && containsAddress(message.content ?? ''));
+}
+
+function literalAddresses(text: string): string[] {
+  // Slack's mailto label is display text and can differ from its destination.
+  const plain = text.replace(/<mailto:([^>|]+)(?:\|[^>]*)?>/gi, ' $1 ');
+  return plain.match(/[A-Z0-9.!#$%&'*+/=?^_`{}|~-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)+/gi) ?? [];
+}
+
+/** Literal addresses in the authenticated human messages belonging to this request. */
+export function requestSearchAddresses(request: {original:string; updates:string[]}): string[] {
+  const addresses = new Set<string>();
+  for (const text of [request.original, ...request.updates]) {
+    for (const address of literalAddresses(text)) {
+      addresses.add(address.toLowerCase());
+    }
+  }
+  return [...addresses];
 }
 
 async function buildParticipants(

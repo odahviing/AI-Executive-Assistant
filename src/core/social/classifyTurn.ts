@@ -91,6 +91,8 @@ export interface ClassifyTurnResult {
    * extraction call; bare-ack shortcuts retain their existing behavior. */
   meetingAction?: 'execute' | 'hold' | 'explore' | 'none';
   exactBookingQuote?: string;
+  requesterPair?: boolean;
+  participantsUnchanged?: boolean;
   /** Entire request asks only for times for one meeting. */
   existingInviteSubject?: string;
   existingInviteLocale?: string;
@@ -389,12 +391,11 @@ export async function classifyTurn(params: {
     return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false, meetingPeople: [] };
   }
 
-  // Pure-ack short-circuit — no LLM call for either half. Intent='other'
-  // matches what the intent classifier would return for a bare ack (its
-  // RULE 3: cut the ack word, nothing substantive left → other), and scope
-  // widens to general. Saves the whole roundtrip on "ok" / "thanks" / etc.
+  // A short answer can decide a pending request. Interpret it in that
+  // conversation before taking the standalone courtesy shortcut.
   const ackKind = bareAckKind(message);
-  if (ackKind) {
+  if (ackKind && !params.approvalCandidates?.length && !params.refusedBooking
+    && (ackKind === 'courtesy' || !params.priorMeetingRequest)) {
     return { standaloneCourtesy: ackKind === 'courtesy', intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false, meetingPeople: [] };
   }
 
@@ -494,9 +495,9 @@ How to choose scopes:
   const meetingPeopleSection = needMeetingPeople ? `
 MEETING ACTION (meeting_action) — classify the LAST message's meaning using recent context, in any language:
 ${params.refusedBooking ? `For this previously refused booking ${JSON.stringify({ subject:params.refusedBooking.subject, start:params.refusedBooking.start, end:params.refusedBooking.end, reason:params.refusedBooking.reason })}, also classify refused_booking_reply. ask_owner means the current requester explicitly directs you to ask the owner for an exception for that exact unchanged meeting. Set meeting_action=explore and copy the entire current typed request into approval_request_quote. A possibility ("perhaps he will allow it"), a status question, an unaccepted suggestion, or general discussion of this same booking is continue, without outreach. A changed time or roster, different booking, abandonment, quoted command, refusal, or ambiguous reference is other.\n` : ''}
-- execute: an authorized instruction to act or acceptance of a concrete exact plan. Preserve explicit action in a mixed message ("you are not helping — move Elinor to 13:30" is execute). A settled instruction needs no generic reconfirmation.
+- execute: an authorized instruction to act or acceptance of a concrete exact plan. Supplying or correcting the title, duration or address of an outstanding booking request continues that action, including an approval awaiting the owner. Preserve explicit action in a mixed message ("you are not helping — move Elinor to 13:30" is execute). A settled instruction needs no generic reconfirmation.
 ${isOwner ? '' : 'book_exact: the speaker asks you to schedule a concrete meeting at a definite or selected time. A polite question such as "could you schedule the team sync tomorrow at noon?" requests the booking. A question about whether noon is available requests information. For book_exact return exact_booking_quote copied from the current instruction, including the words that request the action. Feasibility, searching for options, status, tentative holds, broad booking without a chosen time and conditional requests leave it empty.'}
-- explore: feasibility, discovery, correction or dissatisfaction without an explicit action; a plan still awaiting a choice; or an outstanding promise to present options before moving. A time inside "would 13:30 work?" is exploration. Frustration adds no consent. Acceptance of the concrete plan fulfills the promise and is execute.
+- explore: feasibility, discovery or dissatisfaction without an action request; a plan still awaiting a choice; or an outstanding promise to present options before moving. A question correcting your understanding or disputing a result is exploration. Supplying the missing details for an existing action request is execute. A time inside "would 13:30 work?" is exploration. Frustration adds no consent. Acceptance of the concrete plan fulfills the promise and is execute.
 - none: unrelated to meeting action or discovery. Interpret contextual acceptance against the actual plan, not the acknowledgement word alone. A broad directional request authorizes discovery; unresolved target selection remains explore.
 ${isOwner ? '' : `
 - hold: the colleague asks to reserve a specifically selected, previously offered slot internally now, while deferring the booking. "Hold 17:15 now; if the interview goes well I'll confirm on Wednesday" authorizes the hold now. The condition and reply day apply to the later booking. Also use hold when the colleague explicitly requests a hold on EACH of several identified slots. If the hold itself is conditional, the day conflicts, or the choice between alternatives is unsettled, return explore.
@@ -669,7 +670,9 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${indepe
       properties.requested_option_count = {type:'object',description:'Only when the current person specifies how many distinct time options to offer. “One best time” is one. “Some slots” or a meeting duration does not specify a count. Quote the exact phrase that states the number of options.',properties:{count:{type:'integer',minimum:1,maximum:20},quote:{type:'string'}},required:['count','quote']};
       properties.directory_spellings = {type:'array',description:'For a participant written in another alphabet, suggest the same name spelled in Latin letters for a directory SEARCH. Copy the original name exactly. Transliterate only: no last-name expansion, identities, addresses or guesses about who attends.',items:{type:'object',properties:{name:{type:'string'},spelling:{type:'string'}},required:['name','spelling']}};
       properties.request_relation = {type:'string',enum:['new','batch','continue','other'],description:'Does this human message start a single meeting request, start a batch of distinct appointments, update/answer/ask about that same open request or batch, or concern other work? Determine from the human request, not an earlier assistant guess. A different meeting starts new. Active request: '+JSON.stringify(params.priorMeetingRequest ?? null)};
-      properties.request_clock_zone = {type:'object',description:'Only when the human explicitly states the zone in which they want meeting times interpreted or displayed. Include a verbatim current quote and its unambiguous IANA timezone. An explicit reference to the owner’s clock (e.g. “your time” when speaking to the assistant) means '+profile.user.timezone+'. Do not infer from a contact or an ambiguous abbreviation. Omit if different people use different clocks.',properties:{quote:{type:'string'},zone:{type:'string'}},required:['quote','zone']};
+      properties.participants_unchanged = {type:'boolean',description:'True only when this message continues the same request and leaves who attends each meeting unchanged, e.g. choosing a day, length or supplying a known participant’s email. False for adding, removing or replacing anyone, including “without him”, for a new meeting or for ambiguity.'};
+      if (!isOwner) properties.requester_pair = {type:'object',description:'Using the current human message and active request, are the authenticated sender and the calendar owner the only intended attendees? For yes, copy the human phrase asking to meet the owner personally. A topic or employer is not an invitee. A colleague arranging a meeting for another person, an additional attendee, or uncertainty means false.',properties:{only:{type:'boolean'},quote:{type:'string'}},required:['only','quote']};
+      properties.request_clock_zone = {type:'object',description:'Only when the human names the timezone, place or person whose clock to use. Quote only the literal place, timezone or possessive clock phrase, e.g. “Boston” or “your time”. A weekday, today, tomorrow or a clock reading by itself supplies no zone. An explicit reference to the owner’s clock means '+profile.user.timezone+'. Omit when the human supplies no clock frame or uses conflicting ones.',properties:{quote:{type:'string'},zone:{type:'string'}},required:['quote','zone']};
       properties.required_day_change = {
         type:'object',description:'Only for a REQUIRED date of the desired new appointment, or an explicit relaxation of that deadline. The old event date, an absence day, and an ordinary preference establish no deadline. Preserve the literal expression: for today, tomorrow or the day after tomorrow return the corresponding kind without calculating a date. For a named weekday or explicit calendar date return calendar_date with the resolved date. Current local date: '+new Intl.DateTimeFormat('en-CA',{timeZone:params.requesterDayZone ?? profile.user.timezone}).format(new Date()),
         properties:{kind:{type:'string',enum:['today','tomorrow','day_after_tomorrow','calendar_date','flexible']},date:{type:'string',description:'YYYY-MM-DD only for calendar_date.'},quote:{type:'string',description:'Exact words requiring the target day.'}},required:['kind','quote'],
@@ -880,7 +883,8 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${indepe
       ? {date:day, quote:change.quote} : undefined;
     const clock = toolUse?.input.request_clock_zone;
     let clockZone: {zone:string;quote:string} | undefined;
-    if (typeof clock?.quote === 'string' && clock.quote.trim() && message.includes(clock.quote) && typeof clock.zone === 'string' && clock.zone.includes('/')) {
+    if (typeof clock?.quote === 'string' && /\p{L}/u.test(clock.quote) && !/\d{1,2}:\d{2}/u.test(clock.quote)
+      && message.includes(clock.quote) && typeof clock.zone === 'string' && clock.zone.includes('/')) {
       try { clockZone = {zone:new Intl.DateTimeFormat('en',{timeZone:clock.zone}).resolvedOptions().timeZone,quote:clock.quote}; } catch { /* Unresolved clock stays unknown. */ }
     }
     const requestUpdate: ClassifyTurnResult['requestUpdate'] = completeToolCall && params.meetingContextMessages &&
@@ -936,9 +940,9 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${indepe
           meetingAction = 'execute';
         }
         const lastOffer = params.meetingContextMessages.filter(row=>row.role==='assistant').at(-1)?.content;
-        if (routing.stop_reason === 'tool_use' && answer?.route === 'F' && answer.instruction === message && toolUse?.input.search_before_reply !== message
+        if (routing.stop_reason === 'tool_use' && answer?.route === 'F' && answer.instruction === message
           && ((typeof answer.consultClause === 'string' && answer.consultClause.trim() && message.includes(answer.consultClause))
-            || (typeof answer.priorOffer === 'string' && answer.priorOffer.trim() && lastOffer?.includes(answer.priorOffer)))) {
+            || (toolUse?.input.search_before_reply !== message && typeof answer.priorOffer === 'string' && answer.priorOffer.trim() && lastOffer?.includes(answer.priorOffer)))) {
           consultOwnerQuote = message;
           const priorHuman = params.meetingContextMessages.filter(row => row.role === 'user').at(-1)?.content;
           if (answer.background?.trim() && answer.background.length <= 300 && priorHuman?.includes(answer.background))
@@ -972,7 +976,11 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${approvalSection}${indepe
     const count = completeToolCall && toolUse?.input.requested_option_count;
     const requestedOptionCount = Number.isInteger(count?.count) && count.count >= 1 && count.count <= 20
       && typeof count.quote === 'string' && count.quote.trim() && message.includes(count.quote) ? count.count as number : undefined;
-    return { directorySpellings, decisionReport, requestedOptionCount, searchBeforeReply, singleZoneOptions, firmWindowQuote, consultOwnerQuote, consultBackground, unresolvedHoldSelection: rawMeetingAction === 'hold' && !selectedHoldCandidateIndices, existingInviteSubject, existingInviteLocale, withdrawOwnRequest, requestUpdate, optionsReplyLocale, standaloneCourtesy, standaloneApprovalQuote, independentOrdinaryCreate, intent, scope, freeTimeInquiry, meetingPeople, meetingPeopleGroups, meetingAction, selectedHoldCandidateIndices, meetingContinuation, contextMeetingPeople, approvalDecisions, refusedBookingReply, exactBookingQuote };
+    const pair = toolUse?.input.requester_pair;
+    const requesterPair = !!(completeToolCall && !isOwner && requestUpdate && !requestUpdate.batch && pair?.only === true
+      && typeof pair.quote === 'string' && pair.quote.trim() && (message.includes(pair.quote) ||
+        (requestUpdate.relation === 'continue' && params.priorMeetingRequest?.original.includes(pair.quote))));
+    return { participantsUnchanged:completeToolCall && toolUse?.input.participants_unchanged === true, requesterPair, directorySpellings, decisionReport, requestedOptionCount, searchBeforeReply, singleZoneOptions, firmWindowQuote, consultOwnerQuote, consultBackground, unresolvedHoldSelection: rawMeetingAction === 'hold' && !selectedHoldCandidateIndices, existingInviteSubject, existingInviteLocale, withdrawOwnRequest, requestUpdate, optionsReplyLocale, standaloneCourtesy, standaloneApprovalQuote, independentOrdinaryCreate, intent, scope, freeTimeInquiry, meetingPeople, meetingPeopleGroups, meetingAction, selectedHoldCandidateIndices, meetingContinuation, contextMeetingPeople, approvalDecisions, refusedBookingReply, exactBookingQuote };
   } catch (err) {
     logger.warn('classifyTurn threw — defaulting to other / general', { err: String(err).slice(0, 300) });
     return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false, meetingPeople: [] };

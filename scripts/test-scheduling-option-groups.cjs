@@ -42,4 +42,6 @@ test('a compact list keeps all chosen clocks and keeps meetings and availability
   assert.equal(renderSchedulingParts([{options:[1,2]}],options),undefined);
   assert.equal(renderSchedulingParts([{options:[1,4]}],options),undefined);
   assert.equal(renderSchedulingParts([{options:[99]}],options),undefined);
+  assert.match(renderSchedulingParts([{options:[1]}],options),/08:00, 10:00/);
+  assert.doesNotMatch(renderSchedulingParts([{options:[1]}],options),/09:00|11:00/);
 });

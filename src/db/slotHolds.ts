@@ -59,16 +59,16 @@ function genId(): string {
   return `hold_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 }
 
-/** Active holds for an owner that haven't passed their slot end — used by the
+/** Active holds before both their expiry and slot end — used by the
  *  slot-finder annotation, the owner-book gate, and the morning brief. */
 export function getActiveSlotHolds(ownerUserId: string): SlotHold[] {
   const db = getDb();
   const nowIso = new Date().toISOString();
   return db.prepare(`
     SELECT * FROM slot_holds
-    WHERE owner_user_id = ? AND status = 'active' AND end_iso > ?
+    WHERE owner_user_id = ? AND status = 'active' AND julianday(end_iso) > julianday(?) AND julianday(expires_at) > julianday(?)
     ORDER BY start_iso ASC
-  `).all(ownerUserId, nowIso) as SlotHold[];
+  `).all(ownerUserId, nowIso, nowIso) as SlotHold[];
 }
 
 /** The active hold (if any) overlapping [startIso, endIso) for this owner.
@@ -96,8 +96,8 @@ export function countActiveHoldsForHolder(ownerUserId: string, holderSlackId: st
   const nowIso = new Date().toISOString();
   const row = db.prepare(`
     SELECT COUNT(*) AS n FROM slot_holds
-    WHERE owner_user_id = ? AND holder_slack_id = ? AND status = 'active' AND end_iso > ?
-  `).get(ownerUserId, holderSlackId, nowIso) as { n: number };
+    WHERE owner_user_id = ? AND holder_slack_id = ? AND status = 'active' AND julianday(end_iso) > julianday(?) AND julianday(expires_at) > julianday(?)
+  `).get(ownerUserId, holderSlackId, nowIso, nowIso) as { n: number };
   return row?.n ?? 0;
 }
 
@@ -114,9 +114,9 @@ export function countActiveHoldsForHolderSubject(
   const subj = (subject ?? '').trim().toLowerCase();
   const row = db.prepare(`
     SELECT COUNT(*) AS n FROM slot_holds
-    WHERE owner_user_id = ? AND holder_slack_id = ? AND status = 'active' AND end_iso > ?
+    WHERE owner_user_id = ? AND holder_slack_id = ? AND status = 'active' AND julianday(end_iso) > julianday(?) AND julianday(expires_at) > julianday(?)
       AND LOWER(TRIM(COALESCE(subject,''))) = ?
-  `).get(ownerUserId, holderSlackId, nowIso, subj) as { n: number };
+  `).get(ownerUserId, holderSlackId, nowIso, nowIso, subj) as { n: number };
   return row?.n ?? 0;
 }
 

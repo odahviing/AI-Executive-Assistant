@@ -17,7 +17,7 @@ function harness(o={}){
  const conn={sendDirect:send,postToChannel:send};
  const db={getRequest:id=>id===row.id?row:o.parents?.[id]||null,getChildRequests:()=>[],getDueRequests:()=>[clone(row)],updateRequest:update,getAwaitingOwnerRequests:()=>[row],isKnownRequestThreadAnchor:()=>true,getRequestByIdempotencyKey:()=>null,buildIdempotencyKey:()=> 'fixture',createRequest:()=>row};
  const mocks={
-  'src/utils/attendeeAvailability.ts':{loadAttendeeAvailabilityForPerson:(person,fallback)=>({timezone:person?.timezone||fallback}),attendeeTzForDay:entry=>entry.timezone},
+  'src/utils/attendeeAvailability.ts':{loadAttendeeAvailabilityForPerson:(person,fallback)=>({timezone:person?.timezone||fallback}),attendeeTzForDay:entry=>entry.timezone,attendeeTravelTimezoneForDay:()=>undefined},
   'src/db/requests.ts':db,'src/db/client.ts':{getDb:()=>({prepare:()=>({run(){},all:()=>[]})})},
   'src/db/conversations.ts':{appendToConversation:(...a)=>effects.history.push(a),getConversationHistory:()=>[]},
   'src/db/jobs.ts':{createOutreachJob:p=>effects.outbound.push(p),getOutreachJobByRequestId:()=>null},
@@ -36,7 +36,7 @@ function harness(o={}){
  const actual=new Set(['src/utils/timezoneConvert.ts','src/utils/weTimeResolver.ts','src/core/requests/resolver.ts','src/core/requests/deferredActionReplay.ts','src/core/requests/requesterRelay.ts','src/core/requests/closeRequest.ts','src/core/requests/runner.ts','src/core/requests/types.ts','src/core/approvals/approvalCallbacks.ts','src/tasks/skill.ts','src/utils/textScrubber.ts']);
  function load(file){if(Object.hasOwn(mocks,file))return mocks[file];if(mods.has(file))return mods.get(file).exports;if(!actual.has(file)){effects.unexpected.push(file);throw Error('Unmocked '+file);}const selected=path.join(source,file),name=fs.existsSync(selected)?selected:path.join(root,file);if(!cache.has(name))cache.set(name,ts.transpileModule(fs.readFileSync(name,'utf8'),{fileName:name,compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText);const m={exports:{}};mods.set(file,m);const req=spec=>{if(spec==='luxon')return {DateTime};if(['node:async_hooks','node:util','node:crypto'].includes(spec))return require(spec);if(!spec.startsWith('.')){effects.unexpected.push(spec);throw Error('Unmocked '+spec);}return load(path.posix.normalize(path.posix.join(path.posix.dirname(file),spec))+'.ts');};vm.runInNewContext('(function(require,module,exports){'+cache.get(name)+'\n})',{Date,Set,Map,setImmediate})(req,m,m.exports);return m.exports;}
  const resolver=load('src/core/requests/resolver.ts'),relay=load('src/core/requests/requesterRelay.ts'),runner=load('src/core/requests/runner.ts');
- return {notify:(verdict='reject',data=null)=>resolver.notifyRequesterOfDecision(row,verdict,data,undefined,{profile}),effects,row:()=>row,update,setDelivery:x=>delivery=x,check:()=>assert.deepEqual(effects.unexpected,[]),lock:resolver.withRequestLock,
+ return {notify:(verdict='reject',data=null,executed)=>resolver.notifyRequesterOfDecision(row,verdict,data,undefined,{profile},executed),effects,row:()=>row,update,setDelivery:x=>delivery=x,check:()=>assert.deepEqual(effects.unexpected,[]),lock:resolver.withRequestLock,
   resolve:(verdict={verdict:'approve'},ctx={})=>resolver.resolveRequest(row.id,verdict,{profile,...ctx}),
   sweep:()=>runner.sweepDueRequests({profilesByUserId:new Map([['OWNER',profile]])}),
   relay:body=>relay.relayClosureToRequester({row,profile,label:'fixture closure',compose:()=>body}),
@@ -51,3 +51,14 @@ test('control Hebrew composer retains Hebrew instruction',async()=>{const h=harn
 test('control unknown language defaults to English',async()=>{const h=harness({lang:null,row:{state:'resolved'}});await h.notify();assert.equal(h.effects.prompts.length,1);assert.ok(h.effects.prompts[0].system.includes('write in English'));h.check();});
 test('known ar room origin keeps preference in composer',async()=>{const h=harness({lang:'ar',row:{state:'resolved',origin_is_mpim:1,origin_channel:'CROOM'}});await h.notify();assert.equal(h.effects.prompts.length,1);assert.ok(h.effects.prompts[0].system.includes('write in ar'));assert.equal(h.effects.sends[0].id,'CROOM');h.check();});
 test('control owner self request does not invoke composer',async()=>{const h=harness({lang:'ru',row:{state:'resolved',requester_slack_id:'OWNER'}});await h.notify();assert.equal(h.effects.prompts.length,0);assert.equal(h.effects.sends.length,0);h.check();});
+
+for (const lang of ['he','en']) test(`completed ${lang} booking reports the executed duration despite stale request prose`, async () => {
+  const h=harness({lang,row:{state:'resolved',subject:'25-minute sync'}});
+  await h.notify('approve',null,{tool:'create_meeting',subject:'Customer sync',start:'2026-12-01T10:00:00Z',end:'2026-12-01T10:10:00Z'});
+  assert.equal(h.effects.prompts.length,0);
+  assert.equal(h.effects.sends.length,1);
+  assert.match(h.effects.sends[0].body,/Customer sync/);
+  assert.match(h.effects.sends[0].body,lang==='he'?/10 דקות/:/10 minutes/);
+  assert.doesNotMatch(h.effects.sends[0].body,/25/);
+  h.check();
+});

@@ -95,7 +95,10 @@ export interface RequestedSearchWindow {
 
 export interface SkillContext {
   meetingRequestId?: string;
+  requesterPair?: boolean;
   individualSearchEmails?: string[];
+  /** Human-supplied addresses for this request. Read-only partial calendar checks only. */
+  requestSearchAddresses?: string[];
   /** Null for a human turn which did not specify how many times to offer. */
   requestedOptionCount?: number|null;
   requestDurationMinutes?: number;

@@ -172,6 +172,8 @@ const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
     // per-date schedule overrides (#143, replaced the WE spine), slot holds (#30),
     // and the calendar-health auto-move revert (v3.7.2). All meeting/schedule turns.
     'set_work_schedule_override', 'get_work_schedule_overrides', 'hold_slot', 'revert_last_auto_move',
+    // Stored participant hours and timezones are part of scheduling.
+    'update_person_profile',
     // v2.9 — find_venue is reachable from a meetings-flavored turn
     // ("book coffee with Yael"); also lives in the 'venue' scope.
     'find_venue',

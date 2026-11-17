@@ -27,7 +27,8 @@ function emptyResult(summary){
  function walk(n){if(ts.isVariableDeclaration(n)&&n.name.getText(tree)==='emptySearchResult')expression=n.initializer.getText(tree);ts.forEachChild(n,walk);}walk(tree);assert.ok(expression);
  const js=ts.transpileModule('module.exports = '+expression,{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText;
  const mod={exports:{}};
- vm.runInNewContext(js,{module:mod,exports:mod.exports,groundAttendeeHours:()=>{},isOwnerInitiatedSearch:false,attendeeEmailWarning:undefined,attendeeNotCheckedWarning:undefined,colleagueSoftBlockHint:undefined,movingEventIdMismatchWarning:undefined,tzGroundingFields:{}});
+ const args={duration_minutes:25};
+ vm.runInNewContext(js,{module:mod,exports:mod.exports,args,groundAttendeeHours:()=>{},effectiveSearchFrom:'2026-11-12T08:00:00-05:00',effectiveSearchTo:'2026-11-12T12:00:00-05:00',timezone:'America/New_York',isOwnerInitiatedSearch:false,attendeeEmailWarning:undefined,attendeeNotCheckedWarning:undefined,colleagueSoftBlockHint:undefined,movingEventIdMismatchWarning:undefined,tzGroundingFields:{}});
  return mod.exports(summary);
 }
 test('regression analysis reports Busy overlap and zero free time without declaring vacation',()=>{

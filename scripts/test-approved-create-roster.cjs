@@ -47,7 +47,8 @@ const missingBlock = one(create, n => ts.isVariableDeclaration(n) && n.name.getT
 const requestedRoom = one(create, n => ts.isIfStatement(n) && n.expression.getText().startsWith('args.add_room_email && roomEmail &&'));
 const writeCall = one(create, n => ts.isCallExpression(n) && n.expression.getText() === 'createMeeting');
 const planParticipants = one(booking, n => ts.isFunctionDeclaration(n) && n.name?.text === 'buildParticipants').getText();
-const humanEmail = one(booking, n => ts.isFunctionDeclaration(n) && n.name?.text === 'emailStatedByHuman').getText();
+const humanEmail = ['literalAddresses','emailStatedByHuman'].map(name =>
+  one(booking, n => ts.isFunctionDeclaration(n) && n.name?.text === name).getText()).join('\n');
 const logger = { info() {}, warn() {}, error() {} };
 const profile = { user: { name: 'Owner', email: 'owner@example.test', slack_user_id: 'UOWNER' }, assistant: { name: 'Assistant' } };
 const roster = [

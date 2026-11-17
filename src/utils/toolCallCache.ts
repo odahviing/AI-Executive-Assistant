@@ -50,7 +50,7 @@ import logger from './logger';
 import type { SkillContext } from '../skills/types';
 
 type CallerContext = Pick<SkillContext, 'userId' | 'senderRole' | 'authority' | 'surface'
-  | 'channel' | 'channelId' | 'inboundConnectionId' | 'isMpim' | 'isOwnerInGroup' | 'mpimMemberIds' | 'calendarReadOnly' | 'optionsReplyLocale' | 'requestDurationMinutes' | 'meetingRequestId' | 'individualSearchEmails' | 'requestZone' | 'existingInviteSubject' | 'existingInviteStart' | 'requestedSearchWindow'>;
+  | 'channel' | 'channelId' | 'inboundConnectionId' | 'isMpim' | 'isOwnerInGroup' | 'mpimMemberIds' | 'calendarReadOnly' | 'optionsReplyLocale' | 'requestDurationMinutes' | 'meetingRequestId' | 'individualSearchEmails' | 'requestSearchAddresses' | 'requestedOptionCount' | 'requestZone' | 'existingInviteSubject' | 'existingInviteStart' | 'requestedSearchWindow'>;
 
 const WRITE_TTL_MS = 60 * 1000;
 const READ_TTL_MS = 5 * 1000;
@@ -88,6 +88,8 @@ function buildKey(ownerUserId: string, threadTs: string | undefined, toolName: s
     optionsReplyLocale: toolName === 'find_available_slots' ? context.optionsReplyLocale : undefined,
     requestZone: toolName === 'find_available_slots' ? context.requestZone : undefined,
     individualSearchEmails: toolName === 'find_available_slots' ? context.individualSearchEmails : undefined,
+    requestSearchAddresses: toolName === 'find_available_slots' ? context.requestSearchAddresses : undefined,
+    requestedOptionCount: toolName === 'find_available_slots' ? context.requestedOptionCount : undefined,
     meetingRequestId: toolName === 'find_available_slots' ? context.meetingRequestId : undefined,
     requestDurationMinutes: toolName === 'find_available_slots' || toolName === 'create_meeting' ? context.requestDurationMinutes : undefined,
     requestedSearchWindow: toolName === 'find_available_slots' ? context.requestedSearchWindow : undefined,

@@ -564,9 +564,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           const explicitPeople = [...new Set(attendeeEmails.map(email => email.toLowerCase()))]
             .filter(email => email !== userEmail.toLowerCase() && email !== requesterEmail);
           const known = context.resolvedMeetingAttendees ?? [];
-          const individualSearch = resolvedAttendees === null && context.resolvedMeetingAttendeeGroups?.length === 0
-            && explicitPeople.length === 1 && context.individualSearchEmails?.includes(explicitPeople[0]) && known.some(email => email.toLowerCase() === explicitPeople[0])
-            && !args.moving_event_ids;
+          const individualSearch = resolvedAttendees === null && explicitPeople.length === 1 && !args.moving_event_ids
+            && (context.requestSearchAddresses?.includes(explicitPeople[0]) || (
+              context.resolvedMeetingAttendeeGroups?.length === 0 && context.individualSearchEmails?.includes(explicitPeople[0])
+              && known.some(email => email.toLowerCase() === explicitPeople[0])));
           const groups = context.resolvedMeetingAttendeeGroups;
           // An incomplete extraction cannot establish a roster for an invite.
           // It can still support a bounded check of these two known calendars.
@@ -1461,12 +1462,12 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // Reuse day_summary so all existing privacy scrubs still apply.
             const emptySearchResult = (summary: typeof diagnosticsOut.daySummary) => {
               groundAttendeeHours(summary);
-              const allDaysOccupied = !!summary?.length && summary.every(day => day.owner_all_day_busy);
+              const allDaysOccupied = !!summary?.length && summary.every(day => day.owner_all_day_busy || day.top_reasons.includes('owner_out_of_office'));
               const hoursBlocked = !allDaysOccupied && summary?.some(day => day.top_reasons.includes('outside_attendee_work_hours'));
               const reasons = [...new Set(summary?.flatMap(day=>day.top_reasons) ?? [])];
               return {
                 slots: [],
-                search_outcome:{joint_openings:0,from:effectiveSearchFrom,to:effectiveSearchTo,zone:timezone,
+                search_outcome:{joint_openings:0,from:effectiveSearchFrom,to:effectiveSearchTo,zone:timezone,duration_minutes:args.duration_minutes,
                   mixed_reasons:reasons.length>1,owner_all_day_busy:allDaysOccupied},
                 ...(summary?.length ? { day_summary: summary } : {}),
                 ...(allDaysOccupied ? {
@@ -1643,11 +1644,9 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 meetingMode: mode as import('../../../../connectors/graph/calendar').MeetingMode,
                 travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
                 autoExpand: false,
-                // Owner-audience recovery reads his OWN lead time even on a
-                // colleague turn — the slots come back for HIM to choose from.
-                minBufferHours: ownerAudience
-                  ? bookingLeadTimeHours(context.profile, 'owner')
-                  : leadHours,
+                // Attendee-conflict recovery keeps the caller's owner-rule
+                // requirements. A colleague's urgency does not waive notice.
+                minBufferHours: leadHours,
                 viewer,
                 viewerEmail,
                 profile: context.profile,

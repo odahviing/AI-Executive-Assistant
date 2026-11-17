@@ -20,6 +20,8 @@ export interface MeetingRequestState {
   requiredDay?: {date:string; zone:string; quote:string};
   bookingInstruction?: {kind:'exact'|'window'; text:string; localDate:string};
   individualSearchEmails?: string[];
+  requesterPair?: boolean;
+  participantGroups?: string[][];
   ownerId: string;
   requesterId: string;
   channelId: string;

@@ -1438,6 +1438,10 @@ async function runApproveCallback(
       : (typeof replayArgs.start === 'string'
           ? (replayArgs.start as string)
           : (typeof replayArgs.new_start === 'string' ? (replayArgs.new_start as string) : undefined)),
+    end: !calendarAction ? undefined : typeof replayResult?.booked_end === 'string'
+      ? replayResult.booked_end as string
+      : typeof replayArgs.end === 'string' ? replayArgs.end
+        : typeof replayArgs.new_end === 'string' ? replayArgs.new_end : undefined,
     subject: !calendarAction ? undefined : typeof replayArgs.subject === 'string'
       ? (replayArgs.subject as string)
       : (typeof replayArgs.meeting_subject === 'string' ? (replayArgs.meeting_subject as string) : undefined),
@@ -1471,6 +1475,7 @@ async function runApproveCallback(
       merged_from_amend: meta.mergedFromAmend,
       amend_round: meta.amendRound,
       ...(executed.start ? { booked_start: executed.start } : {}),
+      ...(executed.end ? { booked_end: executed.end } : {}),
       ...(coordinated ? { outcomes: replayResult?.outcomes } : {}),
     },
   });
@@ -1503,6 +1508,7 @@ async function runApproveCallback(
     ...(isBookingTool ? { booked: true } : {}),
     ...(replaySubject ? { subject: replaySubject } : {}),
     ...(replayStart ? { start: replayStart } : {}),
+    ...(executed.end ? { end: executed.end } : {}),
     ...(replaySummary ? { action_summary: replaySummary } : {}),
     ...(coordinated && !ctx.wasAwaitingColleague ? { outcomes: replayResult?.outcomes as Array<Record<string, unknown>> } : {}),
     requester_notify_outcome: requesterNotified,
@@ -1532,6 +1538,8 @@ interface ExecutedOutcome {
   tracked?: boolean;
   /** ISO start the action actually landed on. */
   start?: string;
+  /** ISO end confirmed by the action or its executed arguments. */
+  end?: string;
   /** Subject as executed — a counter can rename the meeting, not just move it. */
   subject?: string;
 }
@@ -1667,6 +1675,10 @@ export async function notifyRequesterOfDecision(
   // (Pre-fix this read the stored ask's time, so an unreplayable on_approve also
   // announced "Booking X for 14:00" for a booking that hadn't happened.)
   const startFormatted = executed?.start ? formatStart(executed.start) : '';
+  const elapsedMinutes = executed?.start && executed.end
+    ? (Date.parse(executed.end) - Date.parse(executed.start)) / 60000 : undefined;
+  const duration = elapsedMinutes && Number.isFinite(elapsedMinutes) && elapsedMinutes > 0
+    ? (requesterLang === 'he' ? ` (${elapsedMinutes} דקות)` : ` (${elapsedMinutes} minutes)`) : '';
 
   const { getConnection } = await import('../../connections/registry');
   const conn = getConnection(row.owner_user_id, 'slack');
@@ -1717,13 +1729,13 @@ export async function notifyRequesterOfDecision(
         : `${hi} — "${subject}" has been cancelled.`;
     } else if (executed.tool === 'move_meeting' || executed.tool === 'update_meeting') {
       body = requesterLang === 'he'
-        ? `${hi} — הפגישה "${subject}" עודכנה${startFormatted ? ` ל${startFormatted}` : ''}.`
-        : `${hi} — "${subject}" has been updated${startFormatted ? ` to ${startFormatted}` : ''}.`;
+        ? `${hi} — הפגישה "${subject}" עודכנה${startFormatted ? ` ל${startFormatted}${duration}` : ''}.`
+        : `${hi} — "${subject}" has been updated${startFormatted ? ` to ${startFormatted}${duration}` : ''}.`;
     } else if (ctx.wasAwaitingColleague) {
       if (startFormatted) {
         body = requesterLang === 'he'
-          ? `${hi} — סגרנו על "${subject}" ל${startFormatted}. הזימון בדרך.`
-          : `${hi} — locked in "${subject}" for ${startFormatted}. Calendar invite incoming.`;
+          ? `${hi} — "${subject}" נקבעה ל${startFormatted}${duration}. הזימון נשלח.`
+          : `${hi} — "${subject}" is booked for ${startFormatted}${duration}. The invitation was sent.`;
       } else {
         body = requesterLang === 'he'
           ? `${hi} — הבקשה לגבי ${subject} הושלמה.`
@@ -1732,8 +1744,8 @@ export async function notifyRequesterOfDecision(
     } else if (startFormatted) {
       // Owner-resolved: concrete-time form when we know the booked slot.
       body = requesterLang === 'he'
-        ? `${hi} — ${ownerFirst} אישר. אני קובעת את "${subject}" ל${startFormatted}. הזימון בדרך.`
-        : `${hi} — ${ownerFirst} said yes. Booking "${subject}" for ${startFormatted}. Calendar invite incoming.`;
+        ? `${hi} — "${subject}" נקבעה ל${startFormatted}${duration}. הזימון נשלח.`
+        : `${hi} — "${subject}" is booked for ${startFormatted}${duration}. The invitation was sent.`;
     } else {
       // Action-AGNOSTIC fallback. The LLM composer below is the primary path;
       // this only fires if it errors. It must NOT assert "approved {subject}" —
@@ -1836,10 +1848,15 @@ export async function notifyRequesterOfDecision(
   // machine-labelled part (pure owner prose — already human words, nothing to
   // relabel) and a question-shaped counter (his question must travel verbatim).
   const composeAmend = verdict === 'amend' && amendPinned.length > 0;
+  // A completed calendar action already has a localized receipt. Reusing the
+  // old ask in another composition can reintroduce superseded times or lengths.
+  const completedCalendarReceipt = verdict === 'approve' && executed && !executed.tracked && !executed.coordinated
+    && ['create_meeting','move_meeting','update_meeting','delete_meeting','book_floating_block'].includes(executed.tool)
+    && (requesterLang === 'he' || requesterLang === 'en');
   let requiresComposedLanguage = (verdict === 'approve' || verdict === 'reject' || verdict === 'closed_by_owner' || composeAmend)
     && requesterLang !== 'en' && requesterLang !== 'he';
   let composedSuccessfully = false;
-  if (verdict === 'approve' || verdict === 'reject' || verdict === 'closed_by_owner' || composeAmend) {
+  if (!completedCalendarReceipt && (verdict === 'approve' || verdict === 'reject' || verdict === 'closed_by_owner' || composeAmend)) {
     try {
       const rawAsk =
         (typeof details.question === 'string' && details.question.trim() ? details.question.trim() : '') ||
@@ -1913,7 +1930,7 @@ RULES:
 - Report only the OUTCOME supplied below. The original request is context, not evidence an action ran. A declined cancellation leaves the meeting unchanged; a declined booking books nothing. A pure approval reports the decision, with no promise of future work.
 - Do NOT mention approvals, "policy", internal tools, or that you "asked ${ownerFirst}" — just the human outcome, EA-voiced and natural.
 - ONE sentence. A light "Hi ${requesterFirst ?? ''}" is fine; no sign-off.${historyRule ? `\n${historyRule}` : ''}`;
-        usr = `${historyBlock}Their request: "${rawAsk}".${actionHint ? ` (This was ${actionHint}.)` : ''} Outcome: ${outcome}.${startFormatted ? ` Scheduled for ${startFormatted}.` : ''} Write the message.`;
+        usr = `${historyBlock}Their request: "${executed ? subject : rawAsk}".${actionHint ? ` (This was ${actionHint}.)` : ''} Outcome: ${outcome}.${startFormatted ? ` Scheduled for ${startFormatted}${duration}.` : ''} Write the message.`;
       }
       const resp = await anthropic.messages.create({
         ...HAIKU,

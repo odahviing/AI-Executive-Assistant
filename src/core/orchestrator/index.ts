@@ -368,6 +368,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     singleZoneOptions,
     searchBeforeReply,
     decisionReportLocale,
+    priorMeetingState,
     requestedOptionCount,
     existingInviteSubject,
     existingInviteStart,
@@ -548,6 +549,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   let scheduledOutcomeReviewed = false;
   let outcomeRequestedAction = false;
   let outstandingRead: Anthropic.ToolUseBlock | undefined;
+  const requestSearchAddresses = meetingRequest && (await import('../../skills/meetings/bookingRequest')).requestSearchAddresses(meetingRequest);
   while (iteration < MAX_ITERATIONS) {
     // v2.4.3 (A1) — check abort signal at the iteration boundary. The
     // inbound queue triggers abort when a freshly-arrived message in the
@@ -638,7 +640,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         systemBlocks.push({ type: 'text', text: 'The calendar check has completed, but the requested booking or its approval has not yet been attempted. Use create_meeting if the requested slot and attendees are known. If essential information is missing, ask only for that detail. Preserve all calendar and permission checks.' });
         continue;
       }
-      const schedulingReceipts = toolCallSummaries.some(line => /^\[(?:find_available_slots|check_join_availability|get_calendar|create_meeting|move_meeting|update_meeting|hold_slot|resolve_approval)\b/.test(line));
+      const schedulingReceipts = toolCallSummaries.some(line => /^\[(?:find_available_slots|check_join_availability|get_calendar|create_meeting|move_meeting|update_meeting|hold_slot|resolve_approval|check_calendar_health|get_person_memory|update_person_profile)\b/.test(line));
       if (pendingBookingReply && toolCallSummaries.at(-1)?.endsWith(' notified=approval_owner')
         && toolCallSummaries.filter(line => line.startsWith('[create_approval')).length === 1
         && toolCallSummaries.every(line => /^\[(?:create_approval|find_available_slots|create_meeting FAILED: not_rule_compliant)/.test(line))) {
@@ -646,7 +648,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         break;
       }
       if ((meetingRequest || schedulingReceipts) && !scheduledOutcomeReviewed
-        && !(searchReply && toolCallSummaries.length === 1)
+        && !(searchReply && toolCallSummaries.length === 1 && !availabilityPrecheckToolSummaries?.length)
         && !(attendanceReply && toolCallSummaries.length === 2 && toolCallSummaries[1].endsWith(' notified=approval_owner'))
         && !input.proseOnly && !input.extraInstruction && !input.forceToolOnFirstTurn && !input.images?.length
         && input.channel === 'slack' && input.interactive !== false && input.typedUserMessage === userMessage) {
@@ -654,19 +656,24 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         const attempted = new Set(toolCallSummaries.map(line => line.match(/^\[([a-z_]+)/)?.[1]));
         const remainingTools = tools.map(tool => tool.name).filter(name =>
           !attempted.has(name) && !blockedWriteTools?.has(name) && (!WRITE_TOOLS.has(name)
+            || (input.surface==='owner_dm' && input.authority==='owner' && input.userId===profile.user.slack_user_id)
             || (name === 'create_approval' && !!lastDeferredActionHint && !raisedExceptionThisTurn)
             || (name === 'create_meeting' && (exactBookingRequested || (firmWindowBooking && hasWindowException)) && ![...attempted].some(tool => tool && WRITE_TOOLS.has(tool)))));
         try {
           const {composeSchedulingOutcome} = await import('./composeSchedulingOutcome');
           const available = iteration < MAX_ITERATIONS && !outcomeRequestedAction ? remainingTools : [];
-          const readTools = tools.filter(tool => available.includes(tool.name) && ['get_calendar','find_available_slots','get_free_busy','get_person_memory','list_pending_approvals'].includes(tool.name));
+          const readTools = tools.filter(tool => available.includes(tool.name) && ['get_calendar','find_available_slots','get_free_busy','get_person_memory','find_slack_user','list_pending_approvals'].includes(tool.name));
           const requiredRead = searchBeforeReply && !availabilityPrecheckToolSummaries?.length
-            && toolCallSummaries.every(line=>/^\[(?:get_person_memory|find_slack_user|lookup_contact)\b/.test(line))
+            && toolCallSummaries.every(line=>/^\[(?:get_person_memory|find_slack_user|lookup_contact)\b/.test(line)
+              || (!!consultOwnerQuote && line.startsWith('[create_approval')))
             && readTools.some(tool=>tool.name === 'find_available_slots') ? 'find_available_slots' : undefined;
           const outcome = await composeSchedulingOutcome({message:userMessage,request:meetingRequest,history:conversationHistory,
             receipts:[...(availabilityPrecheckToolSummaries ?? []), ...toolCallSummaries],draft:finalReply,evidence:schedulingEvidence,
-            requiredRead,
-            readTools,remainingTools:available.filter(name => !readTools.some(tool => tool.name === name)),owner:profile.user.name,ownerZone:profile.user.timezone,isOwner:input.authority === 'owner',offeredSlotCount:profile.meetings.offered_slot_count});
+            requiredRead,priorMeetingState:priorMeetingState
+              ? (await import('./requesterMeetingState')).requesterMeetingState(profile.user.slack_user_id,input.userId,input.channelId,threadTs)
+              : undefined,readerName:input.senderName,
+            readTools,remainingTools:available.filter(name => !readTools.some(tool => tool.name === name)),owner:profile.user.name,ownerZone:profile.user.timezone,isOwner:input.authority === 'owner',offeredSlotCount:profile.meetings.offered_slot_count,
+            allowedDurations:profile.meetings.allowed_durations});
           if (outcome.read) {
             outstandingRead = outcome.read;
             outcomeRequestedAction = true;
@@ -734,7 +741,9 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       requestedOptionCount,
       requestZone:meetingRequest?.clockZone?.zone,
       meetingRequestId:meetingRequest?.batch ? undefined : meetingRequest?.requestId,
+      requesterPair:meetingRequest?.requesterPair,
       individualSearchEmails:meetingRequest?.individualSearchEmails,
+      requestSearchAddresses,
       ordinaryCreateAfterOtherMeeting,
       contextualApprovalDecisions,
       standaloneBookingApproval,
@@ -1456,20 +1465,35 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       const privateOwnerRead = input.surface === 'owner_dm' && input.authority === 'owner' && input.userId === profile.user.slack_user_id;
       const scopedToRequester = input.surface === 'colleague_dm' && input.authority === 'colleague'
         && input.userId !== profile.user.slack_user_id && (result as {_colleague_view?:boolean} | null)?._colleague_view === true;
+      if (toolUse.name === 'find_slack_user' && (privateOwnerRead || (input.surface==='colleague_dm' && input.authority==='colleague'))
+        && result && typeof result==='object' && 'matches' in result && Array.isArray(result.matches)) {
+        schedulingEvidence.push({tool:toolUse.name,query:toolInputForCall.query ?? toolInputForCall.name,
+          matches:result.matches.map(person=>({name:person.name,email:person.email,timezone:person.tz_iana}))});
+      }
       if (privateOwnerRead && toolUse.name === 'analyze_calendar' && Array.isArray(result)) {
         schedulingEvidence.push({tool:toolUse.name, days:result.map(day => ({
           date:day.date, allDayBusy:day.allDayBusy, isWorkDay:day.isWorkDay, issues:day.issues, stats:day.stats,
         }))});
       }
-      if (privateOwnerRead && ['check_calendar_health','manage_calendar_issue','recall_interactions','get_work_schedule_overrides','get_person_memory','list_pending_approvals','message_colleague'].includes(toolUse.name)
+      if (privateOwnerRead && ['check_calendar_health','manage_calendar_issue','recall_interactions','get_work_schedule_overrides','get_person_memory','update_person_profile','list_pending_approvals','message_colleague'].includes(toolUse.name)
         && result && typeof result === 'object') {
         const output = result as Record<string,unknown>;
         const facts: Record<string,unknown> = {tool:toolUse.name};
-        for (const key of ['success','ok','sent','error','found','count','summary','message','issues','fixes_applied','overrides','recent_exchange','interactions','person','timezone','currently_traveling','colleague_name','attachments_failed','await_reply']) {
+        for (const key of ['success','ok','sent','error','found','count','summary','message','issues','fixes_applied','overrides','recent_exchange','interactions','person','timezone','currently_traveling','working_hours','scheduling_hours','updated','name','colleague_name','attachments_failed','await_reply']) {
           if (output[key] !== undefined) facts[key] = output[key];
         }
         if (toolUse.name === 'list_pending_approvals' && Array.isArray(output.approvals)) {
           facts.approvals = output.approvals.map(a=>({subject:a.subject, state:a.state, description:a.description}));
+        }
+        if (toolUse.name==='check_calendar_health' && Array.isArray(output.issues)) {
+          const counts:Record<string,number> = {};
+          for (const issue of output.issues) if (typeof issue?.type==='string') counts[issue.type]=(counts[issue.type] ?? 0)+1;
+          facts.count_by_issue_type = counts;
+        }
+        if (toolUse.name === 'get_person_memory' && typeof output.timezone === 'string') {
+          const home = DateTime.now().setZone(profile.user.timezone);
+          const person = home.setZone(output.timezone);
+          if (person.isValid) facts.clocks_now = {owner:home.toFormat('ccc d LLL HH:mm ZZZZ'),person:person.toFormat('ccc d LLL HH:mm ZZZZ'),difference_minutes:person.offset-home.offset};
         }
         schedulingEvidence.push(facts);
       }
@@ -1479,7 +1503,8 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           events:events.map(event => ({
             subject:event.subject, date:event._localDate, start:event._localStartTime, end:event._localEndTime,
             allDay:event.isAllDay, cancelled:event.isCancelled,
-            ...(privateOwnerRead ? {categories:event.categories,status:event.showAs} : {}),
+            ...(privateOwnerRead ? {categories:event.categories,status:event.showAs,organizer:event.organizer,
+              attendee_emails:event.attendee_emails,attendees:event.attendees} : {}),
           })),
         });
       }
@@ -1488,6 +1513,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         // in the reply writer. Pass only outcome facts from the real handler.
         const raw = Array.isArray(result) && toolUse.name === 'find_available_slots' ? {slots:result} as Record<string,unknown> : result as Record<string,unknown>;
         const facts: Record<string,unknown> = { tool:toolUse.name };
+        if (privateOwnerRead && typeof raw._attendee_busy_note === 'string') facts.attendee_warning = raw._attendee_busy_note;
         if (toolUse.name === 'create_approval' && raw.ok === true && raw.owner_notified === true && typeof raw.approval_id === 'string') {
           notifiedApprovals.add(raw.approval_id);
         }
@@ -1508,7 +1534,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         }
         for (const key of ['success','ok','booked','booked_start','booked_end','action_summary','clock_display','presentation_local',
           'availability_scope','other_participants','owner_notified','requester_notify_outcome','broken_rule','reason','error',
-          'can_join','start_iso','end_iso','expires_at','access_mode','state','effect','requester_notice']) {
+          'can_join','start_iso','end_iso','expires_at','access_mode','state','effect','requester_notice','unchanged','moved','attendee_conflict_disposition']) {
           if (typeof raw[key] === 'string' || typeof raw[key] === 'boolean') facts[key] = raw[key];
         }
         if (toolUse.name === 'resolve_approval' && privateOwnerRead) {
@@ -1525,17 +1551,20 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
             || (Array.isArray(raw.results) && raw.results.some(slot => typeof slot?.available === 'boolean' && !slot.error))) {
             facts.owner_calendar = 'checked';
           }
-          facts.requested_bounds = {from:toolInputForCall.search_from,to:toolInputForCall.search_to,zone:toolInputForCall.search_window_timezone ?? profile.user.timezone};
+          facts.requested_bounds = requestedSearchWindow
+            ? {from:requestedSearchWindow.start,to:requestedSearchWindow.end,zone:requestedSearchWindow.zone}
+            : {from:toolInputForCall.search_from,to:toolInputForCall.search_to,zone:toolInputForCall.search_window_timezone ?? profile.user.timezone};
           facts.unverified_participant_names = raw.unverified_participant_names;
           if (Array.isArray(raw.day_summary)) {
             const requesterEmail = !privateOwnerRead && input.surface === 'colleague_dm' && input.authority === 'colleague'
-              && raw.day_summary.some(d=>Array.isArray(d.attendee_hours_note))
+              && raw.day_summary.some(d=>d.attendee_hours_note)
               ? (await import('../../db')).getPersonMemory(input.userId)?.email?.toLowerCase() : undefined;
             facts.days = raw.day_summary.map(day => ({
               date:day.date,accepted:day.accepted,main_rejection_reasons:day.top_reasons,blocked_by:day.blocked_by,
               ...(privateOwnerRead ? {attendee_hours:day.attendee_hours_note} : {}),
-              ...(requesterEmail && Array.isArray(day.attendee_hours_note) ? {
-                requester_own_hours:day.attendee_hours_note.filter((note:unknown)=>typeof note==='string' && note.toLowerCase().startsWith(requesterEmail+"'s ")),
+              ...(requesterEmail && day.attendee_hours_note ? {
+                requester_own_hours:(Array.isArray(day.attendee_hours_note) ? day.attendee_hours_note : [day.attendee_hours_note])
+                  .filter((note:unknown)=>typeof note==='string' && note.toLowerCase().startsWith(requesterEmail+"'s ")),
               } : {}),
             }));
           }
@@ -1550,6 +1579,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
             if (Array.isArray(raw[key])) facts[key] = raw[key].map(slot => ({
               start:slot.start, end:slot.end, available:slot.available, presentation_local:slot.presentation_local,
               reasons:slot.broken_rules ?? slot.broken_rule, held:!!slot.on_hold,
+              conflicts:slot.attendee_conflicts?.map((person:{email:string;reason:string;line:string})=>({email:person.email,reason:person.reason,line:person.line})),
               attendees:slot.attendee_status?.map((person:{email:string;status:string;kind:string}) => ({
                 email:person.email, status:person.status, kind:person.kind,
               })), preference:slot.less_preferred_label,
@@ -1569,6 +1599,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           facts.owner_decision_options = raw.owner_approval_candidates.map(slot =>
             ({start:slot.start, end:slot.end, owner_clock:slot.label, owner_zone:profile.user.timezone,
               presentation_local:slot.presentation_local, reasons:slot.broken_rules, pending:true,
+              availability:slot.less_preferred_label,
               attendees:slot.attendee_status?.map((person:{email:string;status:string}) => ({email:person.email,status:person.status}))}));
           if (firmWindowBooking) {
             const joint = raw.owner_approval_candidates.filter(slot=>Array.isArray(slot.attendee_status)
@@ -1881,7 +1912,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   if (bookingClockQuestion && toolCallSummaries.length === 0) finalReply = bookingClockQuestion;
   if (approvalReply && toolCallSummaries.filter(line => line.startsWith('[resolve_approval ')).length === 1
     && toolCallSummaries.every(line => line.startsWith('[resolve_approval ') || line.startsWith('[get_calendar '))) finalReply = approvalReply;
-  if (searchReply && toolCallSummaries.length === 1) finalReply = searchReply;
+  if (searchReply && toolCallSummaries.length === 1 && !availabilityPrecheckToolSummaries?.length) finalReply = searchReply;
   if (attendanceReply && toolCallSummaries.length === 2 && toolCallSummaries[1].endsWith(' notified=approval_owner')) finalReply = attendanceReply;
 
   if (!finalReply) {
