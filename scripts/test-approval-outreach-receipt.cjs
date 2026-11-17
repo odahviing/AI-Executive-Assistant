@@ -56,8 +56,39 @@ test('control different recipient still receives separate requester decision not
 });
 test('control scheduled message does not pretend requester received it', async () => {
   const h = setup({ execution: { status: 'tracked', result: { ok: true, scheduled: true, jobId: 'out_later' } } });
-  const r = await h.resolve(); assert.equal(h.effects.sends.length, 1); assert.match(r.effect, /not completed/);
-  assert.equal(r.action_summary, undefined); h.check();
+  const r = await h.resolve(); assert.equal(h.effects.sends.length, 1);
+  assert.equal(r.effect,'approved — message scheduled and awaiting delivery');
+  assert.equal(r.action_summary,'The message is scheduled and awaiting delivery.');
+  assert.match(h.effects.sends[0].body,/message.*scheduled.*delivery/);
+  h.check();
+});
+
+test('queued completion notice retains delivery status instead of reversing owner completion', async () => {
+  const h = setup({
+    execution:{status:'tracked',result:{ok:true,scheduled:true,jobId:'out_later'}},
+    row:{subject:'Sign Starz Renewal quote',details_json:JSON.stringify({
+      question:'Can you sign the renewal quote?',
+      deferred_action:action('COLLEAGUE','Idan signed the renewal quote.'),
+    })},
+  });
+  const r = await h.resolve();
+  assert.equal(h.effects.executes[0].args.message,'Idan signed the renewal quote.');
+  assert.equal(r.action_summary,'The message is scheduled and awaiting delivery.');
+  assert.match(h.effects.sends[0].body,/message.*scheduled.*delivery/);
+  assert.doesNotMatch(h.effects.sends[0].body,/action.*not completed|scheduled to be signed/);
+  const composed = h.effects.modelInputs.find(input=>input.messages[0].content.includes('Their request:'));
+  assert.ok(composed);
+  assert.ok(composed.messages[0].content.includes('This was sending a message.'));
+  assert.ok(composed.messages[0].content.includes('The message is scheduled and awaiting delivery.'));
+  h.check();
+});
+
+test('queued notification keeps its specific delivery status in Hebrew fallback', async () => {
+  const h = setup({lang:'he',execution:{status:'tracked',result:{ok:true,scheduled:true,jobId:'out_later'}}});
+  await h.resolve();
+  assert.match(h.effects.sends[0].body,/ההודעה.*ממתינה לשליחה/);
+  assert.doesNotMatch(h.effects.sends[0].body,/הפעולה.*לא הושלמה/);
+  h.check();
 });
 test('control explicit send failure retains pending decision without successful notice', async () => {
   const h = setup({ execution: { status: 'failed', result: { ok: false, error: 'not_in_channel' } } });

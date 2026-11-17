@@ -999,6 +999,10 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           ...(ownerRecord ? {
             timezone:context.profile.user.timezone, timezone_set_by:'owner_config',
             owner_schedule:context.profile.schedule,
+            owner_meeting_rules:{
+              allowed_durations:context.profile.meetings.allowed_durations,
+              categories:(context.profile.categories ?? []).map(({name,limits,day_type}) => ({name,limits,day_type})),
+            },
           } : row?.timezone ? { timezone: row.timezone, timezone_set_by: row.timezone_set_by ?? 'untagged' } : {}),
           ...(row?.state ? { state: row.state } : {}),
           ...(hours

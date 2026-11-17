@@ -38,12 +38,13 @@ function compile(source, deps, filename) {
   return exports;
 }
 
-async function run(steps) {
+async function run(steps, options = {}) {
   let modelCall = 0;
   let execution = 0;
   const profile = {
     user: { name: 'Owner Person', slack_user_id: 'U_OWNER', email: 'owner@example.test', timezone: 'Asia/Jerusalem' },
     assistant: {},
+    meetings: {offered_slot_count:8,allowed_durations:[10,25,40,55]},
   };
   const logger = { info() {}, warn() {}, error() {}, debug() {} };
   const deps = {
@@ -82,6 +83,10 @@ async function run(steps) {
         resolvedMeetingAttendees: [], availabilityPrecheckToolSummaries: [],
       }),
     },
+    './composeSchedulingOutcome': {composeSchedulingOutcome: async input => {
+      options.onCompose?.(input);
+      return {reply:'Recorded outcome.'};
+    }},
     '../../utils/turnCache': { withTurnCache: fn => fn() },
     '../../utils/rateLimit': { checkAndRecord: () => ({ allowed: true }) },
     '../../utils/toolCallCache': { lookupRecentToolCall: () => null, recordToolCall() {} },
@@ -97,12 +102,34 @@ async function run(steps) {
   const result = await orchestrator.runOrchestrator({
     userMessage: 'Run calendar health', conversationHistory: [], threadTs: 'T1', channelId: 'D1',
     userId: 'U_OWNER', senderRole: 'owner', authority: 'owner', surface: 'owner_dm', channel: 'slack', profile,
+    ...options.input,
   });
   assert.equal(execution, steps.length);
   return result;
 }
 
 const health = result => ({ name: 'check_calendar_health', result });
+
+test('owner category limits survive the actual tool loop into reply composition', async () => {
+  const rules = {allowed_durations:[10,25,40,55],categories:[{name:'Interview',limits:{per_day:2}}]};
+  let captured;
+  await run([{name:'get_person_memory',result:{found:true,person:'Owner Person',owner_meeting_rules:rules}}], {
+    input:{userMessage:'Do I have a limit of two interviews?',typedUserMessage:'Do I have a limit of two interviews?'},
+    onCompose: input => { captured=input; },
+  });
+  assert.ok(captured);
+  assert.deepEqual(JSON.parse(JSON.stringify(captured.evidence[0].owner_meeting_rules)),rules);
+});
+
+test('owner policy evidence stays outside shared-surface reply composition', async () => {
+  let captured;
+  await run([{name:'get_person_memory',result:{found:true,owner_meeting_rules:{categories:[{name:'Private category'}]}}}], {
+    input:{surface:'room',userMessage:'A policy question',typedUserMessage:'A policy question'},
+    onCompose: input => { captured=input; },
+  });
+  assert.ok(captured);
+  assert.ok(captured.evidence.every(item=>item.owner_meeting_rules===undefined));
+});
 
 function routineDecision() {
   const file = 'src/tasks/dispatchers/routine.ts';

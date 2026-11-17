@@ -1494,6 +1494,7 @@ async function runApproveCallback(
   const isBookingTool = tool === 'create_meeting' || tool === 'book_floating_block';
   const replayStart = executed.start;
   const replaySubject = executed.subject ?? row.subject ?? undefined;
+  const messageScheduled = tool === 'message_colleague' && executed.tracked;
   const messageSummary = messageDelivered && typeof replayArgs.colleague_name === 'string'
     ? (typeof replayResult?.attachments_failed === 'number' && replayResult.attachments_failed > 0
         ? `The text reached ${replayArgs.colleague_name}, but ${replayResult.attachments_failed} attachment(s) failed. Do not repeat the text.`
@@ -1501,10 +1502,12 @@ async function runApproveCallback(
     : undefined;
   const replaySummary = calendarAction && typeof replayResult?.action_summary === 'string'
     ? (replayResult.action_summary as string)
-    : ctx.wasAwaitingColleague ? undefined : messageSummary;
+    : ctx.wasAwaitingColleague ? undefined
+      : messageScheduled ? 'The message is scheduled and awaiting delivery.' : messageSummary;
   return {
     ok: true, request_id: row.id, state: 'resolved',
-    effect: executed.tracked ? 'approved — action scheduled and tracked; not completed yet' : 'approved — action replayed',
+    effect: messageScheduled ? 'approved — message scheduled and awaiting delivery'
+      : executed.tracked ? 'approved — action scheduled and tracked; not completed yet' : 'approved — action replayed',
     ...(isBookingTool ? { booked: true } : {}),
     ...(replaySubject ? { subject: replaySubject } : {}),
     ...(replayStart ? { start: replayStart } : {}),
@@ -1715,6 +1718,10 @@ export async function notifyRequesterOfDecision(
       body = requesterLang === 'he'
         ? `${hi} — בדיקת היומן מאשרת שכל הפגישות בתוכנית שאושרה נמצאות בזמנים שסוכמו.`
         : `${hi} — a calendar check confirms every meeting in the approved plan is at its agreed time.`;
+    } else if (executed?.tracked && executed.tool === 'message_colleague') {
+      body = requesterLang === 'he'
+        ? `${hi} — ההודעה בנוגע ל${subject} ממתינה לשליחה.`
+        : `${hi} — a message about ${subject} is scheduled and awaiting delivery.`;
     } else if (executed?.tracked) {
       body = requesterLang === 'he'
         ? `${hi} — הפעולה שאושרה לגבי ${subject} נקבעה להמשך והיא במעקב, אך עדיין לא הושלמה.`
@@ -1869,6 +1876,7 @@ export async function notifyRequesterOfDecision(
         deferredTool === 'delete_meeting' ? 'a cancellation'
           : (deferredTool === 'move_meeting' || deferredTool === 'update_meeting') ? 'a change to an existing meeting'
             : (deferredTool === 'create_meeting') ? 'a booking'
+              : deferredTool === 'message_colleague' ? 'sending a message'
               : undefined;
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getPersonMemory, resolveOutboundLanguageForPerson } = require('../../db/people') as typeof import('../../db/people');
@@ -1918,8 +1926,13 @@ ${ownerFirst}'s counter — DECIDED VALUES, copy each one exactly as given:
 ${amendPinned.map(p => `- ${p.key.replace(/_/g, ' ')} = ${p.value}`).join('\n')}${amendProse.length > 0 ? `\n${ownerFirst}'s own words (translate if you are writing in another language; keep the meaning): "${amendProse.join(' ')}"` : ''}
 Write the message.`;
       } else {
+        const pendingOutcome = executed?.tool === 'message_colleague'
+          ? 'The message is scheduled and awaiting delivery. This execution concerns sending that message.'
+          : 'The approved action is scheduled and tracked in an existing request, but has not completed yet.';
         const outcome = verdict === 'approve'
-          ? (executed?.coordinated ? 'A calendar check confirms every meeting in the agreed plan is at its agreed time; this does not establish which attempt produced that state.' : executed?.tracked ? 'The approved action is scheduled and tracked in an existing request, but has not completed yet.' : executed ? `The action was completed: ${actionHint ?? executed.tool}${startFormatted ? ` at ${startFormatted}` : ''}.`
+          ? (executed?.coordinated ? 'A calendar check confirms every meeting in the agreed plan is at its agreed time; this does not establish which attempt produced that state.'
+            : executed?.tracked ? pendingOutcome
+            : executed ? `The action was completed: ${actionHint ?? executed.tool}${startFormatted ? ` at ${startFormatted}` : ''}.`
             : `${ownerFirst} approved the request. No action was executed here; this is the complete yes/no decision.`)
           : verdict === 'closed_by_owner'
             ? `${ownerFirst} closed this out himself${reason && reason.trim() ? ` (${reason.trim()})` : ''} — not an approval or a decline, just handled/no longer needed`

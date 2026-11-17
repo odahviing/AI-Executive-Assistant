@@ -32,4 +32,62 @@ test('regression create uses the selected meeting roster',()=>{assert.deepEqual(
 test('regression create ambiguous roster writes no invite',()=>{assert.equal(createRoster([chris]).error,'ambiguous_meeting_roster');});
 test('control create solo block does not acquire any turn attendee',()=>{assert.deepEqual(createRoster([]),[]);});
 test('control legacy single roster still recovers missing attendee',()=>{assert.deepEqual(createRoster([paul],{resolvedMeetingAttendees:[paul,chris]}).map(a=>a.email).sort(),[paul,chris].sort());});
+
+const alex = 'alex@example.test';
+const elinor = 'elinor@example.test';
+const ayalla = 'ayalla@example.test';
+const existingMeetingContext = {
+ resolvedMeetingAttendees: [alex],
+ resolvedMeetingAttendeeGroups: [
+  {emails: [alex], unresolvedNames: []},
+  {emails: [], unresolvedNames: ['Ayalla']},
+ ],
+};
+
+for (const role of ['owner', 'colleague']) {
+ test(`${role} reschedule uses the full authorized event roster before declaring ambiguity`, async () => {
+  const eventAttendees = role === 'owner' ? [alex, elinor] : [alex, elinor, chris];
+  const r = await run({
+   clean: true, role, requesterEmail: role === 'owner' ? 'owner@example.test' : chris,
+   contextOverride: existingMeetingContext,
+   argsOverride: {attendee_emails: [alex, elinor], moving_event_ids: ['alex-event']},
+   extraMocks: {
+    'src/utils/movingEventAttendees.ts': {
+     resolveMovingEventAttendees: async () => new Map([
+      ['alex-event', {attendees: eventAttendees, categories: [], durationMinutes: 40}],
+     ]),
+    },
+   },
+  });
+  assert.ok(r.out.slots?.length, JSON.stringify(r.out));
+  assert.ok(r.calls.searches.every(call =>
+   call.attendeeBusyEmails.includes(alex) && call.attendeeBusyEmails.includes(elinor)));
+  assert.ok(r.calls.searches.every(call => !call.attendeeBusyEmails.includes(ayalla)));
+ });
+}
+
+for (const [name, role, requesterEmail, eventRoster, ids] of [
+ ['different event', 'owner', undefined, [ayalla, elinor], ['alex-event']],
+ ['unresolved event', 'owner', undefined, null, ['alex-event']],
+ ['nonmember requester', 'colleague', 'stranger@example.test', [alex, elinor], ['alex-event']],
+ ['multiple event IDs', 'owner', undefined, [alex, elinor], ['alex-event', 'ayalla-event']],
+ ['new meeting without an event', 'owner', undefined, [alex, elinor], []],
+]) {
+ test(`${name} cannot override an ambiguous meeting roster`, async () => {
+  const r = await run({
+   clean: true, role, requesterEmail,
+   contextOverride: existingMeetingContext,
+   argsOverride: {attendee_emails: [alex, elinor], moving_event_ids: ids},
+   extraMocks: {
+    'src/utils/movingEventAttendees.ts': {
+     resolveMovingEventAttendees: async () => new Map(eventRoster
+      ? [['alex-event', {attendees: eventRoster, categories: [], durationMinutes: 40}]]
+      : []),
+    },
+   },
+  });
+  assert.equal(r.out.error, 'ambiguous_meeting_roster');
+  assert.equal(r.calls.searches.length, 0);
+ });
+}
 module.exports={createRoster};

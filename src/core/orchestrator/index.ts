@@ -1484,7 +1484,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         && result && typeof result === 'object') {
         const output = result as Record<string,unknown>;
         const facts: Record<string,unknown> = {tool:toolUse.name};
-        for (const key of ['success','ok','sent','error','found','count','summary','message','issues','fixes_applied','overrides','recent_exchange','interactions','person','timezone','owner_schedule','currently_traveling','working_hours','scheduling_hours','updated','name','colleague_name','attachments_failed','await_reply']) {
+        for (const key of ['success','ok','sent','error','found','count','summary','message','issues','fixes_applied','overrides','recent_exchange','interactions','person','timezone','owner_schedule','owner_meeting_rules','currently_traveling','working_hours','scheduling_hours','updated','name','colleague_name','attachments_failed','await_reply']) {
           if (output[key] !== undefined) facts[key] = output[key];
         }
         if (toolUse.name === 'list_pending_approvals' && Array.isArray(output.approvals)) {

@@ -584,9 +584,6 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           if (ownerOnlySearch) resolvedAttendees = [];
           if (pairSearch) resolvedAttendees = [requesterEmail!];
           if (individualSearch) resolvedAttendees = explicitPeople;
-          if (resolvedAttendees === null) {
-            return { error: 'ambiguous_meeting_roster', message: 'Identify which meeting this search is for and supply its participants. For a question specifically about the owner’s availability, retry with owner_availability_only=true and no attendees. For joint availability keep each meeting’s participants together.' };
-          }
 
           // MOVE-PATH AUTO-FILL: when moving_event_ids is set, auto-read the moving
           // event's real roster so a later call that DROPPED an attendee still checks
@@ -761,7 +758,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // cross-check, so it keeps trusting the id exactly as before.
                 const expectedLower = new Set<string>([
                   ...attendeeEmails.map(e => e.toLowerCase()),
-                  ...resolvedAttendees
+                  ...(resolvedAttendees ?? [])
                     .map(e => e.toLowerCase()),
                 ]);
                 if (expectedLower.size > 0) {
@@ -875,6 +872,17 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 }
               }
               const fromEvent = [...new Set(qualifyingIds.flatMap(id => rosterById.get(id)?.attendees ?? []))];
+              // A single authorized existing event supplies its complete roster.
+              // Human request groups may name only Alex while the invitation
+              // also includes Elinor. Resolve that scope after the event read
+              // and membership/identity checks, before rejecting the search.
+              if (resolvedAttendees === null && movingIdsForAttendees.length === 1
+                  && qualifyingIds.length === 1 && fromEvent.length > 0) {
+                const eventEmails = new Set(fromEvent.map(email => email.toLowerCase()));
+                const explicitMatches = attendeeEmails.every(email => email.toLowerCase() === userEmail.toLowerCase()
+                  || eventEmails.has(email.toLowerCase()));
+                if (explicitMatches) resolvedAttendees = fromEvent;
+              }
               if (fromEvent.length > 0) {
                 const explicitLc = attendeeEmails.map(e => e.toLowerCase());
                 const eventLc = fromEvent.map(e => e.toLowerCase());
@@ -915,6 +923,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 err: String(err).slice(0, 200),
               });
             }
+          }
+
+          if (resolvedAttendees === null) {
+            return { error: 'ambiguous_meeting_roster', message: 'Identify which meeting this search is for and supply its participants. For a question specifically about the owner’s availability, retry with owner_availability_only=true and no attendees. For joint availability keep each meeting’s participants together.' };
           }
 
           // Recover known colleagues from this meeting's resolved roster,

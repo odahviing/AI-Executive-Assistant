@@ -5,12 +5,23 @@ test('the owner’s scheduling timezone comes from the live profile while other 
   const h=harness([{slack_id:'UOWNER99',name:'Owner Example',email:'owner@example.com',timezone:'Asia/Jerusalem'},chris]);
   h.profile.user.timezone='America/New_York';
   h.profile.schedule={work_hours:{Wednesday:'05:30-14:30'}};
+  h.profile.categories=[{name:'Interview',limits:{per_day:2},day_type:'office_days'},{name:'Meeting'}];
+  h.profile.meetings.allowed_durations=[10,25,40,55];
   const owner=await h.tool('get_person_memory',{person:'Owner Example'},'owner');
   assert.equal(owner.timezone,'America/New_York');
   assert.equal(owner.timezone_set_by,'owner_config');
   assert.deepEqual(owner.owner_schedule,h.profile.schedule);
+  assert.deepEqual(JSON.parse(JSON.stringify(owner.owner_meeting_rules)),{
+    allowed_durations:[10,25,40,55],categories:[{name:'Interview',limits:{per_day:2},day_type:'office_days'},{name:'Meeting'}],
+  });
   const person=await h.tool('get_person_memory',{person:chris.name},'owner');
   assert.equal(person.owner_schedule,undefined);
+  assert.equal(person.owner_meeting_rules,undefined);
+  for(const [role,surface] of [['owner','room'],['colleague','colleague_dm']]){
+    const blocked=await h.tool('get_person_memory',{person:'Owner Example'},role,surface);
+    assert.equal(blocked.error,'not_permitted');
+    assert.equal(blocked.owner_meeting_rules,undefined);
+  }
   assert.equal(h.p().getPersonMemory('UOWNER99').timezone,'Asia/Jerusalem');
 });
 test('I1 substring and conflicting email never bind',()=>{

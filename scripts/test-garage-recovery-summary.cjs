@@ -10,7 +10,7 @@ let source=fs.readFileSync(file,'utf8').split('if(require.main===module)')[0]
 vm.runInNewContext(source,{require:createRequire(file),module:mod,__dirname,process,console,Date,Buffer,setTimeout,clearTimeout});
 const email='peer@example.test',zone='Asia/Jerusalem';
 const prefixes=['attendee_busy_collision','outside_attendee_work_hours','attendee_out_of_office'];
-async function run({clean=false,busy=false,offhours=false,offline=false,recoveryOffline=false,unknown=false,role='owner',mustBe=false,multi=false,argsOverride={},contacts=[],availabilityOverride,workHoursOverride,requesterEmail,inPersonHome=false,contextOverride={},meetingsOverride={},ownerBusy=[],overrideRows={},realDensity=false}={}) {
+async function run({clean=false,busy=false,offhours=false,offline=false,recoveryOffline=false,unknown=false,role='owner',mustBe=false,multi=false,argsOverride={},contacts=[],availabilityOverride,workHoursOverride,requesterEmail,inPersonHome=false,contextOverride={},meetingsOverride={},ownerBusy=[],overrideRows={},realDensity=false,extraMocks={}}={}) {
  let calendarReads=0;
  const availability=availabilityOverride??[{email,timezone:zone,week:require('./fixtures/regular-week.cjs').regularWeek(['Sunday','Monday','Tuesday','Wednesday','Thursday'],offhours?'20:00':'09:00',offhours?'21:00':'18:00')}];
  const h=mod.exports.harness(multi?{'2026-10-05':{isWorkday:false}}:overrideRows, {offline,realDensity, calendar:{oofUntilDisplayFor:()=>undefined,GraphPermissionError:class extends Error{},firstRejectReason:d=>Object.keys(d??{})[0]},extraMocks:{
@@ -21,6 +21,7 @@ async function run({clean=false,busy=false,offhours=false,offline=false,recovery
   'src/db.ts':{getPersonMemory:()=>({email:requesterEmail}),getPersonByEmail:()=>({name:'Peer'}),listSchedulingContacts:()=>contacts,getEffectiveTimezoneById:id=>({timezone:contacts.find(p=>p.person_id===id)?.timezone}),getTravelRecordById:()=>null},
   'src/utils/displaySubject.ts':{subjectViewerFor:()=> 'owner',viewerEmailFor:()=>undefined},
   'src/connectors/graph/calendarReads.ts':{getFreeBusyForDecision:async(_u,_e,_s,_t,_z,diag)=>{if(unknown&&diag)diag.notChecked=[email];return {'owner@example.test':ownerBusy,[email]:busy?[{start:'2026-10-06T00:00:00+03:00',end:'2026-10-07T00:00:00+03:00',status:'busy'}]:[]}},getOwnerEventsForDecision:async()=>{if(offline || (recoveryOffline && ++calendarReads>1))throw Error('fixture calendar unavailable');return []},isOutageShaped:()=>false,CalendarOfflineError:Error},
+  ...extraMocks,
  }});
  Object.assign(h.load('src/utils/attendeeAvailability.ts'),{loadAttendeeAvailabilityForEmails:()=>availability,singleAttendeePresentationZone:()=>undefined});
  h.profile.schedule.work_hours=workHoursOverride??Object.fromEntries(['Sunday','Monday','Tuesday','Wednesday','Thursday'].map(d=>[d,['09:00-18:00']]));
