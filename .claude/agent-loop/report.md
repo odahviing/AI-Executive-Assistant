@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
-**5 product decisions await you** — 6 open items; 0 captured, 0 ready for an authorized lane batch, 1 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
+**5 product decisions await you** — 8 open items; 0 captured, 0 ready for an authorized lane batch, 2 held, 0 dependency blocked, 1 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (1):** nov13-boston-office-location
+**Independently verified, awaiting wrap (0):** none
 
 ### Needs a product decision (5)
 
@@ -13,9 +13,20 @@
 | matchmaker · nov13-reported-duplicate-visit | bug: W2: one matching creation per requested visit title, three distinct organizer IDs, six matching iCalUIds with six different attendee IDs. Cannot identify a deleted second organizer event or its author from surviving rows. Reopen with a s… (1 retained example) | W2: one matching creation per requested visit title, three distinct organizer IDs, six matching iCalUIds with six different attendee IDs. Cannot identify a deleted second organizer event or its author from surviving rows. Reopen with a second organizer ID or calendar deletion audit, if available. Distinct duplicate address defect has separate nov13-duplicate-invite-address ref. Evidence: artifacts/workshop-verification/nov13-incident/visit-provider-correlations.json Recommend: Defer duplicate-event attribution until a second organizer event ID or deletion audit is available. | Not assessed |
 | librarian · nov13-family-coda-scheduling | bug: Family-size question was sent after an explicitly accepted and completed booking. (1 retained example) | L7/L8 and the approved category catalog allow this completed-booking family coda. Should Maelle wait for a person to introduce family before asking a personal family question? Evidence artifacts/workshop-verification/nov13-incident/cloud.json at 17:45:04Z. Recommend: Keep current completed-work eligibility. Change family discovery only if the owner wants a different topic policy. | Not assessed |
 
-### Held — recorded rulings / existing backlog (1)
+### Held — recorded rulings / existing backlog (2)
 
 | Lane · ref | What happened | Your options | Risk |
 |---|---|---|---|
 | librarian · knowledge-uploaded-document-persistence | suggestion: Uploaded document retention and provenance policy needs owner choice | Held: Correcting mistaken inclusion from generic run-all: original committed report owner ruling was Yes handle separate. Current owner says do not know what item is; no explicit per-item release was supplied. Restore separate held scope… | Not assessed |
+| handyman · meeting-hard-deadline-followup | backlog: A colleague supplies the remaining meeting details after requesting a fixed day, but Maelle repeats later options instead of resolving the pending decision. | Held: Owner requested continued repair in 5.5. Reproduced in offline conversation 8. | Not assessed |
+
+### Awaiting independent review or repair (1)
+
+| Lane · ref | What happened | Your options | Risk |
+|---|---|---|---|
+| handyman · nov13-boston-office-location | bug: config/users/idan.yaml:189,356 incorrect office city for owner (1 retained example) | Not verified; review or repair required | Not assessed |
+
+### Framework work (1 open)
+
+- X234 — verification-unproven: Stale citation checker reports heuristic body-anchor distance as proven stale — approved-batch-20261004-X234-a1 — Framework behavioral pass. Inspection confirms detector, scope selection and blocking exit unchanged; suspected declaration-distance drift is no longer called proven semantic error. Executed16 cases cover body/declaration/use/weak/unresolved/EOF, unrelated diff filtering, mixed categories and strict exits. Synchronous CLI has no product caller, persisted state, background lifecycle or external action. Heuristic positional results still require human semantic review.
 
