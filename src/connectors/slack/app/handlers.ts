@@ -9,7 +9,7 @@
 import { config } from '../../../config';
 import { getAnthropicClient } from '../../../llm/client';
 import { ownerPostedInThread, classifyThreadAction, buildThreadRoster, buildThreadActionDirective } from '../../../core/threadActions';
-import { getConversationHistory, appendToConversation, upsertPersonMemory } from '../../../db';
+import { appendToConversation, upsertPersonMemory } from '../../../db';
 import { transcribeSlackAudio } from '../../../voice';
 import { type AnthropicImageBlock } from '../../../vision';
 import logger from '../../../utils/logger';
@@ -700,40 +700,12 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
       // existing addressee classifier decides meaning; only a bot mention is
       // a deterministic addressing signal.
 
-      // ── Relevance check — MPIM rules (different from channels) ───────────────
-      // Default: RESPOND. The classifier only suppresses on clear IGNORE conditions.
-      // Pass member names so the classifier can correctly evaluate introductions, etc.
-      const history         = getConversationHistory(threadTs);
-      // v1.7.5 — when Maelle was the most-recent or second-most-recent speaker,
-      // skip the relevance gate entirely. The next message in the thread is
-      // almost certainly a continuation of the exchange she's actively in.
-      // The gate exists to filter unrelated chatter — that's not the failure
-      // mode here, and false negatives (Yael answering Maelle's question →
-      // silenced) burn trust harder than false positives.
-      const recentlyActive = history.slice(-3).some(m => m.role === 'assistant');
-      // v3.1.x — explicit-@mention fast-path. When the message @mentions the
-      // bot directly, that's the most unambiguous "respond" signal there is —
-      // skip the relevance LLM entirely. (mentionedIds + botUserId are already
-      // computed above; we only reach here when mentions are absent OR the bot
-      // IS among them, since the other-people-only case already returned earlier.)
-      // Closes the ~2s wasted Sonnet relevance call on every @Maelle group
-      // opener — the old fast-path in relevance.ts required ZERO @mentions, so
-      // an explicit @Maelle disabled it and paid the full classification.
-      // v3.3.x — outer MPIM relevance Haiku call DELETED. It duplicated work
-      // already done by `classifyAddressee` inside `processMessage` (both Haiku
-      // post-v3.3.0, both classifying the same RESPOND/IGNORE question with
-      // slightly different framings). The inner gate has identical skip
-      // conditions (explicit @bot, recently-active, sender-is-owner) plus a
-      // finer MAELLE/HUMAN/AMBIGUOUS verdict. The fast-path log below preserves
-      // the "explicitly mentioned" / "recently active" trail for diagnostics
-      // without paying the LLM call.
+      // Only an explicit bot mention bypasses the existing addressee gate.
+      // Recent assistant activity cannot turn human-to-human messages into
+      // commands. processMessage makes the single addressee decision.
       const botExplicitlyMentioned = ctx.botUserId != null && mentionedIds.includes(ctx.botUserId);
       if (botExplicitlyMentioned) {
         logger.info('MPIM mention fast-path — bot explicitly @mentioned', {
-          senderId: event.user, channelId: event.channel, threadTs, preview: rawText.slice(0, 80),
-        });
-      } else if (recentlyActive) {
-        logger.info('MPIM mention fast-path — Maelle was just active in this thread', {
           senderId: event.user, channelId: event.channel, threadTs, preview: rawText.slice(0, 80),
         });
       }

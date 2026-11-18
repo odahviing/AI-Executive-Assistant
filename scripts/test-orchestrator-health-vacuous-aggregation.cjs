@@ -59,7 +59,7 @@ async function run(steps, options = {}) {
       executeSkillTool: async (name,args) => {
         const next = steps[execution++];
         assert.equal(name, next.name);
-        options.onExecute?.(name,args);
+        await options.onExecute?.(name,args);
         return structuredClone(next.result);
       },
     },
@@ -73,7 +73,7 @@ async function run(steps, options = {}) {
       summarizeToolCall: name => `[${name}] fixture`,
       summarizeInternalAction: (name, parent) => `[${name}] via ${parent}`,
       callClaude: async request => {
-        options.onModel?.(request);
+        await options.onModel?.(request);
         if (options.responses) {
           return options.responses[modelCall++] ?? {stop_reason:'end_turn',content:[{type:'text',text:'Ready to answer.'}]};
         }
@@ -114,6 +114,71 @@ async function run(steps, options = {}) {
   assert.equal(execution, options.expectedExecutions ?? steps.length);
   return result;
 }
+
+test('superseded model response cannot dispatch a calendar write',async()=>{
+ const controller=new AbortController();let writes=0,reservations=0;
+ await assert.rejects(run([{name:'create_meeting',result:{success:true,meetingId:'event'}}],{
+  onModel:()=>controller.abort(),onExecute:()=>writes++,
+  input:{signal:controller.signal,onWriteExecuted:()=>reservations++},
+ }),{name:'AbortError'});
+ assert.equal(writes,0);assert.equal(reservations,0);
+});
+
+test('superseded read in a model batch cannot dispatch its following write',async()=>{
+ const controller=new AbortController(),executed=[];
+ await assert.rejects(run([{name:'get_calendar',result:{events:[]}},{name:'create_meeting',result:{success:true,meetingId:'event'}}],{
+  responses:[{stop_reason:'tool_use',content:[{type:'tool_use',id:'read',name:'get_calendar',input:{}},{type:'tool_use',id:'write',name:'create_meeting',input:{}}]}],
+  onExecute:name=>{executed.push(name);if(name==='get_calendar')controller.abort();},input:{signal:controller.signal},
+ }),{name:'AbortError'});
+ assert.deepEqual(executed,['get_calendar']);
+});
+
+test('rejected write reservation cannot be swallowed before dispatch',async()=>{
+ let writes=0;const rejection=Object.assign(Error('aborted_for_merge'),{name:'AbortError'});
+ await assert.rejects(run([{name:'create_meeting',result:{success:true,meetingId:'event'}}],{
+  onExecute:()=>writes++,input:{onWriteExecuted:()=>{throw rejection;}},
+ }),err=>err===rejection);
+ assert.equal(writes,0);
+});
+
+test('active write preserves its successful execution receipt',async()=>{
+ let reservations=0;const r=await run([{name:'create_meeting',result:{success:true,meetingId:'event'}}],{
+  input:{signal:new AbortController().signal,onWriteExecuted:()=>reservations++},
+ });assert.equal(reservations,1);assert.ok(r.mutationActions.some(a=>a.ok&&a.eventId==='event'));
+});
+
+test('Ayala race: actual queue cancels a waiting model without an orphan booking',async()=>{
+ const {harness}=require('./test-slack-thread-boundaries.cjs');
+ let release;const pending=new Promise(resolve=>{release=resolve;});let writes=0;
+ const h=harness({orchestrator:async(p,n)=>{
+  const {profile:ignored,...input}=p;
+  if(n===1)return run([{name:'create_meeting',result:{success:true,meetingId:'event'}}],{input,onModel:()=>pending,onExecute:()=>writes++});
+  return run([],{input,responses:[{stop_reason:'end_turn',content:[{type:'text',text:'Stopped.'}]}]});
+ }});
+ await h.turn({text:'Book 12:30'});await h.fire();
+ await h.turn({text:'Stop',ts:'102.000001'});release();
+ await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+ assert.equal(writes,0);assert.equal(h.posts.length,0);
+ await h.fire();assert.equal(h.runs.length,2);assert.equal(h.posts.length,1);
+ assert.ok(h.runs[1].userMessage.includes('Stop'));assert.equal(writes,0);
+});
+
+test('queue follow-up after write reservation retains the completed booking',async()=>{
+ const {harness}=require('./test-slack-thread-boundaries.cjs');
+ let release;const pending=new Promise(resolve=>{release=resolve;});let writes=0;
+ const h=harness({orchestrator:async(p,n)=>{
+  const {profile:ignored,...input}=p;
+  if(n===1)return run([{name:'create_meeting',result:{success:true,meetingId:'event'}}],{input,onExecute:async()=>{writes++;await pending;},
+   responses:[{stop_reason:'tool_use',content:[{type:'tool_use',id:'book',name:'create_meeting',input:{}}]},{stop_reason:'end_turn',content:[{type:'text',text:'Booked Friday 12:30.'}]}]});
+  return run([],{input,responses:[{stop_reason:'end_turn',content:[{type:'text',text:'No further actions.'}]}]});
+ }});
+ await h.turn({text:'Book 12:30'});await h.fire();assert.equal(writes,1);
+ await h.turn({text:'Stop',ts:'102.000001'});release();
+ await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));await h.fire();
+ assert.equal(writes,1);assert.equal(h.runs.length,2);assert.equal(h.posts.length,2);
+ assert.ok(h.runs[1].conversationHistory.some(m=>m.content.includes('Booked Friday 12:30.')));
+ assert.equal(h.runs[1].userMessage,'Stop');
+});
 
 for(const name of ['create_meeting','move_meeting'])test(name+' keeps the checked conflict interval for final calendar truth',async()=>{
  const start='2026-11-10T10:50:00-05:00',end='2026-11-10T11:30:00-05:00';

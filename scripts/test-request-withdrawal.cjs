@@ -11,16 +11,18 @@ function predicate(){
 }
 async function run(change={},inputChange={}){
  const source=fs.readFileSync(process.env.WITHDRAW_BEFORE_PATH||root+'index.ts','utf8');
- const ast=ts.createSourceFile('index.ts',source,ts.ScriptTarget.Latest,true);let branch;
- function visit(n){if(ts.isIfStatement(n)&&n.expression.getText(ast)==='withdrawalId')branch=n.getText(ast);ts.forEachChild(n,visit)}visit(ast);assert.ok(branch);
+ const ast=ts.createSourceFile('index.ts',source,ts.ScriptTarget.Latest,true);let branch,guard='';
+ function visit(n){if(ts.isIfStatement(n)&&n.expression.getText(ast)==='withdrawalId')branch=n.getText(ast);
+  if(ts.isVariableStatement(n)&&n.declarationList.declarations.some(d=>d.name.getText(ast)==='assertTurnActive'))guard=n.getText(ast);
+  ts.forEachChild(n,visit)}visit(ast);assert.ok(branch);
  const state={row:{...row,...change},closed:[],writes:[],locked:[]};
  const deps={
-  '../requests/resolver':{withRequestLock:async(id,fn)=>{state.locked.push(id);return fn();}},
+  '../requests/resolver':{withRequestLock:async(id,fn)=>{state.locked.push(id);await inputChange.beforeLock?.();return fn();}},
   '../../db/requests':{getRequest:()=>state.row},
-  '../requests/closeRequest':{closeRequest:value=>{state.closed.push(value);state.row.state=value.state;return {ok:true};}},
+  '../requests/closeRequest':{closeRequest:value=>{state.closed.push(value);inputChange.onClose?.(value);state.row.state=value.state;return {ok:true};}},
   './requesterMeetingState':{canWithdrawOwnRequest:predicate()},
  };
- const code=ts.transpileModule('async function execute(){'+branch+'}\nmodule.exports=execute;',
+ const code=ts.transpileModule('async function execute(){'+guard+branch+'}\nmodule.exports=execute;',
   {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
  const module={exports:{}};
  new Function('require','module','withdrawalId','profile','input','threadTs','localizedFallback','__importStar','meetingRequest',code)(
@@ -54,4 +56,11 @@ test('a repeated withdrawal cannot run again after closure',async()=>{
 for(const active of ['marketing','linkedin'])test('withdrawal is bound to the selected conversation request: '+active,async()=>{
  const state=await run({details_json:JSON.stringify({meeting_request_id:'linkedin'})},{meetingRequest:{requestId:active}});
  assert.equal(state.closed.length,active==='linkedin'?1:0);
+});
+
+test('superseded withdrawal waiting on the request lock cannot close work',async()=>{
+ const controller=new AbortController(),closed=[],writes=[];
+ await assert.rejects(run({}, {signal:controller.signal,beforeLock:async()=>{await Promise.resolve();controller.abort();},
+  onClose:value=>closed.push(value),onWriteExecuted:name=>writes.push(name)}),{name:'AbortError'});
+ assert.deepEqual(closed,[]);assert.deepEqual(writes,[]);
 });

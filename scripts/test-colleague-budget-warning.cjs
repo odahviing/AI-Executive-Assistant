@@ -36,7 +36,7 @@ async function fixture(options = {}) {
   });
   const source = fs.readFileSync(process.env.BUDGET_BEFORE_SOURCE || path.join(root, 'src/core/orchestrator/index.ts'), 'utf8');
   const start = source.indexOf('      // ── RATE LIMIT: colleague tool calls');
-  const end = source.indexOf('      // v2.4.3 (A1)', start);
+  const end = source.indexOf('      const preferenceRead =', start);
   assert.ok(start > 0 && end > start);
   const wrapped = 'exports.run = async function(input, profile, toolUse) { const threadTs=input.threadTs; const priorMeetingState=input.priorMeetingState; const toolResults=[]; const toolCallSummaries=[]; let executed=0,turnToolBudgetExhausted=false; for(const once of [1]) {' + source.slice(start, end) + 'executed++; } return {toolResults,toolCallSummaries,executed}; };';
   const code = ts.transpileModule(wrapped, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;

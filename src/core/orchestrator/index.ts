@@ -354,6 +354,15 @@ export async function runOrchestrator(input: OrchestratorInput): Promise<Orchest
 
 async function runOrchestratorImpl(input: OrchestratorInput): Promise<OrchestratorOutput> {
   const { userMessage, conversationHistory, threadTs, profile } = input;
+  // A model response or read can finish after the queue supersedes this turn.
+  // Check again at dispatch, synchronously with reserving the first write.
+  const assertTurnActive = () => {
+    if (!input.signal?.aborted) return;
+    const error = new Error('aborted_for_merge');
+    error.name = 'AbortError';
+    throw error;
+  };
+  assertTurnActive();
 
   const {
     messages,
@@ -437,6 +446,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     const closed = await withRequestLock(withdrawalId, async () => {
       const row = getRequest(withdrawalId);
       if (!row || !canWithdrawOwnRequest(row,profile.user.slack_user_id,input.userId,input.channelId,threadTs,meetingRequest?.requestId)) return false;
+      assertTurnActive();
       input.onWriteExecuted?.('withdraw_request');
       return closeRequest({id:row.id,state:'cancelled',closureReason:'requester_withdrew_request',closedBy:'colleague_reply'}).ok;
     });
@@ -579,18 +589,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   let hasWindowException = false;
   const requestSearchAddresses = meetingRequest && (await import('../../skills/meetings/bookingRequest')).requestSearchAddresses(meetingRequest);
   while (iteration < MAX_ITERATIONS) {
-    // v2.4.3 (A1) — check abort signal at the iteration boundary. The
-    // inbound queue triggers abort when a freshly-arrived message in the
-    // same thread should merge into a new turn, BUT only when no write
-    // tool has fired yet (queue checks that flag synchronously before
-    // calling abort). So if we see signal.aborted here, it's safe to
-    // throw — no in-flight tool, no irreversible state to leave behind.
-    if (input.signal?.aborted) {
-      logger.info('Orchestrator turn aborted at iteration boundary (A1 merge)', { threadTs, iteration });
-      const e: Error & { name?: string } = new Error('aborted_for_merge');
-      e.name = 'AbortError';
-      throw e;
-    }
+    assertTurnActive();
     iteration++;
 
     // Asking permission is the entire authorized action. Feed its exact stored
@@ -798,6 +797,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       content:'The answer cannot be finalized alongside operations. Read their results, then finish the turn.'});
 
     for (const toolUse of toolBlocks as Anthropic.ToolUseBlock[]) {
+      assertTurnActive();
       if (input.surface === 'colleague_dm' && input.authority === 'colleague' && disputedClocks.length &&
           (toolUse.name === 'create_meeting' || toolUse.name === 'hold_slot' || toolUse.name === 'create_approval')) {
         const args = toolUse.input as {start?: string; start_iso?: string; payload?: {start?: string}};
@@ -1053,16 +1053,15 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         }
       }
 
-      // v2.4.3 (A1) — flag write tools BEFORE execution. The inbound queue
-      // checks this flag synchronously when a new message arrives mid-turn:
-      // if no writes yet → safe to abort + merge; if writes fired → can't
-      // abort, buffer for follow-up turn. Calling onWriteExecuted from
-      // INSIDE executeSkillTool would race the queue's read; flagging here
-      // (just before dispatch) is the safe ordering.
+      // Cancellation and the first-write reservation are one synchronous
+      // boundary. No await may separate this check from the callback. A
+      // rejected reservation must propagate; dispatching anyway would orphan
+      // a real action when the superseded turn is discarded by the queue.
       const preferenceRead = toolUse.name === 'update_my_preferences'
         && (toolUse.input as { mode?: string }).mode?.trim() === 'read';
+      assertTurnActive();
       if (input.onWriteExecuted && (WRITE_TOOLS.has(toolUse.name) || (existingInviteSubject && toolUse.name === 'check_join_availability')) && !preferenceRead) {
-        try { input.onWriteExecuted(toolUse.name); } catch (_) { /* never fail the turn over the callback */ }
+        input.onWriteExecuted(toolUse.name);
       }
 
       // v2.7.2 — deferred_action auto-attach. When create_approval(kind=

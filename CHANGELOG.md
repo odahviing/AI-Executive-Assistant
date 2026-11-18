@@ -1,3 +1,16 @@
+## 5.5.1 — Stop cancelled turns from creating meetings
+
+Rapid Slack follow-ups can replace a turn while its model response is still pending. That cancelled turn can no longer create a meeting and then lose the booking result from the conversation.
+
+### Fixed
+- Check cancellation immediately before calendar actions and reject late write reservations. Once a write starts, keep its result and process new messages afterward.
+- Apply the existing addressee check to unmentioned group messages even when Maelle recently spoke. Human-to-human replies no longer bypass that check; direct DMs and explicit bot mentions keep their direct path.
+- Report bookings to the owner without inventing a private-message confirmation.
+
+### Validation
+- Ten regression cases fail against the previous code and pass with the repair. Affected native checks cover 157 suite/zone executions and 3,661 assertions after two test-fixture repairs; typecheck passes. Original failures and their targeted replacements are retained in the release evidence.
+- SOLO review and isolated model responses only; no real-LLM simulations. Real addressee judgment remains untested. Restoring the existing Haiku check can increase its use in group conversations.
+
 ## 5.5.0 — Rebuild scheduling context, approvals and replies
 
 Scheduling carries each request's participants, chosen times and confirmed outcomes through a shared flow. Follow-ups can return to an earlier appointment without borrowing another meeting's recipients or losing the owner's pending decision.

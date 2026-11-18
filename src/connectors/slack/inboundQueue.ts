@@ -339,7 +339,16 @@ async function scheduleRun(key: string): Promise<void> {
       mergedTypedText: spansMultipleSenders ? '' : batch.map(m => m.typedText).join('\n\n'),
       meta,
       signal: controller.signal,
-      markWrite: () => { state.hasWriteFired = true; },
+      markWrite: () => {
+        // An awaited classifier/model can return after a merge was requested.
+        // Such a turn cannot reserve a write retroactively.
+        if (controller.signal.aborted) {
+          const error = new Error('aborted_for_merge');
+          error.name = 'AbortError';
+          throw error;
+        }
+        state.hasWriteFired = true;
+      },
       spansMultipleSenders,
       messageTimestamps: batch.map(m => m.meta.messageTs).filter((ts): ts is string => typeof ts === 'string'),
       senderIds: [...distinctSenders],

@@ -1,0 +1,154 @@
+{
+  "version": "5.5.1",
+  "status": "publication-ready-awaiting-live-boot",
+  "previousLive": {
+    "version": "5.5.0",
+    "sha": "cef609d2768111d60d7b95106c3fa66647deeac8"
+  },
+  "authorization": "Continuation of the owner-authorized repair/release. Latest instruction: fix without simulation. Earlier explicit SOLO instruction retained.",
+  "checkpoint": "quick, affected integration coverage",
+  "scope": "Existing turn cancellation/write reservation and group addressee boundaries, plus owner booking receipt text. No prompt, dependency, schema or scheduling-policy changes.",
+  "reviewMode": "SOLO per owner instruction; no independent Bouncer claim",
+  "areas": [
+    {
+      "file": "src/core/orchestrator/index.ts",
+      "finding": "A late model response could dispatch a write after cancellation; write-reservation errors were swallowed.",
+      "repair": "Check turn cancellation at dispatch and withdrawal, synchronously reserve before action, propagate reservation rejection."
+    },
+    {
+      "file": "src/connectors/slack/inboundQueue.ts",
+      "finding": "A cancelled turn could set hasWriteFired retrospectively.",
+      "repair": "Reject late write reservations after cancellation; retain the existing post-write buffering path."
+    },
+    {
+      "file": "src/connectors/slack/app/processMessage.ts",
+      "finding": "Any assistant response in the last three messages disabled addressee checking for human-to-human group replies.",
+      "repair": "Use the existing addressee gate for unmentioned group messages; preserve explicit bot-mention and direct-DM paths. Gate unavailability stays silent."
+    },
+    {
+      "file": "src/skills/meetings/ops/handlers/createMeeting.ts",
+      "finding": "The owner shadow asserted DM confirmation even for a group message.",
+      "repair": "Describe the confirmed booking and source conversation without inventing consent or a DM."
+    }
+  ],
+  "checks": {
+    "before": "before-final-tests.log: 9 failed / 49 passed; withdrawal-before.log: 1 failed / 16 unrelated skipped.",
+    "after": "The same cases pass in the native packages. Successful writes, post-write follow-ups, direct DMs and explicit mentions remain covered.",
+    "broad": {
+      "evidence": "affected-checkpoint/report.json",
+      "status": "blocked",
+      "passed": 155,
+      "total": 157
+    },
+    "replacements": {
+      "evidence": "fixture-recheck/report.json",
+      "status": "passed",
+      "passed": 2,
+      "changedFiles": [
+        "scripts/test-colleague-budget-warning.cjs",
+        "scripts/test-request-withdrawal.cjs"
+      ],
+      "reason": "Two test harnesses extracted partial source: budget delimiter depended on an edited comment; withdrawal extraction omitted the actual cancellation closure. The harnesses now retain the correct code. No assertions removed; a waiting-withdrawal regression was added. Product code unchanged after broad run."
+    },
+    "reconciled": {
+      "suiteZoneExecutions": 157,
+      "passedAssertions": 3661,
+      "typecheck": "passed",
+      "freshNativeReplacementCheck": {
+        "ok": true,
+        "errors": [],
+        "changed": []
+      },
+      "limitation": "Coverage reconciliation, not a relabelled all-green original report. Failed original reports and output remain intact."
+    },
+    "evidenceRoot": "artifacts/incidents/2026-11-18-ayala-first-5.5",
+    "reports": [
+      {
+        "file": "affected-checkpoint/report.json",
+        "sha256": "6018e758c665b81407795291c1271a8d46e4f059ca6e07688325ec14bc17af98"
+      },
+      {
+        "file": "fixture-recheck/report.json",
+        "sha256": "50aeae0f8d3c3b138f729b969dbedc02d5c5d4375254cc394b0725a27bc17d8f"
+      }
+    ],
+    "beforeCases": 10
+  },
+  "executableFiles": [
+    {
+      "file": "scripts/test-active-group-addressee.cjs",
+      "sha256": "54aa7d82a6c2a5d84eb48b6d09a2109b27a4db27e5de596c17d4d3229ba76737"
+    },
+    {
+      "file": "scripts/test-colleague-budget-warning.cjs",
+      "sha256": "44eeecf374dbfad7fbd7bb475b3b036804590684ae0cdc81b0025b422707edaf"
+    },
+    {
+      "file": "scripts/test-orchestrator-health-vacuous-aggregation.cjs",
+      "sha256": "c1392d4cc4364224fb7eadb307d411cae44bc3698098de3d066981e6ddcbea4a"
+    },
+    {
+      "file": "scripts/test-request-withdrawal.cjs",
+      "sha256": "427415e6bb610751e4b2d591626af0d512923a5a8f590b35baea6a85460acad5"
+    },
+    {
+      "file": "src/connectors/slack/app/handlers.ts",
+      "sha256": "bc7a5d7071412a8117c443524cedc87d6890e4c32ff8bd1c1dcf6351cf1ae166"
+    },
+    {
+      "file": "src/connectors/slack/app/processMessage.ts",
+      "sha256": "c174608157cb82752a767bb8a8e2dbe8fc8135d529139a9c2fe93f3a28917a38"
+    },
+    {
+      "file": "src/connectors/slack/inboundQueue.ts",
+      "sha256": "2408973455fd14a4c36556a916ffce4e4a22c7f9510a67701f71f39341c66856"
+    },
+    {
+      "file": "src/core/orchestrator/index.ts",
+      "sha256": "fac404910ed2cf2211ea0bd99c599b6db90ae8a6ee91aa9b1846c050e2a96c5d"
+    },
+    {
+      "file": "src/skills/meetings/ops/handlers/createMeeting.ts",
+      "sha256": "b6094cf7daf93925030396bcad3c7bba4ab64489b4ad8f5fa864dab090ae8fbb"
+    }
+  ],
+  "metadata": [
+    {
+      "file": "package.json",
+      "beforeSha256": "816f9af673f0b2b765e0980910660ba7f982c0a1a771d5178e190be09615ac32",
+      "afterSha256": "bc04c4d72895814042aca089ac0ae0a420806d849050127e0fb3d374d2536355",
+      "change": "Root version fields only: 5.5.0 to 5.5.1. Dependencies unchanged."
+    },
+    {
+      "file": "package-lock.json",
+      "beforeSha256": "ff8955a1fef10830b4e5960332de0ea38d17eb67dd8ebb7f284bf9dc92f3b1fc",
+      "afterSha256": "cecd8d0517540962475a079ea1ea3fbb64e86044eef2ef836358c638f2cfa382",
+      "change": "Root version fields only: 5.5.0 to 5.5.1. Dependencies unchanged."
+    }
+  ],
+  "charter": "No prompt, scheduling policy, privacy scope, approval authority, duplicate-booking protection, dependencies or model tiers changed. Existing cancellation and group-addressing boundaries are repaired.",
+  "limits": [
+    "SOLO review. No independent Bouncer claim.",
+    "No real model or Sonnet simulation calls. Model addressee judgment is not behaviorally validated.",
+    "Restoring the existing Haiku addressee gate may increase its invocations relative to the buggy recent-activity bypass. No new model tier or separate stage was added."
+  ],
+  "runtimeCost": "Existing Haiku addressee check runs for unmentioned group messages that incorrectly bypassed it before; no new stage or tier. No simulation spend.",
+  "bookkeeping": {
+    "shippingIndependentlyReviewedRefs": [],
+    "nativePlan": "Manual SOLO audit only; no independent review or native independently-reviewed companion is fabricated.",
+    "nativeVerificationException": {
+      "ref": "nov13-boston-office-location",
+      "verdict": "already-fixed",
+      "errors": [
+        "missing independent Bouncer verdict",
+        "latest status is already-fixed"
+      ]
+    },
+    "githubClosures": [],
+    "githubComments": [],
+    "githubReason": "Open issue inventory inspected; no issue specifically resolved or advanced by this incident repair",
+    "openBacklog": 10
+  },
+  "sessionStarter": "Version is derived from package.json; no stale copied version literal.",
+  "liveVerification": "Pending final bookkeeping HEAD boot stamp, database/Slack/email readiness and errors-since-boot check. Artifact: artifacts/workshop-verification/wrap-5.5.1/live-verification.json."
+}

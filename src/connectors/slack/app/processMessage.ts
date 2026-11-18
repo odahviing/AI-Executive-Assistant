@@ -491,22 +491,10 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
       // cheap Haiku classifier; stay silent when the message was addressed
       // to a human (or is genuinely ambiguous). Skip for 1:1 DMs.
       if ((isMpim === true || isChannel === true) && ctx.botUserId && !isExplicitMention) {
-        // v1.7.5 — same fix as the MPIM relevance gate: when Maelle was the
-        // most recent or second-most-recent speaker in this thread, skip the
-        // addressee gate entirely. The next message is almost always a
-        // continuation. The gate was incorrectly silencing your three
-        // explicit "@Maelle she said yes, but using Elal" messages with
-        // verdict HUMAN despite the @-mention.
-        const maelleRecentlySpoke = history.slice(-3).some(m => m.role === 'assistant');
-        if (maelleRecentlySpoke) {
-          logger.info('Addressee gate skipped — Maelle was just active in this thread', {
-            channelId,
-            threadTs,
-            senderId,
-            historySize: history.length,
-            preview: text.slice(0, 100),
-          });
-        } else try {
+        // Recent assistant activity is context, not permission to act on a
+        // human-to-human exchange. Explicit bot mentions already bypass this
+        // existing gate above; all other group messages keep its verdict.
+        try {
           const { classifyAddressee } = await import('../../../utils/addresseeGate');
           const botId: string = ctx.botUserId!;
           const recent = history.slice(-4).map(h => {
@@ -564,7 +552,8 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
             return;
           }
         } catch (err) {
-          logger.warn('Addressee gate threw — proceeding with orchestrator', { err: String(err) });
+          logger.warn('Addressee gate unavailable — staying silent', { err: String(err) });
+          return;
         }
       }
 

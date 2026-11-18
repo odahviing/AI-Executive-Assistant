@@ -2210,7 +2210,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           // together in the owner's DM.
           // Skip when the "colleague" is really the OWNER clamped to colleague-
           // context in an MPIM/channel: he booked it himself and was right there,
-          // so a self-shadow ("Idan confirmed slot in DM — booked…") is nonsense.
+          // so mirroring the owner's own booking back to him is redundant.
           // `isGenuineColleague` — same clamped-owner test resolved once, above.
           if (isGenuineColleague) {
             try {
@@ -2226,7 +2226,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 channel: context.channelId,
                 threadTs: context.threadTs,
                 action: 'Meeting booked',
-                detail: `${requesterName} confirmed slot in DM — booked "${args.subject}" for ${whenLabel}.`,
+                detail: `Booked "${args.subject}" for ${whenLabel} following ${requesterName}'s message in this conversation.`,
                 conversationKey: context.threadTs,
                 conversationHeader: `Conversation with ${requesterName}`,
               });
