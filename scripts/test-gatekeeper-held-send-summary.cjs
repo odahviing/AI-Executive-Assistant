@@ -130,7 +130,7 @@ const cases = [
     const { mod, captured } = loadChecker();
     const line = summarize({ ok: true, sent: false, already_sent: true, request_id: 'req_original_1' });
     await mod.checkReplyClaims({ reply: 'I sent Chris that same message again just now.', toolSummaries: [line], ownerFirstName: 'Idan' });
-    assert.match(captured[0], /ALREADY_SENT.*prior confirmed delivery/);
+    assert.match(captured[0], /ALREADY_SENT proves the original delivery, not a new send/);
     assert.match(captured[0], /new send or resend.*claim_specifics_mismatch=true/);
     await mod.rewriteOwningTheMiss({ draft: 'I sent Chris the message again.', actionType: 'message', targetName: 'Chris', ownerFirstName: 'Idan', toolSummaries: [line] });
     assert.match(JSON.stringify(captured[1]), /ALREADY SENT.*original message was already delivered and no new send occurred/);
@@ -170,8 +170,8 @@ const cases = [
     await mod.checkReplyClaims({ reply: 'Sent Chris the heads-up about the review move.', toolSummaries: [summarize(held)], ownerFirstName: 'Idan' });
     assert.equal(captured.length, 1);
     assert.match(captured[0], /\[message_colleague SCHEDULED, NOT sent yet: Chris — goes out Mon 21 Sep 09:00/);
-    assert.match(captured[0], /ONE exception — a HELD send/);
-    assert.match(captured[0], /claim_specifics_mismatch=true, target_name=<name>/);
+    assert.match(captured[0], /SCHEDULED, NOT sent yet means queued, not delivered/);
+    assert.match(captured[0], /saying 'sent' is false with claim_specifics_mismatch=true/);
   }],
   ['regression', 'held + "outside Chris\'s hours, scheduled for Monday" is shielded from a third-party-fact misflag', async () => {
     const g = loadGate(hoursVerdict);
@@ -214,7 +214,7 @@ const cases = [
     const line = summarize(unconfirmed);
     await mod.checkReplyClaims({ reply: 'Sent Chris the heads-up about the review move.', toolSummaries: [line], ownerFirstName: 'Idan' });
     assert.match(captured[0], /\[message_colleague UNCONFIRMED: Chris — may have been delivered/);
-    assert.match(captured[0], /An UNCONFIRMED send: .*outcome is UNKNOWN/);
+    assert.match(captured[0], /UNCONFIRMED means delivery is unknown/);
     await mod.rewriteOwningTheMiss({ draft: 'Sent Chris the heads-up.', actionType: 'message', targetName: 'Chris', ownerFirstName: 'Idan', toolSummaries: [line] });
     assert.match(JSON.stringify(captured[1]), /UNCONFIRMED SEND — .*NEVER say it did not go out or that nothing reached them/);
   }],

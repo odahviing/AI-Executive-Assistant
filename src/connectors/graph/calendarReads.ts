@@ -70,6 +70,8 @@ export type SpreadSlot = {
   disturbs_floating_block?: boolean;
   over_optional?: string;
   priority?: 'good' | 'medium' | 'low';
+  /** Explicit caller preference; false remains a valid fallback, not a rejection. */
+  matches_time_preference?: boolean;
   /** Internal non-enumerable ranking input; never part of a tool payload. */
   shared_overlap?: number;
   density?: number;
@@ -78,7 +80,8 @@ export type SpreadSlot = {
 /** Preference only, applied after validity and the existing optional tier. */
 export function compareSlotPreference(a: SpreadSlot, b: SpreadSlot): number {
   const rank = { good: 0, medium: 1, low: 2 };
-  return Number(!!a.disturbs_floating_block) - Number(!!b.disturbs_floating_block)
+  return Number(a.matches_time_preference === false) - Number(b.matches_time_preference === false)
+    || Number(!!a.disturbs_floating_block) - Number(!!b.disturbs_floating_block)
     || (rank[a.priority ?? 'medium'] - rank[b.priority ?? 'medium'])
     || (a.shared_overlap ?? 0) - (b.shared_overlap ?? 0)
     || (b.density ?? 0) - (a.density ?? 0)
@@ -1015,6 +1018,13 @@ export async function getFreeBusyForDecision(
     if (!ownSources.length) continue;
     const key = email.toLowerCase();
     const ranges = ownSources.map(event => calendarInterval(event)!);
+    // Exclusion needs cross-calendar identity only when this checked window
+    // contains a busy item that could be the moving occurrence. Otherwise
+    // getSchedule already establishes the requested window independently.
+    // An inaccessible old event must not turn a verified different day/time
+    // into unknown availability or discard a separate known clash.
+    if (!(busy[key] ?? []).some(slot => slot.status !== 'free' && slot.status !== 'workingElsewhere'
+      && ranges.some(range => Date.parse(slot.start) < range.end.toMillis() && Date.parse(slot.end) > range.start.toMillis()))) continue;
     // A disjoint getSchedule item cannot belong to the moving occurrence,
     // even if the other view omits it or cannot identify the event.
     const disjoint = (busy[key] ?? []).filter(slot => !ranges.some(range =>
@@ -1092,12 +1102,15 @@ async function getFreeBusyImpl(
     for (const schedule of response.value) {
       const key = String(schedule?.scheduleId ?? '').trim().toLowerCase();
       if (!key) continue;
-      // v3.3.7 (#124h) — Graph marks a non-existent / unresolvable address
-      // with a per-schedule `error` object instead of scheduleItems. Surface
-      // it; an empty array here is indistinguishable from "free all week".
+      // A per-calendar error can mean denied access or overload, not just an
+      // invalid mailbox. Graph documents 5006 for too many calendar entries;
+      // Exchange's availability protocol uses 5001 for recipient resolution.
+      // Preserve the distinction: an unreadable calendar is never proof that
+      // an otherwise verified recipient cannot receive an invitation.
       if (schedule.error) {
-        unresolved.push(key);
-        result[key] = [];
+        const code = String(schedule.error.responseCode ?? schedule.error.code ?? '');
+        if (['5001','ErrorMailRecipientNotFound','ErrorNonExistentMailbox','ErrorInvalidSmtpAddress'].includes(code)) unresolved.push(key);
+        else notChecked.add(key);
         continue;
       }
       if (!Array.isArray(schedule.scheduleItems)) {
@@ -1111,11 +1124,11 @@ async function getFreeBusyImpl(
         else notChecked.add(key);
       }
     }
-    // Belt-and-suspenders: an address Graph dropped from the response entirely.
+    // An omitted response establishes no mailbox or availability verdict.
     for (const e of emails) {
       const lower = e.toLowerCase();
       const present = Object.hasOwn(result, lower);
-      if (!present && !notChecked.has(lower) && !unresolved.includes(lower)) unresolved.push(lower);
+      if (!present && !notChecked.has(lower) && !unresolved.includes(lower)) notChecked.add(lower);
     }
     return { result, unresolved, notChecked: [...notChecked] };
   } catch (err: any) {

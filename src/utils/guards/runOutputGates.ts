@@ -27,17 +27,15 @@
  *     rule-aware check established as unavailable may not be sold as workable to
  *     anyone, so it is decided by the calendar and not by the reader, and running
  *     it first means its rewrite is scrubbed / voice-checked / date-verified by
- *     whichever leg follows — THEN the slot-grounding check (claimChecker's
- *     'slot_grounding' mode, gh proposed-slot-not-grounded-in-search-result):
- *     the MIRROR case — a specific time never confirmed by this turn's own
- *     find_available_slots / check_join_availability may not be sold as
- *     available either. Same reader-independent placement, same reasoning.
+ *     whichever leg follows.
  *   OWNER-PRIVATE: human voice → action truth → deterministic dates.
  *   COLLEAGUE-READABLE: human voice → security → dates → final fact/action
  *     truth, using request-specific decisions and action receipts. The existing
  *     always-on fact call replaces the separately admitted approval check.
  *     A grant finding can report the confirmed pending status of a requester's
  *     own approval. Unestablished approval/completion receives a fixed hedge.
+ *   BOTH LEGS LAST: one calendar fact check against the actual scoped search
+ *     observations and receipts, after every prose/date writer has finished.
  *
  * `ctx.transport === 'email'` (gh#24) skips both axes entirely and takes a
  * dedicated THIRD leg, runEmailLegGates below — not because email is a third
@@ -280,22 +278,9 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // is an empty in-memory ledger and no module is even loaded.
   cleanReply = await runAvailabilityFloorAndMaybeRewrite(ctx, cleanReply);
 
-  // proposed-slot-not-grounded-in-search-result (2026-08-24) — the MIRROR of
-  // the floor above, same placement and the same reasoning (reader-independent
-  // calendar fact, rewrite gets checked by every gate below): a slot the
-  // rule-aware check ESTABLISHED as blocked may not be sold as workable (the
-  // floor above); a slot NEVER established as available by this turn's own
-  // find_available_slots / check_join_availability may not be sold as
-  // available either. Confirmed incident: a real find_available_slots call
-  // returned an evening window, the drafted reply named a fabricated
-  // early-afternoon time and a fabricated colleague conflict, 8 seconds
-  // later, to a real colleague. RULE A (claimChecker's default mode) exempts
-  // proposals from its phantom-action check by design — an EA proposing a
-  // time is not claiming a completed action — which is correct for the
-  // general case but left this specific class (a fabricated SPECIFIC time)
-  // uncaught. On a turn that never calls either tool this costs nothing: the
-  // deterministic pre-filter inside the function below returns immediately.
-  cleanReply = await runSlotGroundingCheckAndMaybeRewrite(ctx, cleanReply);
+  // Calendar fact checking runs once after every voice/security/date writer.
+  // Its bounded remedy removes an independently confirmed unsupported claim;
+  // it cannot introduce a new action claim or a replacement time.
 
   // (v3.6.x — the "booked-date honesty" backstop that used to run between the
   // two legs was RETIRED. It was a 4th output-path LLM call on every booking
@@ -521,7 +506,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     cleanReply = await runOwnerFactCheckAndMaybeRewrite(ctx, cleanReply, draft);
   }
 
-  return cleanReply;
+  return runSlotGroundingCheckAndMaybeRewrite(ctx, cleanReply);
 }
 
 /**
@@ -529,8 +514,9 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
  * transport that isn't `postReply` still gets gated at all — today this is
  * the only path `runOutputGates` is reachable from besides Slack.
  *
- * Order: slot grounding → humanGate → action truth → date verification →
- * final owner-fact/action truth. No generative writer follows the final check.
+ * Order: humanGate → action truth → date verification →
+ * owner-fact/action truth → calendar fact check. The final remedy only removes
+ * independently verified unsupported claims; it never generates replacement prose.
  *
  *  - claimChecker always runs (no `ownerIsActing` gate needed): the inbound sender
  *    authorization already restricts this whole leg to the owner + his
@@ -600,7 +586,6 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
 async function runEmailLegGates(ctx: OutputGateContext, initialReply: string): Promise<string> {
   let cleanReply = initialReply;
 
-  cleanReply = await runSlotGroundingCheckAndMaybeRewrite(ctx, cleanReply);
   // owner-personal-fact-fabricated-in-colleague-reply (2026-08-14) — wired in
   // 2026-08-28. This leg's own reader-frame is 'external' by construction
   // (this function's doc comment), the exact same risk the colleague-readable
@@ -632,7 +617,7 @@ async function runEmailLegGates(ctx: OutputGateContext, initialReply: string): P
   cleanReply = await runClaimCheckAndMaybeRewrite(ctx, cleanReply, initialReply);
   cleanReply = await runDateVerifierAndMaybeRetry(ctx, cleanReply);
   cleanReply = await runOwnerFactCheckAndMaybeRewrite(ctx, cleanReply, initialReply);
-  return cleanReply;
+  return runSlotGroundingCheckAndMaybeRewrite(ctx, cleanReply);
 }
 
 // ── Social-coda gate ────────────────────────────────────────────────────────
@@ -757,6 +742,7 @@ export async function runCodaGates(
 /** Minimal request-specific evidence; private payloads/identifiers never enter output. */
 async function requestOutcomeEvidence(ctx: OutputGateContext): Promise<{
   context: string; pendingForRequester?: 'cancel' | 'request';
+  unconfirmedForOwner?: Array<{subject:string;requesterNotified:boolean}>;
 }> {
   try {
     const { getRequestsForThread } = await import('../../db/requests');
@@ -772,6 +758,7 @@ async function requestOutcomeEvidence(ctx: OutputGateContext): Promise<{
     const rows = getRequestsForThread(ctx.profile.user.slack_user_id, ctx.threadTs, ownerDecisionChannel);
     const approvals = rows.filter(row => row.kind === 'approval');
     let pendingForRequester: 'cancel' | 'request' | undefined;
+    const unconfirmedForOwner: Array<{subject:string;requesterNotified:boolean}> = [];
     const context = JSON.stringify(rows.map(row => {
       let outcome: Record<string, unknown> = {};
       let details: Record<string, any> = {};
@@ -779,6 +766,14 @@ async function requestOutcomeEvidence(ctx: OutputGateContext): Promise<{
       try { details = JSON.parse(row.details_json ?? '{}') ?? {}; } catch { /* unknown */ }
       const requested = details.callbacks?.on_approve ?? details.deferred_action;
       const args = { ...requested?.args, ...details.counter };
+      const currentOutcome=ownerDecisionChannel && ctx.result.approvalOutcomes?.find(receipt=>receipt.request_id===row.id
+        && receipt.state==='resolved' && receipt.effect==='approve_replay_unconfirmed');
+      if(currentOutcome && row.owner_user_id===ctx.senderId && row.state==='resolved'
+        && outcome.approved===true && outcome.verified===false && typeof row.subject==='string'
+        && typeof outcome.replayed==='string' && (ORIGIN_SURFACE_REPLAY_TOOLS as readonly string[]).includes(outcome.replayed)) {
+        unconfirmedForOwner.push({subject:row.subject,requesterNotified:currentOutcome.requester_notice==='action_unconfirmed'
+          && currentOutcome.requester_notify_outcome==='sent'});
+      }
       // Older receipts have no request ID. Bind those only when the thread
       // contains a single approval. New receipts identify the actual delivery.
       const sameApproval = ctx.result.notifiedApprovalId ? ctx.result.notifiedApprovalId === row.id : approvals.length === 1 && approvals[0] === row;
@@ -806,7 +801,7 @@ async function requestOutcomeEvidence(ctx: OutputGateContext): Promise<{
           && (ORIGIN_SURFACE_REPLAY_TOOLS as readonly string[]).includes(outcome.replayed),
         booked_start: outcome.booked_start ?? null };
     }));
-    return { context, pendingForRequester };
+    return { context, pendingForRequester, unconfirmedForOwner };
   } catch (err) {
     logger.warn('Final truth context unavailable', { err: String(err) });
   }
@@ -816,9 +811,20 @@ async function requestOutcomeEvidence(ctx: OutputGateContext): Promise<{
 /** Report only this turn's verified result when a prose repair cannot complete. */
 async function confirmedOutcomeFallback(ctx:OutputGateContext, message:string):Promise<string|undefined> {
   if (ctx.transport==='email' || ctx.isMpim || ctx.isChannel || !/^D[A-Z0-9]+$/.test(ctx.channelId)) return;
-  const {confirmedBookingNotice,pendingApprovalNotice} = await import('../claimChecker');
-  const booking = confirmedBookingNotice(message,ctx.result.mutationActions,ctx.profile.user.timezone);
+  const {confirmedBookingNotice,pendingApprovalNotice,unconfirmedApprovalNotice} = await import('../claimChecker');
+  let zone = ctx.profile.user.timezone;
+  if (ctx.role==='colleague') {
+    try { const readerZone=(await import('../../db')).getPersonMemory(ctx.senderId)?.timezone;
+      if(readerZone && new Intl.DateTimeFormat('en',{timeZone:readerZone}))zone=readerZone;
+    } catch { /* A missing/invalid reader zone leaves the labelled owner clock. */ }
+  }
+  const booking = confirmedBookingNotice(message,ctx.result.mutationActions,zone);
   if (booking) return booking;
+  if (ctx.result.approvalOutcomes?.length) {
+    const evidence = await requestOutcomeEvidence(ctx);
+    if (evidence.unconfirmedForOwner?.length) return evidence.unconfirmedForOwner
+      .map(outcome=>unconfirmedApprovalNotice(message,outcome.subject,outcome.requesterNotified)).join('\n');
+  }
   if (ctx.result.notifiedApprovalId) {
     const evidence = await requestOutcomeEvidence(ctx);
     if (evidence.pendingForRequester) return pendingApprovalNotice(message,ctx.profile.user.name.split(' ')[0],evidence.pendingForRequester);
@@ -989,13 +995,13 @@ async function runClaimCheckAndMaybeRewrite(
     // a verdict no caller acted on). Honesty rules 1/2/2b/2c/2d/3/5b/9 stay
     // in the system prompt. Only RULE A (claimed_action — false action claim)
     // drives retries from here.
-    if (verdict.failed_open) return cleanReply === originalDraft
-      ? cleanReply : (await confirmedOutcomeFallback(ctx,originalDraft)) ?? genericHonestHedge(originalDraft, isOwnerDirectAudience(ctx));
+    if (verdict.failed_open) return originalDraft;
     if (!verdict.claimed_action) return cleanReply;
     // Approval truth is now request-specific. Never infer a grant from any
     // resolved row or substitute a generative rewrite for a missing decision.
     if (verdict.action_type === 'permission_granted') {
-      return genericHonestHedge(cleanReply, isOwnerDirectAudience(ctx));
+      return (await confirmedOutcomeFallback(ctx,originalDraft))
+        ?? genericHonestHedge(cleanReply, isOwnerDirectAudience(ctx));
     }
 
     const { matchingToolAlreadyRan, specificsMismatch } = actionClaimEvidence(ctx, verdict);
@@ -1128,14 +1134,17 @@ function splitAssistantRow(raw: string): { tape: string; text: string } {
  */
 function buildRecentHistorySnippet(ctx: OutputGateContext): string | undefined {
   const { profile } = ctx;
-  return (ctx.history ?? [])
+  const history = (ctx.history ?? [])
     .slice(-12)
     .map(h => {
       const raw = h.content ?? '';
       const text = h.role === 'assistant' ? splitAssistantRow(raw).text : raw;
       return `${h.role === 'assistant' ? profile.assistant.name : 'User'}: ${text.slice(0, 220)}`;
     })
-    .join('\n') || undefined;
+    .join('\n');
+  // History is captured before this message is stored. The current human's
+  // own absence, constraints and corrections are evidence too.
+  return [history,ctx.userMessage ? `Current user message: ${ctx.userMessage}` : ''].filter(Boolean).join('\n') || undefined;
 }
 
 /**
@@ -1213,8 +1222,8 @@ function priorTurnAvailabilityLines(ctx: OutputGateContext): string[] {
  * follow-up promise and is no longer English-only (claimChecker.ts's
  * `genericHonestHedge`).
  *
- * An unavailable verdict preserves unchanged text; changed unchecked text
- * receives the fixed uncertainty line. Rewrite exceptions keep its input.
+ * An unavailable verdict restores the original answer rather than accepting
+ * an unchecked style rewrite or replacing a legitimate answer with a hedge.
  */
 async function runOwnerFactCheckAndMaybeRewrite(
   ctx: OutputGateContext,
@@ -1238,15 +1247,18 @@ async function runOwnerFactCheckAndMaybeRewrite(
 
     // #206: provenance is carried separately from model-authored text. Legacy
     // or malformed assistant rows cannot authorize a destructive rewrite.
-    // Explicit no-tool rows may be crossed; the newest actual result wins.
-    let latestSummaries: string[] = [];
+    // Explicit no-tool rows may be crossed. A later read supersedes earlier
+    // availability, but cannot erase a completed action. Keep typed action
+    // outcomes in order so the judge also sees subsequent failures or reversals.
+    const earlierToolRows: string[][] = [];
     for (const row of (ctx.history ?? []).slice(-12).filter(h => h.role === 'assistant').reverse()) {
       if (!Array.isArray(row.toolSummaries) || row.toolSummaries.some(s => typeof s !== 'string')) break;
-      if (row.toolSummaries.length) {
-        latestSummaries = row.toolSummaries;
-        break;
-      }
+      if (row.toolSummaries.length) earlierToolRows.unshift(row.toolSummaries);
     }
+    const latestSummaries = earlierToolRows.at(-1) ?? [];
+    const earlierActions = earlierToolRows.flat().filter(line=>
+      extractActionTape([{role:'assistant',content:line}]).length>0).slice(-20);
+    const earlierOutcomeEvidence = [...earlierActions,...latestSummaries.filter(line=>!earlierActions.includes(line))];
     const priorCalendarReadLines = !(result.toolSummaries?.length)
       ? latestSummaries.slice(-1).filter(line => /^\[find_available_slots(?:\s|\])/.test(line)
         && !/^\[find_available_slots FAILED:/.test(line) && / calendars_read=/.test(line))
@@ -1255,7 +1267,7 @@ async function runOwnerFactCheckAndMaybeRewrite(
     let readerEmail:string | undefined;
     try { readerEmail = (await import('../../db')).getPersonMemory(ctx.senderId)?.email ?? undefined; }
     catch { /* The check can still use the authenticated reader's name and receipts. */ }
-    const finalOutcomeContext = `Reader: ${ctx.colleagueName ?? ctx.senderId}, email=${readerEmail ?? 'unknown'}. Owner: ${profile.user.name}, email=${profile.user.email}. Requests: ${requestEvidence.context}. Earlier tool receipts: ${JSON.stringify(latestSummaries)}`;
+    const finalOutcomeContext = `Reader: ${ctx.colleagueName ?? ctx.senderId}, email=${readerEmail ?? 'unknown'}. Owner: ${profile.user.name}, email=${profile.user.email}. Requests: ${requestEvidence.context}. Earlier tool receipts: ${JSON.stringify(earlierOutcomeEvidence)}`;
     const verdict = await checkReplyClaims({
       reply: cleanReply,
       toolSummaries: result.toolSummaries ?? [],
@@ -1269,9 +1281,9 @@ async function runOwnerFactCheckAndMaybeRewrite(
 
     // Unknown is distinct from clear. Preserve an unchanged legitimate reply;
     // never accept an unverified semantic rewrite when the check is unavailable.
-    if (verdict.failed_open) return cleanReply === originalDraft
-      ? cleanReply : (await confirmedOutcomeFallback(ctx,originalDraft)) ?? genericHonestHedge(originalDraft, isOwnerDirectAudience(ctx));
+    if (verdict.failed_open) return originalDraft;
     if (!verdict.claimed_action) return cleanReply;
+    let pendingFallback: string | undefined;
     if (['permission_granted', 'book', 'message', 'task'].includes(verdict.action_type ?? '')) {
       // A grant is request-specific, never established by a mutation receipt.
       // Action verdicts use the same successful-action safeguards as RULE A.
@@ -1290,17 +1302,21 @@ async function runOwnerFactCheckAndMaybeRewrite(
       const deliveredApproval = lastReceipt?.startsWith('[create_approval:') && lastReceipt.endsWith(' mutated=task notified=approval_owner');
       if (requestEvidence.pendingForRequester && (verdict.action_type === 'permission_granted' || verdict.action_type === 'book')
         && (result.notifiedApprovalId || deliveredApproval) && !result.bookingOccurred) {
-        return pendingApprovalNotice(ctx.userMessage || cleanReply, profile.user.name.split(' ')[0], requestEvidence.pendingForRequester);
+        // Preserve useful, verified clauses and the unanswered question. A
+        // pending decision grounds a fallback, not replacement of the entire
+        // reply before the existing bounded correction has examined it.
+        pendingFallback = pendingApprovalNotice(cleanReply, profile.user.name.split(' ')[0], requestEvidence.pendingForRequester);
       }
       const observed = result.sharedMeetingRead;
       if (verdict.action_type === 'book' && !result.bookingOccurred && ctx.role === 'colleague'
         && !ctx.isChannel && !ctx.isMpim && observed && cleanReply.includes(observed.subject)) return observed.reply;
-      const failedBooking = !result.bookingOccurred && (result.toolSummaries ?? [])
-        .some(line => line.startsWith('[create_meeting FAILED:'));
-      return (await confirmedOutcomeFallback(ctx,originalDraft)) ?? genericHonestHedge(cleanReply, isOwnerDirectAudience(ctx), failedBooking);
+      // A semantic flag alone cannot erase the answer. Reuse the same
+      // independent veto and bounded deletion below for action claims too.
+      // It can keep a proposal, or remove a false sentence while retaining
+      // the verified result, useful options and the next question.
     }
 
-    let rewriteSummaries = result.toolSummaries ?? [];
+    let rewriteSummaries = result.toolSummaries?.length ? result.toolSummaries : latestSummaries;
     if (verdict.action_type === 'denied_calendar_read') {
       // The semantic judge cannot manufacture a receipt or target identity.
       const target = verdict.target_name?.toLowerCase();
@@ -1342,10 +1358,14 @@ async function runOwnerFactCheckAndMaybeRewrite(
       toolSummaries: rewriteSummaries,
       groundedToolLines:verdict.action_type==='ungrounded_slot_claim' ? [...rewriteSummaries,...priorTurnAvailabilityLines(ctx)] : undefined,
       isOwnerAudience: isOwnerDirectAudience(ctx),
+      availabilityAudience:{owner:profile.user.name,reader:ctx.colleagueName ?? ctx.senderId,readerEmail},
+      recentHistorySnippet,
+      authoritativeOutcomes: finalOutcomeContext,
+      calendarObservations: result.calendarFacts,
     });
     if (rewritten && rewritten.trim().length > 0) {
       cleanReply = normalizeForTransport(ctx,rewritten === genericHonestHedge(cleanReply,isOwnerDirectAudience(ctx))
-        ? (await confirmedOutcomeFallback(ctx,originalDraft)) ?? rewritten : rewritten);
+        ? pendingFallback ?? (await confirmedOutcomeFallback(ctx,originalDraft)) ?? rewritten : rewritten);
     }
   } catch (err) {
     logger.warn('Owner-fact check threw — leaving draft unchanged', { err: String(err).slice(0, 200) });
@@ -1682,7 +1702,7 @@ async function runSlotGroundingCheckAndMaybeRewrite(ctx: OutputGateContext, init
       ownerFirstName: profile.user.name.split(' ')[0],
       mode: 'slot_grounding',
       availabilityAudience,
-      slotGroundingContext: { groundedToolLines },
+      slotGroundingContext: { groundedToolLines,observations:result.calendarFacts },
     });
 
     if (!verdict.claimed_action) return cleanReply;
@@ -1709,15 +1729,19 @@ async function runSlotGroundingCheckAndMaybeRewrite(ctx: OutputGateContext, init
       // phantom-action rewrite prompt (nonsense like "I'm not sure that went
       // through" on a slot offer) instead of the slot-claim branch.
       actionType: 'ungrounded_slot_claim',
+      deletionOnly: true,
       targetName: verdict.target_name,
       ownerFirstName: profile.user.name.split(' ')[0],
       toolSummaries: result.toolSummaries ?? [],
       groundedToolLines,
       isOwnerAudience: isOwnerDirectAudience(ctx),
       availabilityAudience,
+      calendarObservations: result.calendarFacts,
     });
     if (rewritten && rewritten.trim().length > 0) {
-      cleanReply = normalizeForTransport(ctx, rewritten);
+      const {genericHonestHedge} = await import('../claimChecker');
+      cleanReply = normalizeForTransport(ctx, rewritten === genericHonestHedge(cleanReply,isOwnerDirectAudience(ctx))
+        ? (await confirmedOutcomeFallback(ctx,initialReply)) ?? rewritten : rewritten);
     }
   } catch (err) {
     logger.warn('Slot-grounding check threw — leaving draft unchanged', { err: String(err).slice(0, 200) });

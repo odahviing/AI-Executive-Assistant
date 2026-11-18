@@ -18,6 +18,30 @@ function fixture(dense = true, busy = []) {
   const search = (from, to, duration = 25) => h.find(from, to, { timezone: 'UTC', durationMinutes: duration });
   return { ...h, pick, search };
 }
+
+test('explicit morning preference survives both finder and final spread ranking',async()=>{
+ const h=fixture(true,[{start:'2026-10-19T14:00:00Z',end:'2026-10-19T15:00:00Z',status:'busy'}]);
+ const slots=await h.find('2026-10-19T09:00Z','2026-10-19T18:00Z',{timezone:'UTC',durationMinutes:25,preferMorning:true});
+ const picked=h.pick(slots,25,2);
+ assert.equal(picked.length,2);
+ assert.ok(picked.every(s=>DateTime.fromISO(s).setZone('UTC').hour<12),JSON.stringify(picked));
+ assert.ok(slots.every(s=>s.matches_time_preference===(DateTime.fromISO(s.start).setZone('UTC').hour<12)));
+});
+
+test('morning preference preserves explicitly marked afternoon fallback',async()=>{
+ const h=fixture(false);
+ const slots=await h.find('2026-10-19T13:00Z','2026-10-19T18:00Z',{timezone:'UTC',durationMinutes:25,preferMorning:true});
+ assert.ok(slots.length);
+ assert.ok(slots.every(s=>s.matches_time_preference===false));
+ assert.equal(h.pick(slots,25,3).length,3);
+});
+
+test('no time preference retains the existing dense ranking and no preference metadata',async()=>{
+ const h=fixture(true,[{start:'2026-10-19T14:00:00Z',end:'2026-10-19T15:00:00Z',status:'busy'}]);
+ const slots=await h.search('2026-10-19T09:00Z','2026-10-19T18:00Z');
+ assert.ok(slots.every(s=>s.matches_time_preference===undefined));
+ assert.ok(h.pick(slots,25,1).some(s=>DateTime.fromISO(s).setZone('UTC').hour>=12));
+});
 for (const dense of [true, false]) for (const duration of [25, 55]) {
   test(`${dense ? 'dense' : 'spread'} ${duration}min preserves eight nonoverlapping options on an open day`, async () => {
     const h = fixture(dense), slots = await h.search('2026-10-19T09:00Z', '2026-10-19T18:00Z', duration);

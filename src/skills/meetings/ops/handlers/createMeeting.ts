@@ -6,7 +6,7 @@ import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
 
 import { formatIsoTime, openQuestionsField, alternativesNote, recordProposedAlternatives, isDescriptiveSubject, resolveActivityTargetIdentity, HANDLER_ERROR_CODE, meetingScopedAttendees } from '../../ops/helpers';
-import { humanizeViolationLabel, attendeeConflictRefusal, attendeeConflictLine, bookedOverAttendeesNote } from '../../ops/violationLabels';
+import { humanizeViolationLabel, attendeeConflictRefusal, conflictsPreviouslyDisclosed, attendeeConflictLine, bookedOverAttendeesNote } from '../../ops/violationLabels';
 import { enrichUnresolvedInternal } from '../../ops/analysis';
 import {
   getOwnerEventsForDecision,
@@ -37,6 +37,13 @@ import type { OpCtx } from './context';
 
 export async function handleCreateMeeting(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context, userEmail, timezone } = ctx;
+  // A reschedule keeps the original invitation. Search may proceed before
+  // identity is known, but a new event cannot stand in for the requested move.
+  // An exact approved create carries its independently verified action/roster.
+  if (context.requestExistingMeeting && !context.approvedBookingAttendeeEmails) {
+    return {error:'existing_meeting_requires_move',existing_event_id:context.requestMovingEventId,
+      message:'This request concerns an existing invitation. Identify that occurrence and use move_meeting to change its time. If it is outside the requester’s view and the owner can identify it, raise the tracked owner question with the known details. Availability searches remain available; do not create a replacement invitation while the original is unidentified.'};
+  }
   // v4.4.9 (#154) — resolved once per call, mirroring subjectViewerFor(context)
   // below: the attendee-aware half of the subject mask, for every occupancy
   // scan / conflict message this handler produces on the colleague path.
@@ -258,6 +265,12 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             resolvedAttendees = [requester];
           }
         }
+        if (context.resolvedOptionalAttendees && resolvedAttendees) {
+          const optional=new Set(context.resolvedOptionalAttendees.map(email=>email.toLowerCase()));
+          const known=new Set(resolvedAttendees.map(email=>email.toLowerCase()));
+          for (const attendee of attendees) if(attendee.email && known.has(attendee.email.toLowerCase()))
+            attendee.optional=optional.has(attendee.email.toLowerCase());
+        }
         if (resolvedAttendees === null) {
           return { success: false, error: 'ambiguous_meeting_roster', message: 'Identify which meeting this booking is for and supply its participants; separate meeting rosters must not be combined into one invite.' };
         }
@@ -268,7 +281,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           for (const email of resolvedAttendees) {
             const lower = (email ?? '').toLowerCase().trim();
             if (!lower.includes('@') || present.has(lower)) continue;
-            attendees.push({ email });
+            attendees.push({ email,...(context.resolvedOptionalAttendees?.includes(lower) ? {optional:true} : {}) });
             present.add(lower);
             added.push(email);
           }
@@ -900,9 +913,12 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               const ownerEmailLowerForGuardB = userEmail.toLowerCase();
               const ownerDomainForGuardB = ownerEmailLowerForGuardB.includes('@')
                 ? ownerEmailLowerForGuardB.split('@')[1] : '';
-              const otherRequiredAttendeeEmails = attendees
+              // The requester is checked when attending too. Choosing a day
+              // does not consent to an undisclosed conflict at a model-picked
+              // clock; the same M16 disclosure/confirmation covers everyone.
+              const otherRequiredAttendeeEmails = attendees.filter(a=>a.optional!==true)
                 .map(a => (a.email ?? '').toLowerCase())
-                .filter(e => e && e !== ownerEmailLowerForGuardB && e !== requesterEmail
+                .filter(e => e && e !== ownerEmailLowerForGuardB
                   && !!ownerDomainForGuardB && e.endsWith('@' + ownerDomainForGuardB));
               // Rule 1b — the colleague's own in-person ask (is_online=false),
               // the SAME meeting-mode input their search was checked with, so a
@@ -1003,12 +1019,13 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               // (see attendeeConflictRefusal's doc for the one residual case).
               const attendeeConflicts = matched?.attendee_conflicts ?? [];
               if (matched && attendeeConflicts.length > 0) {
-                if (!attendeeConflictConfirmed) {
+                if (!attendeeConflictConfirmed || (context.channel==='slack' && !conflictsPreviouslyDisclosed(context.disclosedAttendeeConflicts, args.start as string, args.end as string, attendeeConflicts))) {
                   logger.info('create_meeting colleague-path — attendee conflict surfaced to requester, no owner escalation', {
                     start: args.start, end: args.end, requester: context.userId,
                     blocked: attendeeConflicts.map(c => `${c.email}:${c.reason}`),
                   });
-                  return attendeeConflictRefusal(attendeeConflicts, viewerEmail, 'book');
+                  return {...attendeeConflictRefusal(attendeeConflicts, viewerEmail, 'book'),
+                    owner_available:true,requested_start:args.start,requested_end:args.end};
                 }
                 // M18 — the requester's confirmed book-over, named and queryable.
                 bookedOverAttendees = attendeeConflicts;
@@ -1381,6 +1398,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         }
         const bookingRequest = await normalizeBookingRequest('create_meeting', args, context);
         const plan = await planMeeting(planInputFromBookingRequest(bookingRequest, context.profile, {
+          requireAttendeeAvailability:context.requireAttendeeAvailability === true || args.require_attendee_availability === true,
           ordinaryCreateAfterOtherMeeting: context.interactive && context.authority === 'owner' && context.surface === 'owner_dm' && !context.approvedBookingAttendeeEmails
             ? context.ordinaryCreateAfterOtherMeeting : undefined,
         }));
@@ -1576,6 +1594,10 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // (Other plan kinds — find_slots / decline_as_attendee / refuse_not_owners —
         // can't reach here from a new_booking intent; the type narrowing makes
         // the cast unconditional after the early-return.)
+        if (plan.action === 'attendee_condition_unmet') return {
+          success:false,error:plan.action,
+          message:`The invitation was not sent: ${plan.reason}. Choose another time, or confirm the disclosed attendee conflict.`,
+        };
         if (plan.action !== 'book') {
           return {
             success: false,
@@ -1916,6 +1938,9 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           }
         }
 
+        // The same final venue goes to Graph and the confirmed receipt.
+        const bookedLocation = resolvedLocationParts?.length
+          ? (await import('../../../../utils/textScrubber')).scrubInternalLeakage(resolvedLocationParts.join(', ')) : undefined;
         return createMeeting({
           userEmail,
           timezone,
@@ -1977,12 +2002,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           // a second `args.is_online === true` check here dropped it while the
           // body still said "Location: …"; external + is_online=true reaches
           // an empty location through the tree itself (path 1b → '').
-          location: ((): string | undefined => {
-            if (!resolvedLocationParts || resolvedLocationParts.length === 0) return undefined;
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { scrubInternalLeakage } = require('../../../../utils/textScrubber') as typeof import('../../../../utils/textScrubber');
-            return scrubInternalLeakage(resolvedLocationParts.join(', '));
-          })(),
+          location: bookedLocation,
           categories:  args.category ? [args.category as string] : ['Meeting'],  // default fallback
           // Stamp sensitivity=private on the Graph event when the chosen
           // category carries `sets_sensitivity_private: true` in yaml. Reads
@@ -2121,7 +2141,6 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             meetingId,
             reason: 'created',
             subject: args.subject as string | undefined,
-            bookingThreadTs: context.threadTs,
             // v3.4.6 — approve→book link: on a resolver-driven replay this is
             // the originating request id, so the cascade skips it (resolver owns
             // its close + relay). Undefined on direct/owner-path books.
@@ -2133,6 +2152,9 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             // retry (no _fulfilling_request_id, no pre-existing meeting_id, and the
             // owner's decision thread is never the colleague's origin thread).
             bookingStartIso: args.start as string | undefined,
+            bookingEndIso: args.end as string | undefined,
+            bookingAttendeeEmails: attendees.map(a=>a.email).filter((email):email is string=>!!email),
+            ownerEmail:userEmail,
           });
 
           // The booked window became real, so any tentative hold overlapping it
@@ -2414,6 +2436,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             // the meeting TRULY landed — not the pre-snap arg Sonnet passed.
             booked_start: args.start as string,
             booked_end: args.end as string,
+            booked_location:bookedLocation ?? '', booked_online:effectiveIsOnline,
             invited_attendees: attendees.map(a=>({name:a.name,email:a.email})),
             ...(appliedDurationPreset ? {duration_preset:appliedDurationPreset,
               _duration_note:'The configured duration preset was applied successfully. Report the actual booked length. This is the completed booking, so a separate duration change needs a new human instruction.'} : {}),

@@ -15,7 +15,7 @@ const processForReplay={...process,env:{...process.env,...(before?{MAELLE_BOUNCE
 const {approved,harness}=loadFixture('test-approved-outreach-uncertainty.cjs',replay,'approved,harness',processForReplay);
 const {fixture:outreach}=require('./fixtures/outreach-original-request.cjs');
 const {fixture:gate}=loadFixture('test-gatekeeper-owner-decision-scope.cjs',fs.readFileSync(path.join(__dirname,'test-gatekeeper-owner-decision-scope.cjs'),'utf8'),'fixture');
-let context=fs.readFileSync(path.join(__dirname,'test-turn-context-boundaries.cjs'),'utf8').replace("const before = process.argv.includes('--before');",'const before = false;').replace('getAwaitingOwnerRequests: () => []','getAwaitingOwnerRequests: () => state.pending || []').replace('parseDetails: () => null','parseDetails: r => r.details || null');
+let context=fs.readFileSync(path.join(__dirname,'test-turn-context-boundaries.cjs'),'utf8').replace("const before = process.argv.includes('--before');",'const before = false;').replace('parseDetails: row => row?.details_json ? JSON.parse(row.details_json) : null','parseDetails: row => row?.details_json ? JSON.parse(row.details_json) : row?.details ?? null');
 const {fixture:prompt}=loadFixture('test-turn-context-boundaries.cjs',context,'fixture');
 const registration='https://registration.example.test/webinar',published='https://post.example.test/published';
 const current=`Published post ${published} — send this to the requester.`;
@@ -45,7 +45,8 @@ for(const mode of ['success','failed','unknown','throw','wrong-payload'])test('j
  // Both the exact persisted current row and unrelated same-day approval enter
  // the real SQL query. Only the current actual task result enters its summary.
  const claim=failed||unconfirmed?{claimed_action:true,action_type:'message',target_name:'Oran',claim_specifics_mismatch:false}:{claimed_action:false,action_type:null};
- const g=gate({rows:[h.row(),{id:'req_unrelated',owner_user_id:'OWNER',owner_dm_thread_ts:'owner.root',subject:'Unrelated approved ask'}],claim});
+ const g=gate({rows:[h.row(),{id:'req_unrelated',owner_user_id:'OWNER',owner_dm_thread_ts:'owner.root',subject:'Unrelated approved ask'}],claim,
+  removeClauses:[{sentence:1,quote:'I sent it to Oran.'}]});
  try{
   const summary=g.turn.summarizeToolCall('resolve_approval',args,result,'UTC');
   const draft=failed||unconfirmed?'The request is recorded. I sent it to Oran.':'Message delivered to Oran.';

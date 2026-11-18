@@ -20,7 +20,7 @@ async function run({clean=false,busy=false,offhours=false,offline=false,recovery
   'src/db/slotHolds.ts':{getActiveSlotHolds:()=>[]},'src/utils/offeredSlotsStash.ts':{getOfferedSlots:()=>[],getOfferedSearchFingerprint:()=>null,recordOfferedSlots:()=>{}},
   'src/db.ts':{getPersonMemory:()=>({email:requesterEmail}),getPersonByEmail:()=>({name:'Peer'}),listSchedulingContacts:()=>contacts,getEffectiveTimezoneById:id=>({timezone:contacts.find(p=>p.person_id===id)?.timezone}),getTravelRecordById:()=>null},
   'src/utils/displaySubject.ts':{subjectViewerFor:()=> 'owner',viewerEmailFor:()=>undefined},
-  'src/connectors/graph/calendarReads.ts':{getFreeBusyForDecision:async(_u,_e,_s,_t,_z,diag)=>{if(unknown&&diag)diag.notChecked=[email];return {'owner@example.test':ownerBusy,[email]:busy?[{start:'2026-10-06T00:00:00+03:00',end:'2026-10-07T00:00:00+03:00',status:'busy'}]:[]}},getOwnerEventsForDecision:async()=>{if(offline || (recoveryOffline && ++calendarReads>1))throw Error('fixture calendar unavailable');return []},isOutageShaped:()=>false,CalendarOfflineError:Error},
+  'src/connectors/graph/calendarReads.ts':{getFreeBusyForDecision:async(_u,_e,_s,_t,_z,diag)=>{if(unknown&&diag)diag.notChecked=[email];return Object.fromEntries(Object.entries({'owner@example.test':ownerBusy,[email]:busy?[{start:'2026-10-06T00:00:00+03:00',end:'2026-10-07T00:00:00+03:00',status:'busy'}]:[]}).filter(([address])=>_e.includes(address)))},getOwnerEventsForDecision:async()=>{if(offline || (recoveryOffline && ++calendarReads>1))throw Error('fixture calendar unavailable');return []},isOutageShaped:()=>false,CalendarOfflineError:Error},
   ...extraMocks,
  }});
  Object.assign(h.load('src/utils/attendeeAvailability.ts'),{loadAttendeeAvailabilityForEmails:()=>availability,singleAttendeePresentationZone:()=>undefined});
@@ -49,3 +49,19 @@ test('colleague owner-only fallback retains accepted-day facts and unverified ca
 
 
 
+
+test('candidate explanations carry each blocked persons own hours even behind a busy reason',async()=>{
+ const regular=require('./fixtures/regular-week.cjs').regularWeek;
+ const availability=[{email,timezone:'Asia/Jerusalem',week:regular(['Tuesday'],'09:00','10:00')},
+  {email:'second@example.test',timezone:'America/New_York',week:regular(['Tuesday'],'08:00','17:00')}];
+ const {out}=await run({clean:true,busy:true,availabilityOverride:availability,argsOverride:{candidate_slots:[{start:'2026-10-06T11:00:00+03:00'}],attendee_emails:[email,'second@example.test']}});
+ const result=out.results[0];assert.ok(result.broken_rules.some(r=>r.startsWith('attendee_busy_collision:')));
+ assert.ok(result.attendee_hours_note?.some(note=>note.includes(email)&&note.includes('Asia/Jerusalem')),JSON.stringify(result));
+ assert.ok(result.attendee_hours_note?.some(note=>note.includes('second@example.test')&&note.includes('America/New_York')),JSON.stringify(result));
+});
+test('a jointly blocked candidate retains the owner constraint as a separate decision',async()=>{
+ const {out}=await run({clean:true,argsOverride:{candidate_slots:[{start:'2026-10-06T08:00:00+03:00'}]}});
+ const result=out.results[0];assert.equal(result.owner_available,false);
+ assert.ok(result.broken_rules.includes('outside_owner_work_hours'),JSON.stringify(result));
+ assert.ok(result._scheduling_decision_note?.includes('owner'));
+});

@@ -129,6 +129,7 @@ type SlotCandidate = {
   disturbs_floating_block?: boolean;
   over_optional?: string;
   priority?: 'good' | 'medium' | 'low';
+  matches_time_preference?: boolean;
   shared_overlap?: number;
   density?: number;
   /**
@@ -1601,6 +1602,7 @@ export async function findAvailableSlots(params: {
           start: cursorLocal.toISO()!,   // local-zoned ISO with explicit offset (v2.4.2)
           end: slotEndLocal.toISO()!,
           day_type: dayType,
+          ...(params.preferMorning ? {matches_time_preference:cursorLocal.hour < 12} : {}),
           disturbs_floating_block: disturbsBlock,
           ...(verdictOverOptional ? { over_optional: verdictOverOptional } : {}),
           ...(verdictBrokenRuleLabel ? { broken_rule_label: verdictBrokenRuleLabel } : {}),

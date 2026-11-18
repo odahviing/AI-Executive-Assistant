@@ -122,7 +122,7 @@ async function mustBeResult(relaxedRecoverySlots) {
   const run = compileFn(`${mustBeIf.getText()}\nreturn null;`, {
     mustBe: true, relaxedRecoverySlots, timezone: zone, offerCount: 8, args: { duration_minutes: 25 },
     context: { profile }, DateTime, strictDaySummary: [], recoveryDiagnostics: {}, require: () => ({ pickSpreadSlots }),
-    ownerHoursExceptionRequested: false, presentTzForOutput: () => '',
+    ownerHoursExceptionRequested: false, presentTzForOutput: () => '', scope: {},
     compareByRulePriority: rules.compareByRulePriority ?? (() => 0),
   });
   return run();

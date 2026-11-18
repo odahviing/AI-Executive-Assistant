@@ -13,15 +13,25 @@ export interface RefusedBooking {
   reason: string;
   action: { tool: 'create_meeting'; args: Record<string, unknown> };
 }
-/** Human-authored scheduling details, scoped to a speaker and private thread. Never action authority. */
+/** Human scheduling details and verified event references, scoped to a speaker and private thread. Never action authority. */
 export interface MeetingRequestState {
   batch?: boolean;
   requestId?: string;
   requiredDay?: {date:string; zone:string; quote:string};
+  /** Latest day the human is exploring; context for a bare clock, not a deadline. */
+  searchDay?: {date:string; zone:string; quote:string};
   bookingInstruction?: {kind:'exact'|'window'; text:string; localDate:string};
   individualSearchEmails?: string[];
   requesterPair?: boolean;
   participantGroups?: string[][];
+  /** Search spellings of the human-named participants, re-resolved on each turn. */
+  directorySpellings?: Array<{name:string;spelling:string}>;
+  /** Human-supplied identities; a bare mailbox can await assignment to a member/group. */
+  participantBindings?: Array<{name:string;identifier:string;quote:string}>;
+  optionalParticipants?: string[];
+  /** Completed work remains context for corrections, never permission to repeat it. */
+  hasConfirmedBooking?: boolean;
+  conflictOptions?: Array<{start:string;end:string;conflicts:Array<{email:string;reason:string}>}>;
   ownerId: string;
   requesterId: string;
   channelId: string;
@@ -30,6 +40,8 @@ export interface MeetingRequestState {
   updates: string[];
   clockZone?: {zone:string; quote:string};
   duration?: { minutes: number; quote: string };
+  /** A human-named existing meeting; its verified event is reread before reuse. */
+  existingMeeting?: {eventId?:string;sourceQuote?:string};
 }
 export interface ConversationMessage {
   meetingRequest?: MeetingRequestState;

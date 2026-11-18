@@ -9,11 +9,11 @@ test('regression Paul search excludes unrelated Adam and Scott while recovering 
  const r=await run({clean:true,contextOverride:context,argsOverride:{attendee_emails:[paul]}});
  assert.ok(r.calls.searches.length);for(const call of r.calls.searches)assert.deepEqual([...call.attendeeBusyEmails].sort(),[chris,paul].sort());
 });
-test('regression ambiguous shared attendee refuses before calendar disclosure',async()=>{
- const r=await run({clean:true,contextOverride:context,argsOverride:{attendee_emails:[chris]}});assert.equal(r.out.error,'ambiguous_meeting_roster');assert.equal(r.calls.searches.length,0);
+test('explicit person check progresses without merging ambiguous meetings',async()=>{
+ const r=await run({clean:true,contextOverride:context,argsOverride:{attendee_emails:[chris]}});assert.equal(r.out.availability_scope,'explicit_participant_only');assert.ok(r.calls.searches.length);assert.ok(r.calls.searches.every(s=>s.attendeeBusyEmails.length===1&&s.attendeeBusyEmails[0]===chris));
 });
-test('regression incomplete producer grouping refuses rather than flattening',async()=>{
- const r=await run({clean:true,contextOverride:{...context,resolvedMeetingAttendeeGroups:[]},argsOverride:{attendee_emails:[paul]}});assert.equal(r.out.error,'ambiguous_meeting_roster');assert.equal(r.calls.searches.length,0);
+test('incomplete grouping permits only the explicit calendar check',async()=>{
+ const r=await run({clean:true,contextOverride:{...context,resolvedMeetingAttendeeGroups:[]},argsOverride:{attendee_emails:[paul]}});assert.equal(r.out.availability_scope,'explicit_participant_only');assert.ok(r.calls.searches.length);assert.ok(r.calls.searches.every(s=>s.attendeeBusyEmails.length===1&&s.attendeeBusyEmails[0]===paul));
 });
 test('control single-meeting known attendee cannot be dropped by partial args',async()=>{
  const r=await run({clean:true,contextOverride:{resolvedMeetingAttendees:[paul,chris],resolvedMeetingAttendeeGroups:[{emails:[paul,chris],unresolvedNames:[]}]},argsOverride:{attendee_emails:[paul]}});assert.ok(r.calls.searches.length);assert.ok(r.calls.searches.every(c=>c.attendeeBusyEmails.includes(chris)));
@@ -32,6 +32,13 @@ test('regression create uses the selected meeting roster',()=>{assert.deepEqual(
 test('regression create ambiguous roster writes no invite',()=>{assert.equal(createRoster([chris]).error,'ambiguous_meeting_roster');});
 test('control create solo block does not acquire any turn attendee',()=>{assert.deepEqual(createRoster([]),[]);});
 test('control legacy single roster still recovers missing attendee',()=>{assert.deepEqual(createRoster([paul],{resolvedMeetingAttendees:[paul,chris]}).map(a=>a.email).sort(),[paul,chris].sort());});
+
+test('a single stale roster cannot add Adam to a booking that names only Paul',()=>{
+ const stale={resolvedMeetingAttendees:[adam],resolvedMeetingAttendeeGroups:[{emails:[adam],unresolvedNames:[]}]};
+ assert.equal(createRoster([paul],stale).error,'ambiguous_meeting_roster');
+ assert.deepEqual(createRoster([chris],stale).map(a=>a.email).sort(),[chris,adam].sort(),'requester-only arguments may recover the known invitee');
+ assert.deepEqual(createRoster([paul],{...stale,resolvedMeetingAttendeeGroups:[{emails:[adam],unresolvedNames:['Paul']}]}).map(a=>a.email).sort(),[paul,adam].sort(),'an identified mixed internal/external roster still resolves');
+});
 
 const alex = 'alex@example.test';
 const elinor = 'elinor@example.test';
@@ -91,3 +98,44 @@ for (const [name, role, requesterEmail, eventRoster, ids] of [
  });
 }
 module.exports={createRoster};
+
+test('an existing-meeting request cannot silently search a new-meeting default before identification',async()=>{
+ const r=await run({clean:true,contextOverride:{meetingRequestId:'existing-request',requestExistingMeeting:true},argsOverride:{duration_minutes:25}});
+ assert.equal(r.out.error,'existing_meeting_not_identified');assert.equal(r.calls.searches.length,0);
+});
+
+test('an explicit human duration permits a scoped availability check while event identity is unresolved',async()=>{
+ const r=await run({clean:true,role:'colleague',meetingsOverride:{allowed_durations:[25,40,55]},contextOverride:{meetingRequestId:'existing-request',requestExistingMeeting:true,requestDurationMinutes:45},
+  argsOverride:{duration_minutes:25}});
+ assert.ok(r.out.slots.length);assert.equal(r.out.existing_meeting_identity,'unresolved');
+ assert.ok(r.calls.searches.every(call=>call.durationMinutes===40));
+ assert.equal(r.out.moving_meeting,undefined);
+ assert.match(r.out.search_basis,/Identify it before changing/);
+});
+
+for (const role of ['owner','colleague']) for (const [label,requestMinutes,expected] of [
+ ['preserved existing length',undefined,40],['human changes length',25,25],
+]) test(`${role} continued move search: ${label}`,async()=>{
+ const r=await run({clean:true,role,requesterEmail:chris,
+  contextOverride:{meetingRequestId:'active-move',requestMovingEventId:'existing',requestDurationMinutes:requestMinutes,
+   resolvedMeetingAttendees:[chris],resolvedMeetingAttendeeGroups:[{emails:[chris],unresolvedNames:[]}]},
+  argsOverride:{attendee_emails:[chris],duration_minutes:25},
+  extraMocks:{'src/utils/movingEventAttendees.ts':{resolveMovingEventAttendees:async ids=>{
+   assert.deepEqual([...ids],['existing']);return new Map([['existing',{attendees:[chris],durationMinutes:40,categories:[]}]]);
+  }}},
+ });
+ assert.ok(r.calls.searches.length);assert.ok(r.calls.searches.every(call=>call.durationMinutes===expected));
+ assert.equal(r.out.moving_meeting.event_id,'existing');assert.equal(r.out.moving_meeting.duration_minutes,expected);
+});
+
+test('a continued move rechecks membership before retaining its event or duration',async()=>{
+ const r=await run({clean:true,role:'colleague',requesterEmail:'stranger@example.test',
+  contextOverride:{meetingRequestId:'active-move',requestMovingEventId:'existing'},
+  argsOverride:{attendee_emails:['stranger@example.test'],duration_minutes:25},
+  extraMocks:{'src/utils/movingEventAttendees.ts':{resolveMovingEventAttendees:async()=>new Map([
+   ['existing',{attendees:[chris],durationMinutes:40,categories:[]}],
+  ])}},
+ });
+ assert.equal(r.out.moving_meeting,undefined);
+ assert.ok(r.calls.searches.every(call=>call.durationMinutes===25&&!call.excludeEventIds?.includes('existing')));
+});

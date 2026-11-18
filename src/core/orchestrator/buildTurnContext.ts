@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { isClockReply } from '../../utils/schedulingClockReply';
+import { isClockReply, clockReply } from '../../utils/schedulingClockReply';
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../../llm/client';
 import { MODEL_SONNET } from '../../llm/models';
@@ -17,6 +17,30 @@ import type { SkillContext } from '../../skills/types';
 import type { RefusedBooking } from '../../db/conversations';
 
 const anthropic = getAnthropicClient();
+
+// A participant identifier already has human-message provenance below. Slack's
+// mailto destination, not its display label or a directory namesake, is its inbox.
+function participantMailbox(identifier:string):string|undefined {
+  const links=[...identifier.matchAll(/<mailto:([^>|]+)(?:\|[^>]*)?>/gi)];
+  const value=links.length===1 ? links[0][1] : identifier.trim();
+  return /^[A-Z0-9.!#$%&'*+/=?^_`{}|~-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)+$/i.test(value)
+    ? value.toLowerCase() : undefined;
+}
+
+/** A message consisting only of mailbox tokens needs no semantic extraction. */
+function mailboxOnlyReply(message:string):string[] {
+  const token=/<mailto:[^>]+>|[A-Z0-9.!#$%&'*+/=?^_`{}|~-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)+/gi;
+  const literals=[...message.matchAll(token)].map(match=>match[0]);
+  return literals.length && /^[\s,;]*$/.test(message.replace(token,''))
+    ? literals.filter(literal=>!!participantMailbox(literal)) : [];
+}
+
+function participantIdentifier(identifier:string):string {
+  const mailbox=participantMailbox(identifier);
+  if (mailbox) return mailbox;
+  const mentions=[...identifier.matchAll(/<@[A-Z0-9]+(?:\|[^>]+)?>/g)];
+  return mentions.length===1 ? mentions[0][0].split('|')[0].replace(/>?$/, '>') : identifier;
+}
 
 export async function buildTurnContext(input: OrchestratorInput) {
   const { userMessage, conversationHistory, threadTs, profile } = input;
@@ -95,6 +119,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   let firmWindowBooking = false;
   let searchBeforeReply = false;
   let decisionReportLocale:'en'|'he'|undefined;
+  let answeredQuestion:string|undefined;
   let requestedOptionCount:number|null|undefined;
   let consultOwnerQuote: string | undefined;
   let consultBackground: string | undefined;
@@ -158,6 +183,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // Result.scope feeds getSkillTools below (toolScopes); result.intent drives
   // the social directive. Both fail open (intent→other, scopes→general).
   let toolScopes: string[] | undefined;
+  let currentPromptScopes: string[] | undefined;
   // v3.1.2 (D) — captured from classifyTurn so a deterministic analyzeCalendar
   // pre-check can fire below for owner buffer/free-time questions, replacing
   // a leaky free-time prompt rule that meetings.ts has since removed.
@@ -169,14 +195,19 @@ export async function buildTurnContext(input: OrchestratorInput) {
   let turnMeetingPeople: string[] = [];
   let currentMessageMeetingPeople: string[] = [];
   let resolvedMeetingAttendees: string[] = [];
+  let resolvedOptionalAttendees: string[] = [];
   let meetingPeopleGroups: string[][] | undefined;
   let ordinaryCreateSubject: string | undefined;
   let ordinaryCreateAfterOtherMeeting: SkillContext['ordinaryCreateAfterOtherMeeting'];
   let directorySpellings: Array<{name:string; spelling:string}> = [];
   let resolvedMeetingAttendeeGroups: SkillContext['resolvedMeetingAttendeeGroups'];
   let contextualApprovalDecisions: SkillContext['contextualApprovalDecisions'];
+  let calendarOperations: import('../social/classifyTurn').ClassifyTurnResult['calendarOperations'];
   let standaloneBookingApproval: SkillContext['standaloneBookingApproval'];
   let exactRequestClock: SkillContext['exactRequestClock'];
+  let ownerOutreachAuthorized=false;
+  let requireAttendeeAvailability=false;
+  let existingStatusOnly=false;
   // gh#158 residual — `resolvedMeetingAttendees` serves two purposes that need
   // different scopes: WHO to auto-add to the search (everyone genuinely on the
   // meeting, including addresses extracted from a forwarded email header below)
@@ -228,18 +259,17 @@ export async function buildTurnContext(input: OrchestratorInput) {
   const needMeetingPeople = input.interactive !== false && !!userMessage && userMessage.trim().length > 1;
   if (needIntent || needScopes || needMeetingPeople) {
     try {
-      // The latest assistant reply carries the proposal and any promise to
-      // wait. Keeping only its opening can erase that commitment. Preserve
-      // the full reply up to 8,000 characters; for longer replies retain both
-      // ends with an explicit omission marker. Other context stays compact.
+      // Open questions and human conditions can precede an intervening reply.
+      // Keep each indexed exchange intact: truncating all but the latest
+      // assistant to 280 characters erased unanswered category/identity
+      // questions and made the human's answer look unrelated. The same
+      // bounded text is used both by classification and citation validation.
       // This is input to the existing call, not durable agreement state.
       const recentMessages = conversationHistory.slice(-4);
-      const lastAssistantIndex = recentMessages.map(m => m.role).lastIndexOf('assistant');
       const meetingContextMessages = recentMessages
-        .map((m, i) => {
-          const content = i === lastAssistantIndex
-            ? (m.content.length <= 8000 ? m.content : `${m.content.slice(0, 4000)}\n[...middle omitted...]\n${m.content.slice(-4000)}`)
-            : m.content.slice(0, 280);
+        .map(m => {
+          const content = m.content.length <= 8000 ? m.content
+            : `${m.content.slice(0, 4000)}\n[...middle omitted...]\n${m.content.slice(-4000)}`;
           return { role: m.role, content };
         });
       const recentContext = meetingContextMessages
@@ -380,9 +410,18 @@ export async function buildTurnContext(input: OrchestratorInput) {
       const previousRequest = prior?.role === 'assistant' && Array.isArray(prior.toolSummaries) ? prior.meetingRequest : undefined;
       const requestScope = isPrivateSlackDm && !input.proseOnly && !input.extraInstruction && input.interactive !== false
         && input.typedUserMessage?.trim() && input.userId && userMessage.includes(input.typedUserMessage);
-      const activeRequest = requestScope && previousRequest?.requesterId === input.userId
+      let activeRequest = requestScope && previousRequest?.requesterId === input.userId
         && previousRequest.ownerId === profile.user.slack_user_id && previousRequest.threadTs === threadTs
         && previousRequest.channelId === input.channelId ? previousRequest : undefined;
+      const requestHistory=new Map<string,import('../../db/conversations').MeetingRequestState>();
+      if(requestScope) for(const row of conversationHistory) {
+        const state=row.role==='assistant' && Array.isArray(row.toolSummaries) ? row.meetingRequest : undefined;
+        if(state?.requestId && state.requesterId===input.userId && state.ownerId===profile.user.slack_user_id
+          && state.threadTs===threadTs && state.channelId===input.channelId) {
+          requestHistory.delete(state.requestId);requestHistory.set(state.requestId,state);
+        }
+      }
+      const recentRequests=[...requestHistory.values()].slice(-4);
       if (activeRequest && !isOwnerTyping) {
         // The directory extractor must be able to cite the original roster
         // even after several turns selecting dates or correcting an address.
@@ -406,13 +445,20 @@ export async function buildTurnContext(input: OrchestratorInput) {
         message: userMessage,
         profile,
         needIntent,
-        needScopes,
+        // The feature flag governs tool narrowing. Selecting the appropriate
+        // instructions still needs the current domain on an owner DM; reuse
+        // the same classification call without restricting any capability.
+        needScopes:needScopes || (needMeetingPeople && isPrivateSlackDm && input.surface==='owner_dm' && isOwnerPath),
         needMeetingPeople,
         refusedBooking,
         senderRole: turnSenderRole,
         senderName: input.senderName,
         recentContext: recentContext || undefined,
-        priorMeetingRequest: activeRequest && {original:activeRequest.original,updates:activeRequest.updates,duration:activeRequest.duration,participantGroups:activeRequest.participantGroups,requiredDay:activeRequest.requiredDay,bookingInstruction:activeRequest.bookingInstruction?.localDate === DateTime.now().setZone(profile.user.timezone).toISODate() ? activeRequest.bookingInstruction : undefined},
+        priorMeetingRequest: activeRequest && {original:activeRequest.original,updates:activeRequest.updates,batch:activeRequest.batch,hasConfirmedBooking:activeRequest.hasConfirmedBooking,duration:activeRequest.duration,participantGroups:activeRequest.participantGroups,requiredDay:activeRequest.requiredDay,bookingInstruction:!activeRequest.hasConfirmedBooking ? activeRequest.bookingInstruction : undefined},
+        recentMeetingRequests:recentRequests.length>1 ? recentRequests.map(({requestId,original,updates,batch,hasConfirmedBooking,duration,participantGroups,requiredDay,bookingInstruction,existingMeeting})=>({
+          requestId,original,updates:updates.slice(-3),batch,hasConfirmedBooking,duration,participantGroups,requiredDay,
+          bookingInstruction:hasConfirmedBooking?undefined:bookingInstruction,existingMeeting,
+        })) : undefined,
         meetingContextMessages: isPrivateSlackDm ? meetingContextMessages : undefined,
         ...(holdCandidates.length ? { holdCandidates, holdOfferText:priorProse, holdSelectionText:input.typedUserMessage } : {}),
         inspectIndependentOrdinaryCreate,
@@ -422,11 +468,22 @@ export async function buildTurnContext(input: OrchestratorInput) {
           return {subject:row.subject ?? '',action,reason:details.honest_hard_reason ?? details.rule_label ?? details.rule};
         }) : undefined,
       });
+      if(turnResult.selectedRequestId) {
+        const selected=recentRequests.find(state=>state.requestId===turnResult.selectedRequestId);
+        if(selected) activeRequest=selected;
+      }
       const followsOffer = !!activeRequest && !activeRequest.batch && !!receipts?.some(line => line.startsWith('[find_available_slots ') && line.includes(' slots:'))
         && !!input.typedUserMessage && isClockReply(input.typedUserMessage);
       const requestUpdate = followsOffer ? { relation: 'continue' as const, duration: undefined, clockZone:undefined, batch:false } : turnResult.requestUpdate;
       if (requestScope && input.surface === 'owner_dm' && input.userId === profile.user.slack_user_id
         && turnResult.decisionReport?.quote === input.typedUserMessage) decisionReportLocale = turnResult.decisionReport?.locale;
+      if (requestScope && input.surface==='owner_dm' && input.authority==='owner' && input.userId===profile.user.slack_user_id
+        && !input.images?.length && !input.forceToolOnFirstTurn) answeredQuestion=turnResult.answeredQuestion;
+      if (requestScope && input.surface==='owner_dm' && input.authority==='owner' && input.userId===profile.user.slack_user_id
+        && turnResult.ownerOutreachQuote===input.typedUserMessage && input.typedUserMessage===userMessage
+        && !input.images?.length && !input.forceToolOnFirstTurn && !input.extraInstruction) ownerOutreachAuthorized=!!turnResult.ownerOutreachQuote;
+      if (requestScope && isOwnerTyping && input.surface==='owner_dm' && turnResult.requireAvailabilityQuote===input.typedUserMessage
+        && !!turnResult.requireAvailabilityQuote && input.typedUserMessage===userMessage && !input.proseOnly && !input.extraInstruction && !input.forceToolOnFirstTurn && !input.images?.length) requireAttendeeAvailability=true;
       if (requestScope) requestedOptionCount = turnResult.requestedOptionCount ?? null;
       searchBeforeReply = !!(requestScope && turnResult.searchBeforeReply && turnResult.searchBeforeReply === input.typedUserMessage
         && !input.proseOnly && !input.extraInstruction && !input.images?.length && !input.forceToolOnFirstTurn);
@@ -436,18 +493,52 @@ export async function buildTurnContext(input: OrchestratorInput) {
         const previous = update.relation === 'continue' ? activeRequest : undefined;
         const batch = !!(update.batch || previous?.batch);
         meetingRequest = {
-          batch, requestId:previous?.requestId ?? crypto.randomUUID(),
+          batch, requestId:previous?.requestId ?? crypto.randomUUID(), hasConfirmedBooking:previous?.hasConfirmedBooking,
           ownerId:profile.user.slack_user_id, requesterId:input.userId, channelId:input.channelId, threadTs,
           original: previous?.original ?? text, updates: previous
             ? [...previous.updates.filter(item => item !== text), text].slice(-12) : [],
           requiredDay:previous?.requiredDay,
+          searchDay:batch ? undefined : previous?.searchDay,
           bookingInstruction:previous?.bookingInstruction,
           individualSearchEmails:previous?.individualSearchEmails,
-          requesterPair:!batch && input.surface==='colleague_dm' && turnResult.requesterPair === true,
+          requesterPair:!batch && input.surface==='colleague_dm' && (turnResult.requesterPair === true
+            || (previous?.requesterPair === true && (turnResult.participantsUnchanged || followsOffer))),
           participantGroups:previous?.participantGroups,
+          directorySpellings:previous?.directorySpellings,
+          participantBindings:previous?.participantBindings,
+          optionalParticipants:previous?.optionalParticipants,
+          conflictOptions:previous?.conflictOptions,
+          existingMeeting:batch ? undefined : turnResult.existingMeetingQuote
+            ? {...previous?.existingMeeting,sourceQuote:turnResult.existingMeetingQuote}
+            : (turnResult.participantsUnchanged || followsOffer) ? previous?.existingMeeting : undefined,
           clockZone:batch ? undefined : update.clockZone && text.includes(update.clockZone.quote) ? update.clockZone : previous?.clockZone,
           duration: batch ? undefined : update.duration && text.includes(update.duration.quote) ? update.duration : previous?.duration,
         };
+      }
+      if (meetingRequest && !meetingRequest.batch && requestUpdate?.searchDay
+        && input.typedUserMessage?.includes(requestUpdate.searchDay.quote)) {
+        const {date:expression,quote}=requestUpdate.searchDay;
+        if (expression==='flexible') {
+          delete meetingRequest.searchDay;
+          // A newly requested range supersedes the previous single-day
+          // restriction. Permission to book still comes from this turn's intent.
+          delete meetingRequest.requiredDay;
+          delete meetingRequest.bookingInstruction;
+        }
+        else {
+          const zone=meetingRequest.clockZone?.zone ?? requesterDayZone ?? profile.user.timezone;
+          const offset=['today','tomorrow','day_after_tomorrow'].indexOf(expression);
+          const anchor=isOwnerTyping && zone===profile.user.timezone
+            ? (await import('../../utils/effectiveToday')).getEffectiveToday(profile) : DateTime.now().setZone(zone);
+          const date=offset>=0 ? anchor.plus({days:offset}).toISODate() : expression;
+          if (date && DateTime.fromISO(date,{zone}).toISODate()===date) {
+            meetingRequest.searchDay={date,zone,quote};
+            if (meetingRequest.requiredDay && meetingRequest.requiredDay.date!==date) {
+              delete meetingRequest.requiredDay;
+              delete meetingRequest.bookingInstruction;
+            }
+          }
+        }
       }
       if (meetingRequest && !meetingRequest.batch && requestUpdate && 'dayChange' in requestUpdate && requestUpdate.dayChange
         && input.typedUserMessage?.includes(requestUpdate.dayChange.quote)) {
@@ -464,6 +555,16 @@ export async function buildTurnContext(input: OrchestratorInput) {
             const anchor = isOwnerTyping && zone === profile.user.timezone
               ? (await import('../../utils/effectiveToday')).getEffectiveToday(profile) : DateTime.now().setZone(zone);
             date = anchor.plus({days:offset}).toISODate() ?? '';
+            // The classifier can emit both an absolute search date and a
+            // relative required date for the very same quoted day. Resolve
+            // that shared phrase once, using its validated absolute date;
+            // otherwise the search rejects its own requested calendar day.
+            const search = requestUpdate.searchDay;
+            if (search && meetingRequest.searchDay?.quote === search.quote
+              && meetingRequest.searchDay.date === search.date
+              && (search.quote.includes(quote) || quote.includes(search.quote))) {
+              date = meetingRequest.searchDay.date;
+            }
           }
           if (date && DateTime.fromISO(date,{zone}).toISODate() === date) meetingRequest.requiredDay = {date, zone, quote};
         }
@@ -495,10 +596,10 @@ export async function buildTurnContext(input: OrchestratorInput) {
         existingInviteLocale = turnResult.existingInviteLocale;
         if (turnResult.withdrawOwnRequest) {
           const { getOpenRequestsForThread } = await import('../../db/requests');
+          const {canWithdrawOwnRequest} = await import('./requesterMeetingState');
           const pending = getOpenRequestsForThread(profile.user.slack_user_id,threadTs)
-            .filter(row => row.kind === 'approval' && row.requester_slack_id === input.userId && row.origin_channel === input.channelId);
-          if (pending.length === 1 && pending[0].state === 'awaiting_owner' && pending[0].subkind === 'freeform'
-            && JSON.parse(pending[0].details_json ?? '{}').organizer_invitation === true) withdrawalId = pending[0].id;
+            .filter(row => canWithdrawOwnRequest(row,profile.user.slack_user_id,input.userId,input.channelId,threadTs,meetingRequest?.requestId));
+          if (pending.length === 1) withdrawalId = pending[0].id;
         }
       }
       const fresh = turnResult.independentOrdinaryCreate;
@@ -517,6 +618,11 @@ export async function buildTurnContext(input: OrchestratorInput) {
       if (isPrivateSlackDm && turnResult.exactRequestClock?.quote === input.typedUserMessage
         && input.typedUserMessage === userMessage && !input.images?.length && !input.proseOnly && !input.forceToolOnFirstTurn) {
         exactRequestClock = turnResult.exactRequestClock;
+      }
+      if (isPrivateSlackDm && input.surface==='owner_dm' && isOwnerTyping && input.typedUserMessage===userMessage
+        && !input.images?.length && !input.proseOnly && !input.forceToolOnFirstTurn && !input.extraInstruction) {
+        const clock=clockReply(userMessage);
+        if (clock) exactRequestClock={clock,zone:meetingRequest?.clockZone?.zone ?? profile.user.timezone,quote:userMessage};
       }
       // A positively identified standalone courtesy needs just the current human
       // message. Keep operational history, tools and prechecks out of this draft.
@@ -562,16 +668,32 @@ export async function buildTurnContext(input: OrchestratorInput) {
           if (referencedCandidates.size !== 1 || !referencedCandidates.has(candidate)) return [];
           return [{ requestId: candidate.row.id, requestDetailsJson: candidate.row.details_json,
             action: candidate.action, disposition: decision.disposition, instructionQuote: decision.instructionQuote,
-            sourceMessageIndex: decision.sourceMessageIndex, sourceQuote: decision.sourceQuote }];
+            sourceMessageIndex: decision.sourceMessageIndex, sourceQuote: decision.sourceQuote,
+            preservesRecipients: turnResult.participantsUnchanged === true && !turnResult.participantCorrections?.length }];
         });
       }
 
       if (needScopes) toolScopes = turnResult.scope.scopes;
+      if (turnResult.scope.source==='classifier') currentPromptScopes=turnResult.scope.scopes;
+      existingStatusOnly = !!turnResult.existingStatusQuote && turnResult.existingStatusQuote === userMessage;
       if (isOwnerPath) isFreeTimeInquiry = turnResult.freeTimeInquiry === true;
       if (needMeetingPeople) {
         unresolvedHoldSelection = turnResult.unresolvedHoldSelection === true;
-        meetingExplorationOnly = turnResult.meetingAction === 'explore'
-          || (!turnResult.meetingAction && (!!refusedBooking || holdCandidates.length > 0));
+        const priorAssistant = [...conversationHistory].reverse().find(row=>row.role==='assistant');
+        // A clock-only owner reply to an actual offer selects or replaces the
+        // clock. It does not decide an absent date, widen the roster, or consent
+        // to outreach. Questions and already completed bookings stay excluded.
+        const ownerSelectsClock = isPrivateSlackDm && input.surface==='owner_dm' && isOwnerTyping
+          && input.typedUserMessage===userMessage && /^\d{1,2}:\d{2}$/.test(userMessage.trim())
+          && !!clockReply(userMessage) && !!activeRequest && !activeRequest.hasConfirmedBooking
+          && turnResult.meetingContinuation===true && !input.proseOnly && !input.extraInstruction
+          && !input.forceToolOnFirstTurn && !input.images?.length
+          && !!priorAssistant?.toolSummaries?.some(line=>line.startsWith('[find_available_slots '));
+        if(ownerSelectsClock) exactBookingRequested=true;
+        meetingExplorationOnly = !ownerSelectsClock && (turnResult.meetingAction === 'explore'
+          || (!turnResult.meetingAction && (!!refusedBooking || holdCandidates.length > 0)));
+        if ((isOwnerPath || isPrivateSlackDm) && !ownerSelectsClock && !input.proseOnly && !input.extraInstruction && !input.forceToolOnFirstTurn)
+          calendarOperations = turnResult.calendarOperations?.filter(operation => (input.typedUserMessage ?? input.rawUserMessage ?? userMessage).includes(operation.quote));
         checkRequestedHold = turnResult.meetingAction === 'hold' && !!turnResult.requestedHoldQuote
           && !turnResult.selectedHoldCandidateIndices?.length;
         if (turnResult.meetingAction === 'hold' && !checkRequestedHold) {
@@ -586,7 +708,8 @@ export async function buildTurnContext(input: OrchestratorInput) {
           }
         }
         directorySpellings = turnResult.directorySpellings ?? [];
-        const rawMeetingPeople = turnResult.meetingPeople ?? [];
+        const rawMeetingPeople = [...new Set([...(turnResult.meetingPeople ?? []),
+          ...(meetingRequest && input.typedUserMessage ? mailboxOnlyReply(input.typedUserMessage) : [])])];
         // gh#158-a — classifyTurn is fed both THIS turn's message and up to 4
         // turns of recentContext so it can read conversational state, but its
         // own meeting_people contract promises names are "copied as written"
@@ -630,29 +753,119 @@ export async function buildTurnContext(input: OrchestratorInput) {
         // Grouping never grants membership. Reuse the current-message and
         // private-history provenance gates above; incomplete partitions remain
         // explicitly ambiguous rather than silently dropping a known person.
+        const priorGroups = meetingRequest?.participantGroups;
+        const bindings=new Map((meetingRequest?.participantBindings ?? []).map(binding=>[normalize(binding.name),binding]));
+        const currentMailboxes = new Set(currentMessageMeetingPeople.map(participantMailbox).filter(Boolean));
+        // Slack encodes a supplied address separately from its adjacent name.
+        // The classifier may use the full identifier in membership and only
+        // its label in groups. Bind that literal label before partition checks;
+        // a unique human-supplied destination outranks a directory namesake.
+        const labelledMailboxes = new Map<string,Array<{name:string;identifier:string;quote:string}>>();
+        for (const literal of currentMessageMeetingPeople) {
+          const at=literal.toLowerCase().indexOf('<mailto:');
+          const email=participantMailbox(literal);
+          let name=at>0?literal.slice(0,at).trim():'';
+          // Presentation separators carry no identity. Keep the literal label
+          // while allowing the roster extractor to omit a trailing dash/colon.
+          while (name && '-:–—'.includes(name.at(-1)!)) name=name.slice(0,-1).trimEnd();
+          if (!name || !email || !literal.endsWith('>')) continue;
+          const key=normalize(name),items=labelledMailboxes.get(key) ?? [];
+          items.push({name,identifier:email,quote:literal});labelledMailboxes.set(key,items);
+        }
+        for (const [key,items] of labelledMailboxes) {
+          if (new Set(items.map(item=>item.identifier)).size===1) bindings.set(key,items[0]);
+          else bindings.delete(key);
+        }
+        if (meetingRequest && requestUpdate?.relation==='continue' && turnResult.selfParticipant && input.surface==='colleague_dm'
+          && input.authority==='colleague' && input.userId!==profile.user.slack_user_id && input.typedUserMessage?.includes(turnResult.selfParticipant.quote)
+          && !mailboxOnlyReply(turnResult.selfParticipant.quote).length
+          && priorGroups?.some(group=>group.includes(turnResult.selfParticipant!.name))) {
+          const self=turnResult.selfParticipant;
+          bindings.set(normalize(self.name),{name:self.name,identifier:'<@'+input.userId+'>',quote:self.quote});
+        }
+        if (meetingRequest) for (const correction of turnResult.participantCorrections ?? []) {
+          if (!input.typedUserMessage?.includes(correction.quote) || !correction.quote.includes(correction.to)) continue;
+          const namedQuote=normalize(correction.quote.replace(/<mailto:[^>]+>/gi,' ')
+            .replace(/[A-Z0-9.!#$%&'*+/=?^_`{}|~-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)+/gi,' '));
+          const currentNamedBinding=currentMessageMeetingPeople.some(name=>normalize(name)===normalize(correction.from))
+            && turnResult.meetingPeopleGroups?.[correction.group]?.includes(correction.from)
+            && namedQuote.includes(normalize(correction.from));
+          if(!currentNamedBinding && !(requestUpdate?.relation==='continue' && priorGroups?.[correction.group]?.includes(correction.from))) continue;
+          // Several anonymous mailboxes do not establish a name-to-address
+          // mapping. In particular, two answers cannot be assigned to the
+          // last two names Maelle happened to ask about when an earlier human
+          // asked about different people. Keep those addresses unresolved
+          // until their labels are supplied; a single requested address and
+          // explicitly labelled multi-address corrections remain usable.
+          if (currentMailboxes.size > 1 && participantMailbox(correction.to)
+            && !namedQuote.includes(normalize(correction.from))
+            && !(turnResult.directorySpellings ?? []).some(item=>normalize(item.name)===normalize(correction.from)
+              && namedQuote.includes(normalize(item.spelling)))) continue;
+          for (const [key,binding] of bindings) if(normalize(binding.identifier)===normalize(correction.from))
+            bindings.set(key,{...binding,identifier:correction.to,quote:correction.quote});
+          bindings.set(normalize(correction.from),{name:correction.from,identifier:correction.to,quote:correction.quote});
+        }
+        // A literal participant mailbox is established even before its name
+        // or appointment is known. Retain it in the existing binding map so a
+        // later acknowledgement cannot silently restore a directory namesake.
+        for (const literal of currentMessageMeetingPeople) {
+          const email=participantMailbox(literal);
+          if (email && input.typedUserMessage?.includes(literal)
+            && ![...bindings.values()].some(binding=>participantMailbox(binding.identifier)===email)) {
+            bindings.set(normalize(email),{name:email,identifier:email,quote:literal});
+          }
+        }
+        const canonicalParticipant=(name:string)=>{
+          const identifier=bindings.get(normalize(name))?.identifier ?? name;
+          return participantIdentifier(identifier);
+        };
+        turnMeetingPeople=[...new Set(turnMeetingPeople.map(canonicalParticipant))];
         if (Array.isArray(turnResult.meetingPeopleGroups)) {
-          const accepted = new Set(turnMeetingPeople.map(normalize));
+          const {nameGenuinelyMatches} = require('../../memory/resolveAttendeeEmails') as typeof import('../../memory/resolveAttendeeEmails');
+          // The calendar owner is implicit in every appointment. His spelling
+          // cannot invalidate another person's roster or create a solo group.
+          const ownerName = (name:string) => name.toLowerCase() === profile.user.email.toLowerCase()
+            || name === '<@'+profile.user.slack_user_id+'>'
+            || nameGenuinelyMatches(profile.user.name,profile.user.email,name)
+            || (!!profile.user.name_he && nameGenuinelyMatches(profile.user.name_he,undefined,name));
+          const accepted = new Set(turnMeetingPeople.filter(name=>!ownerName(name)).map(normalize));
+          // Stored members already passed provenance checks on earlier turns.
+          // They need not be re-extracted from a truncated recent transcript.
+          const allowed=new Set([...accepted,...(requestUpdate?.relation==='continue' ? priorGroups?.flat() ?? [] : [])
+            .map(canonicalParticipant).filter(name=>!ownerName(name)).map(normalize)]);
           const mentions = turnMeetingPeople.filter(name=>name.startsWith('<@')).flatMap(name=>{
             const {resolveNamedInternalAttendees} = require('../../memory/resolveAttendeeEmails') as typeof import('../../memory/resolveAttendeeEmails');
             const person = resolveNamedInternalAttendees({names:[name],ownerEmail:profile.user.email}).resolved[0];
             return person ? [{literal:name,person}] : [];
           });
           const groupName = (name:string):string[] => {
-            if (accepted.has(normalize(name))) return [name];
-            const {nameGenuinelyMatches} = require('../../memory/resolveAttendeeEmails') as typeof import('../../memory/resolveAttendeeEmails');
-            const candidates = mentions.filter(({person})=>nameGenuinelyMatches(person.name,person.email,name));
+            name=canonicalParticipant(name);
+            if (ownerName(name)) return [];
+            if (allowed.has(normalize(name))) return [name];
+            const candidates = mentions.filter(({literal,person})=>name === literal.slice(2,-1)
+              || nameGenuinelyMatches(person.name,person.email,name));
             return candidates.length === 1 ? [candidates[0].literal] : [];
           };
           const groups = turnResult.meetingPeopleGroups.map(group => [...new Set(
             group.flatMap(groupName),
           )]).filter(group => group.length > 0);
           const covered = new Set(groups.flat().map(normalize));
-          meetingPeopleGroups = [...accepted].every(name => covered.has(name)) ? groups : [];
+          meetingPeopleGroups = [...accepted].every(name => covered.has(name))
+            ? groups.length ? groups : accepted.size === 0 && turnResult.meetingPeopleGroups.length === 1 ? [[]] : []
+            : [];
         }
-        const priorGroups = meetingRequest?.participantGroups;
-        const correctedGroups = priorGroups?.map((group,index)=>group.map(name=>
-          turnResult.participantCorrections?.find(c=>c.group===index && c.from===name)?.to ?? name));
-        if (meetingRequest && turnResult.meetingContinuation && requestUpdate?.relation==='continue' && correctedGroups?.length
+        const correctedGroups = priorGroups?.map(group=>group.map(canonicalParticipant));
+        // Commit each source-validated identity correction independently of
+        // the complete new partition. An additional unassigned address can
+        // keep this turn ambiguous, but cannot erase a correction already
+        // established for another participant in the same human message.
+        if (meetingRequest && requestUpdate?.relation==='continue' && correctedGroups?.length) {
+          meetingRequest.participantGroups=correctedGroups;
+          const members=new Set(correctedGroups.flat().map(normalize));
+          meetingRequest.participantBindings=[...bindings.values()].filter(binding=>members.has(normalize(canonicalParticipant(binding.name))));
+          meetingRequest.optionalParticipants=meetingRequest.optionalParticipants?.map(canonicalParticipant);
+        }
+        if (meetingRequest && !turnResult.confirmedAppointmentGroups && turnResult.meetingContinuation && requestUpdate?.relation==='continue' && correctedGroups?.length
           && (turnResult.participantsUnchanged || (turnResult.participantCorrections?.length
             && currentMessageMeetingPeople.every(name=>[...priorGroups!.flat(),...correctedGroups.flat()].some(member=>normalize(member)===normalize(name)))))) {
           // The same meeting retains its human-specified membership. Explicit
@@ -660,8 +873,54 @@ export async function buildTurnContext(input: OrchestratorInput) {
           meetingPeopleGroups = correctedGroups;
           turnMeetingPeople = [...new Set(meetingPeopleGroups.flat())];
         }
+        if (meetingRequest?.batch && !turnResult.confirmedAppointmentGroups && requestUpdate?.relation==='continue' && correctedGroups && correctedGroups.length>1 && meetingPeopleGroups?.length) {
+          // A short reply can focus on one appointment in a batch without
+          // removing the others. Update only the uniquely identified group;
+          // a proposed union of distinct rosters remains ambiguous.
+          const counts=new Map<string,number>();
+          for(const group of correctedGroups) for(const name of new Set(group.map(normalize))) counts.set(name,(counts.get(name)??0)+1);
+          const merged=correctedGroups.map(group=>[...group]);
+          let ambiguous=false;
+          for(const group of meetingPeopleGroups) {
+            const anchors=group.map(normalize).filter(name=>counts.get(name)===1);
+            const matches=correctedGroups.flatMap((prior,index)=>anchors.some(name=>prior.map(normalize).includes(name))?[index]:[]);
+            if(matches.length!==1){ambiguous=true;break;}
+            merged[matches[0]]=group;
+          }
+          meetingPeopleGroups=ambiguous?[]:merged;
+        }
+        const assignedNames=new Set((meetingPeopleGroups?.length ? meetingPeopleGroups : correctedGroups ?? []).flat().map(canonicalParticipant).map(normalize));
+        const unassignedMailboxes=[...bindings.values()].filter(binding=>binding.name===binding.identifier
+          && !!participantMailbox(binding.identifier) && !assignedNames.has(normalize(binding.identifier)));
+        if (meetingRequest && unassignedMailboxes.length) {
+          meetingPeopleGroups=[];
+          turnMeetingPeople=[...new Set([...turnMeetingPeople,...(correctedGroups?.flat() ?? []),...unassignedMailboxes.map(binding=>binding.identifier)])];
+          const retained=new Map((meetingRequest.participantBindings ?? []).map(binding=>[normalize(binding.name),binding]));
+          for(const binding of unassignedMailboxes)retained.set(normalize(binding.name),binding);
+          meetingRequest.participantBindings=[...retained.values()];
+        }
         if (meetingRequest && meetingPeopleGroups?.length) {
+          if (meetingPeopleGroups.length>1 && !meetingRequest.batch) {
+            meetingRequest.batch=true;
+            meetingRequest.requiredDay=undefined;meetingRequest.searchDay=undefined;meetingRequest.duration=undefined;
+            meetingRequest.clockZone=undefined;meetingRequest.bookingInstruction=undefined;meetingRequest.existingMeeting=undefined;
+            meetingRequest.requesterPair=false;
+          }
           meetingRequest.participantGroups = meetingPeopleGroups.map(group=>[...group]);
+          meetingRequest.participantBindings=[...bindings.values()].filter(binding=>meetingPeopleGroups!.flat()
+            .some(name=>normalize(name)===normalize(binding.identifier)));
+          const optional=new Set((meetingRequest.optionalParticipants ?? []).map(canonicalParticipant));
+          for (const role of turnResult.participantRoles ?? []) {
+            const name=canonicalParticipant(role.name);
+            if (!meetingPeopleGroups.flat().includes(name) || !input.typedUserMessage?.includes(role.quote) || !role.quote.includes(role.name)) continue;
+            if (role.role==='optional') optional.add(name);else optional.delete(name);
+          }
+          meetingRequest.optionalParticipants=[...optional].filter(name=>meetingPeopleGroups!.flat().includes(name));
+          turnMeetingPeople=[...new Set(meetingPeopleGroups.flat())];
+          const spellings = new Map((meetingRequest.directorySpellings ?? []).map(item=>[item.name,item]));
+          for (const item of directorySpellings) spellings.set(item.name,item);
+          directorySpellings = [...spellings.values()].filter(item=>turnMeetingPeople.includes(item.name));
+          meetingRequest.directorySpellings = directorySpellings;
         }
       }
       // v3.x (Block 3 — calendar prose lazy-load). A free-time / buffer / "how
@@ -775,9 +1034,9 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // stored resolved set is (a) threaded into the search via skillContext so
   // find_available_slots can't run a partial list, and (b) surfaced to Sonnet as
   // a resolved-participants block so she searches instead of asking who they are
-  // / for an email she already has. External / unknown names are deliberately
-  // left out — they never block showing options; their email matters only at
-  // booking. Unresolved names also get the existing scoped directory lookup;
+  // / for an email she already has. Explicit human mailboxes are preserved;
+  // unresolved names never block showing owner-side options. Their email is
+  // needed at booking. Unresolved names get the existing scoped directory lookup;
   // its contact evidence does not decide required/optional participation.
   // Lookup errors remain unresolved; Sonnet's normal flow takes over.
   if (turnMeetingPeople.length > 0) {
@@ -785,18 +1044,22 @@ export async function buildTurnContext(input: OrchestratorInput) {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { resolveNamedInternalAttendees, nameGenuinelyMatches } = require('../../memory/resolveAttendeeEmails') as
         typeof import('../../memory/resolveAttendeeEmails');
-      const { resolved, unresolved } = resolveNamedInternalAttendees({
-        names: turnMeetingPeople,
-        ownerEmail: profile.user.email,
-        ownerName: profile.user.name,
-        ownerLocalName: profile.user.name_he,
-      });
+      const resolveParticipants=(names:string[])=>{
+        const mailboxes=[...new Set(names.map(participantMailbox).filter((email):email is string=>!!email
+          && email!==profile.user.email.toLowerCase()))];
+        const result=resolveNamedInternalAttendees({names:names.filter(name=>!participantMailbox(name)),
+          ownerEmail:profile.user.email,ownerName:profile.user.name,ownerLocalName:profile.user.name_he});
+        return {resolved:[...result.resolved,...mailboxes.filter(email=>!result.resolved.some(p=>p.email===email))
+          .map(email=>({name:email,email}))],unresolved:result.unresolved};
+      };
+      const { resolved, unresolved } = resolveParticipants(turnMeetingPeople);
       resolvedMeetingAttendees = resolved.map(r => r.email);
+      resolvedOptionalAttendees=resolveParticipants(meetingRequest?.optionalParticipants ?? []).resolved.map(person=>person.email);
       if (meetingPeopleGroups !== undefined) {
         // Resolution may return a canonical display name. Resolve group names
         // with the same deterministic resolver rather than guessing identity.
         resolvedMeetingAttendeeGroups = meetingPeopleGroups.map(names => {
-          const group = resolveNamedInternalAttendees({ names, ownerEmail: profile.user.email, ownerName: profile.user.name, ownerLocalName:profile.user.name_he });
+          const group = resolveParticipants(names);
           // An unresolved participant still belongs to this meeting. Dropping
           // an external-only group turns a different meeting into the sole
           // roster and wrongly invites/checks its internal colleagues.
@@ -861,6 +1124,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
             if (distinct.size === 1) {
               const contact = [...distinct.values()][0];
               directoryContacts.push(contact);
+              if (meetingRequest?.optionalParticipants?.includes(name)) resolvedOptionalAttendees.push(contact.email);
               // The directory establishes identity. Only a name already in a
               // specific meeting roster establishes required participation.
               for (const roster of resolvedMeetingAttendeeGroups ?? []) {
@@ -886,13 +1150,20 @@ export async function buildTurnContext(input: OrchestratorInput) {
       if (resolved.length > 0 || unresolved.length > 0 || directoryContacts.length > 0) {
         const ownerFirst = profile.user.name.split(' ')[0];
         const sections: string[] = ['## MEETING PARTICIPANTS (deterministic — use this, do not re-derive)'];
+        if (meetingRequest?.participantBindings?.length) sections.push('Human-supplied participant identities for this request (retain these corrections): '+JSON.stringify(meetingRequest.participantBindings));
+        const assigned=new Set(meetingRequest?.participantGroups?.flat().map(name=>name.toLowerCase()) ?? []);
+        const unassigned=meetingRequest?.participantBindings?.filter(binding=>binding.name===binding.identifier
+          && !!participantMailbox(binding.identifier) && !assigned.has(binding.identifier.toLowerCase()));
+        if (unassigned?.length) sections.push('Supplied participant addresses still awaiting assignment to a person or appointment: '
+          +unassigned.map(binding=>binding.identifier).join(', ')+'. Keep the known corrections. Clarify only this remaining mapping before sending an invitation; a directory namesake does not resolve it.');
+        if (meetingRequest?.optionalParticipants?.length) sections.push('Optional invitees (include in the invitation, but they need not be free): '+JSON.stringify(meetingRequest.optionalParticipants));
         if (directoryContacts.length > 0) {
           sections.push(`Current directory contact identities (not added to required availability; retain the participation role requested in the current message):\n${directoryContacts.map(r => `- ${r.name} <${r.email}>`).join('\n')}`);
         }
         if (directoryStates.length > 0) sections.push(`Current directory lookup outcomes: ${JSON.stringify(directoryStates)}`);
         if (resolved.length > 0) {
           const list = resolved.map(r => `- ${r.name} <${r.email}>`).join('\n');
-          sections.push(`Known internal colleagues, resolved from the directory — do NOT call find_slack_user for these and do NOT ask who they are or for their email. Use each requested meeting's own participants when searching or booking; these identities are not a combined roster for separate meetings:\n${list}`);
+          sections.push(`Participant identities from the directory or the human's explicit mailbox — use these addresses without another name lookup or email question. A supplied external inbox need not match a directory namesake. Use each requested meeting's own participants when searching or booking; these identities are not a combined roster for separate meetings:\n${list}`);
         }
         if (unresolved.length > 0) {
           // The external-vs-unknown JUDGMENT stays with the model (owner rule);
@@ -1006,7 +1277,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   const focusSlackIds = input.isMpim && input.mpimMemberIds
     ? new Set(input.mpimMemberIds.filter(id => id !== profile.user.slack_user_id))
     : undefined;
-  const promptParts = buildSystemPromptParts(profile, input.senderRole, input.senderName, input.isOwnerInGroup, focusSlackIds, input.isMpim, input.isChannel, input.threadTs, input.userId, input.mpimMemberIds, toolScopes, input.channel, input.authority, input.threadParticipantIds);
+  const promptParts = buildSystemPromptParts(profile, input.senderRole, input.senderName, input.isOwnerInGroup, focusSlackIds, input.isMpim, input.isChannel, input.threadTs, input.userId, input.mpimMemberIds, currentPromptScopes ?? toolScopes, input.channel, input.authority, input.threadParticipantIds);
 
   // Inject active jobs for this thread so Maelle knows what she already committed to.
   // This prevents her from treating follow-up messages as new requests.
@@ -1108,7 +1379,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
       if (rows.length > 0) {
         const ownerFirst = profile.user.name.split(' ')[0];
         const lines = rows.map(r => `  - "${r.subject}" — event_id=${r.outcome_external_event_id}`);
-        colleagueBookingBlock = `## MEETINGS YOU REQUESTED (use these IDs to change one)\n\nThese are meetings you asked ${ownerFirst} to set up. If you ask to change one ("add someone", "rename it", "move it", "cancel it"), use the matching event_id below — do NOT get_calendar to re-find it. You can add/rename directly; a MOVE or CANCEL of one of these needs ${ownerFirst}'s OK, so route it to him for approval:\n\n${lines.join('\n')}`;
+        colleagueBookingBlock = `## MEETINGS YOU REQUESTED (use these IDs to change one)\n\nThese are meetings you asked ${ownerFirst} to set up. For a requested change use the matching event_id below. Add or rename through update_meeting; move through move_meeting, which checks the current scheduling rules and raises an approval only when needed. Cancellation requires ${ownerFirst}'s approval. A request to move this occurrence keeps its identity and attendees; it is not a new booking.\n\n${lines.join('\n')}`;
       }
     } catch (err) {
       logger.warn('colleagueBookingBlock builder threw — proceeding without it', {
@@ -1142,7 +1413,8 @@ export async function buildTurnContext(input: OrchestratorInput) {
       // follow-up "move it / cancel it / who's on it" resolve by id instead of the
       // model re-searching by name — or fabricating "I can't find it" (the "Getting
       // back the Automation" move: read one turn, "not found" the next).
-      const viewed = getViewedThreadEvents(input.threadTs).filter(v => !createdIds.has(v.eventId)).slice(0, 10);
+      const observed = getViewedThreadEvents(input.threadTs).filter(v => !createdIds.has(v.eventId));
+      const viewed = observed.slice(0, 10);
       if (evs.length > 0 || viewed.length > 0) {
         const ownerFirst = profile.user.name.split(' ')[0];
         const parts: string[] = [];
@@ -1162,6 +1434,11 @@ export async function buildTurnContext(input: OrchestratorInput) {
         if (viewed.length > 0) {
           const vlines = viewed.map(v => `  - "${v.subject}"${v.dateIso ? ` (${v.dateIso})` : ''} — event_id=${v.eventId}`);
           parts.push(`## MEETINGS YOU'VE PULLED UP THIS THREAD (already on ${ownerFirst}'s calendar)\n\nWhen ${ownerFirst} asks to move / cancel / reschedule one of these, or who's on it, use the matching event_id directly (move_meeting / delete_meeting / update_meeting / get its attendees) — do NOT say you can't find it and do NOT re-search by name; you already have it:\n\n${vlines.join('\n')}`);
+        }
+        if (observed.length > viewed.length) {
+          // Retain the remaining names/dates without repeating long Graph IDs.
+          // The previous ten-earliest-only prompt silently forgot later weeks.
+          parts.push('Other events observed in this conversation (read the named day to recover details when relevant):\n'+observed.slice(viewed.length).map(v=>`  - ${v.dateIso}: ${v.subject}`).join('\n'));
         }
         ownerThreadEventsBlock = parts.join('\n\n');
       }
@@ -1256,6 +1533,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // into "let me check and get back to you".
   let availabilityPrecheckToolSummaries: string[] = [];
   let availabilityChecks: Array<Record<string,unknown>> = [];
+  let availabilityAlternatives: Array<Record<string,unknown>> = [];
   // v4.4.x (#154) — gated on `authority`, not the surface-clamped `senderRole`.
   // This precheck's own rendered text names the asker "this colleague's
   // question" (availabilityPreCheck.ts) — true for a genuine colleague, false
@@ -1283,6 +1561,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
     // A selected hold must bind to an earlier offer. A fresh availability
     // precheck can record new offers before the existing stash is read below.
     && !holdOnlyWindows
+    && !existingStatusOnly
     && userMessage && userMessage.trim().length > 0
   ) {
     try {
@@ -1301,6 +1580,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
       const requesterAvailability = loadAttendeeAvailabilityForPerson(asker, profile.user.timezone);
       const result = await precheckAvailability({
         requiredDay:meetingRequest?.requiredDay,
+        searchDay:meetingRequest?.searchDay,
         message: userMessage,
         profile,
         requesterAvailability,
@@ -1355,6 +1635,13 @@ export async function buildTurnContext(input: OrchestratorInput) {
       requestedSearchWindow = result.searchWindow;
       availabilityQuestionDetected = result.ran;
       availabilityPrecheckToolSummaries = result.toolSummaryLines;
+      availabilityAlternatives = (result.alternatives ?? []).map(slot => ({
+        start:slot.start,end:slot.end,available:true,owner_available:true,
+        presentation_local:DateTime.fromISO(slot.start,{zone:profile.user.timezone}).setZone(meetingRequest?.clockZone?.zone
+          ?? slot.presentationZone ?? (requesterAvailability ? attendeeTzForDay(requesterAvailability,slot.start) : asker?.timezone)
+          ?? profile.user.timezone).setLocale('en').toFormat('ccc d LLL HH:mm ZZZZ'),
+        preference:slot.overOptional ? 'less preferred' : undefined,attendees:[{status:'unknown',kind:'not_checked'}],
+      }));
       availabilityChecks = result.verdicts.flatMap(verdict => [verdict, ...(verdict.other ? [verdict.other] : [])]
         .flatMap(slot => {
           const start = DateTime.fromISO(slot.instantIso ?? `${slot.date}T${slot.time}`, {zone:profile.user.timezone});
@@ -1419,7 +1706,9 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // the colleague path already solves. offeredSlotsStash gives the email key
   // its own longer TTL by key prefix; this gate only needs to widen so the
   // block actually gets injected on that leg.
-  if ((input.senderRole === 'colleague' || input.channel === 'email') && input.channelId) {
+  const privateOwnerClock = input.channel==='slack' && input.surface==='owner_dm' && input.authority==='owner'
+    && input.userId===profile.user.slack_user_id && !input.isChannel && !input.isMpim;
+  if ((input.senderRole === 'colleague' || input.channel === 'email' || privateOwnerClock) && input.channelId) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getOfferedSlots } = require('../../utils/offeredSlotsStash') as
@@ -1427,13 +1716,25 @@ export async function buildTurnContext(input: OrchestratorInput) {
       const offered = getOfferedSlots(input.channelId, input.threadTs)?.filter(slot => !holdOnlyWindows
         || (slot.endIso && holdOnlyWindows.get(Date.parse(slot.startIso)) === Date.parse(slot.endIso)));
       if (offered && offered.length > 0) {
+        const literalClock=privateOwnerClock && input.typedUserMessage===userMessage
+          && /^\s*\d{1,2}:\d{2}\s*$/.test(userMessage) ? clockReply(userMessage) : undefined;
+        const selectedDay=meetingRequest?.requiredDay?.date ?? meetingRequest?.searchDay?.date;
+        if(literalClock && (!selectedDay || selectedDay==='flexible')) {
+          const zone=meetingRequest?.clockZone?.zone ?? profile.user.timezone;
+          const days=new Set(offered.map(slot=>DateTime.fromISO(slot.startIso,{zone}).toISODate()).filter(Boolean));
+          const matches=offered.filter(slot=>DateTime.fromISO(slot.startIso,{zone}).toFormat('HH:mm')===literalClock);
+          if(days.size>1 && matches.length!==1) {
+            ambiguousBookingClock=true;
+            offeredSlotsBlock=`The current reply supplies only ${literalClock} (${zone}); the current offers span ${[...days].join(', ')} and do not identify one matching occurrence. Ask which day this time refers to before booking.\n`;
+          }
+        }
         // Email vs. colleague-chat phrasing: on email the "requester" reading
         // this is the owner relaying an external's pick from a forwarded
         // chain, not a colleague typing directly — say so accurately (M9).
         const whoPicks = input.channel === 'email'
           ? 'whoever the forwarded chain quotes as picking a time'
-          : 'this colleague';
-        offeredSlotsBlock = `## SLOTS ALREADY OFFERED IN THIS CONVERSATION (binding)
+          : privateOwnerClock ? 'the owner' : 'this colleague';
+        offeredSlotsBlock += `## SLOTS ALREADY OFFERED IN THIS CONVERSATION (binding)
 These exact instants were offered to ${whoPicks} earlier and are still on the table:
 ${offered.map(s => `- ${s.display} → start_iso ${s.startIso}${holdOnlyWindows && s.endIso ? `, end_iso ${s.endIso}` : ''}`).join('\n')}
 If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 20:30"), or position ("the second one") — it means THAT exact instant: use its start_iso verbatim in any create_meeting / validation call. NEVER re-resolve the date from a weekday word; the offer above is the authoritative date.`;
@@ -1699,28 +2000,49 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     logger.warn('ownerLocationBlock — resolve threw, skipping', { err: String(err).slice(0, 160) });
   }
 
+  const currentSchedulingTask = currentPromptScopes?.some(scope=>scope!=='general')
+    ? currentPromptScopes.some(scope=>scope==='calendar'||scope==='meetings')
+      && !currentPromptScopes.some(scope=>['knowledge','summary','news'].includes(scope))
+    : !!(meetingRequest || toolScopes?.some(scope=>scope==='calendar'||scope==='meetings')
+      || standaloneBookingApproval || contextualApprovalDecisions?.length);
+  // A task change does not erase the stored calendar request. It does stop
+  // unrelated calendar inventories and pending decisions from being injected
+  // as current instructions into a writing or research follow-up.
+  const calendarContextRelevant = !currentPromptScopes?.some(scope=>scope!=='general')
+    || currentPromptScopes.some(scope=>scope==='calendar'||scope==='meetings')
+    || !!calendarOperations?.length || !!contextualApprovalDecisions?.length;
   const systemBlocksDynamic = [
     languageDirectiveBlock,
     priorOutboundBlock,
-    meetingRequest?.requiredDay ? 'Required meeting date: '+JSON.stringify(meetingRequest.requiredDay)+'. Keep the search and any counterproposal within this date unless the person changes it.' : undefined,
+    calendarContextRelevant && meetingRequest ? 'Current scheduling request at the start of this turn: '+JSON.stringify({
+      meetingRequestId:meetingRequest.batch?undefined:meetingRequest.requestId,
+      priorBookingConfirmed:meetingRequest.hasConfirmedBooking===true,
+      duration:meetingRequest.duration,participantGroups:meetingRequest.participantGroups,
+    })+'. These are request details, not proof of an invitation. Planned participants are included in the requested roster; describe them as already invited only when a successful booking receipt or matching existing event establishes that. Current tool results supersede the starting state.' : undefined,
+    calendarContextRelevant && meetingRequest?.requiredDay ? 'Required meeting date: '+JSON.stringify(meetingRequest.requiredDay)+'. Keep the search and any counterproposal within this date unless the person changes it.' : undefined,
+    calendarContextRelevant && meetingRequest?.searchDay ? 'Latest day the human is exploring: '+JSON.stringify(meetingRequest.searchDay)+'. A follow-up clock refers to this day. This is search context, not a deadline or booking authority.' : undefined,
     availabilityPrecheckBlock,
-    resolvedAttendeesBlock,
-    offeredSlotsBlock,
+    calendarContextRelevant ? resolvedAttendeesBlock : undefined,
+    calendarContextRelevant ? offeredSlotsBlock : undefined,
     ownerLocationBlock,
     freeTimePrecheckBlock,
-    recentCalendarIssuesBlock,
+    calendarContextRelevant ? recentCalendarIssuesBlock : undefined,
     promptParts.dynamic,
     threadContextBlock,
     actionTapeBlock,
-    colleagueBookingBlock,
-    ownerThreadEventsBlock,
+    calendarContextRelevant ? colleagueBookingBlock : undefined,
+    calendarContextRelevant ? ownerThreadEventsBlock : undefined,
     personWorkBlock,
     socialBlock,
     socialDirectiveBlock,
   ].filter(Boolean).join('\n\n');
 
-  const schedulingDm = !!meetingRequest && input.channel === 'slack' && !input.isChannel && !input.isMpim && input.authority === 'colleague'
-    && input.surface === 'colleague_dm' && !input.images?.length && !input.forceToolOnFirstTurn;
+  // Existing-invitation/status questions deliberately create no new booking
+  // state. They still use the same scheduling workflow and owner-question route.
+  const schedulingDm = !!(meetingRequest || existingStatusOnly || existingInviteSubject || meetingExplorationOnly || consultOwnerQuote || searchBeforeReply || exactBookingRequested)
+    && input.channel === 'slack' && !input.isChannel && !input.isMpim && input.authority === 'colleague'
+    && input.surface === 'colleague_dm' && !input.images?.length && !input.forceToolOnFirstTurn
+    && !input.proseOnly && !input.extraInstruction;
   let priorMeetingState:ReturnType<typeof import('./requesterMeetingState').requesterMeetingState>;
   if (input.channel==='slack' && input.surface==='colleague_dm' && input.authority==='colleague'
     && !input.isChannel && !input.isMpim && input.userId && input.channelId && threadTs) {
@@ -1728,14 +2050,16 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
       priorMeetingState = (await import('./requesterMeetingState')).requesterMeetingState(profile.user.slack_user_id,input.userId,input.channelId,threadTs);
     } catch (err) { logger.warn('Requester meeting state unavailable',{threadTs,error:String(err).slice(0,120)}); }
   }
-  const ownerSchedulingDm = (meetingRequest || standaloneBookingApproval || contextualApprovalDecisions?.length)
-    && input.channel==='slack' && input.surface==='owner_dm' && input.authority==='owner'
+  const privateOwnerWork = input.channel==='slack' && input.interactive!==false && input.surface==='owner_dm' && input.authority==='owner'
     && input.userId===profile.user.slack_user_id && !input.isChannel && !input.isMpim
     && !input.images?.length && !input.forceToolOnFirstTurn && !input.proseOnly && !input.extraInstruction;
+  const ownerSchedulingDm = currentSchedulingTask && privateOwnerWork;
   const staticInstructions = ownerSchedulingDm
-    ? (await import('./ownerSchedulingPrompt')).ownerSchedulingPrompt(profile.user.name,profile.assistant.name,profile.meetings?.default_meeting_duration ?? 25) + '\n\n' + promptParts.audienceRules
+    ? (await import('./ownerSchedulingPrompt')).ownerSchedulingPrompt(profile.user.name,profile.assistant.name,profile.meetings?.default_meeting_duration ?? 25) + '\n\n' + promptParts.audienceRules + '\n\n' + (promptParts.ownerPreferences ?? '')
     : schedulingDm
     ? (await import('./colleagueSchedulingPrompt')).colleagueSchedulingPrompt(profile.user.name, profile.assistant.name, profile.meetings?.default_meeting_duration ?? 25) + '\n\n' + promptParts.audienceRules
+    : privateOwnerWork
+    ? (await import('./ownerSchedulingPrompt')).ownerWorkPrompt(profile.user.name,profile.assistant.name) + '\n\n' + promptParts.audienceRules + '\n\n' + (promptParts.ownerPreferences ?? '')
     : promptParts.static;
   const systemBlocks: Anthropic.TextBlockParam[] = staticInstructions
     ? [
@@ -1743,9 +2067,20 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
         { type: 'text', text: systemBlocksDynamic } as Anthropic.TextBlockParam,
       ]
     : [{ type: 'text', text: systemBlocksDynamic } as Anthropic.TextBlockParam];
+  const ownerSettings = ownerSchedulingDm
+    ? (await import('./ownerSchedulingPrompt')).ownerSchedulingSettings(profile) : undefined;
+  if (ownerSettings) systemBlocks.push({type:'text',text:'Current owner scheduling settings (private facts). Dense means packing appointments together to preserve useful free time. Calendar tools enforce these settings and the owner’s authorized exceptions: '+JSON.stringify(ownerSettings)});
+  if (requireAttendeeAvailability) systemBlocks.push({type:'text',text:'The owner made this action conditional on attendee availability. Check it and proceed only if confirmed free. If the condition fails, leave the meeting unchanged, explain the actual conflict or uncertainty and offer the next useful choice. The conditional request does not accept that conflict.'});
+  if (exactRequestClock) systemBlocks.push({type:'text',text:'The current human clock is bound to this frame: '+JSON.stringify(exactRequestClock)+'. Use that literal clock in that zone for the requested date. Calendar handlers verify the same binding; an earlier displayed clock in another zone does not replace it.'});
+  if (existingStatusOnly) systemBlocks.push({type:'text',text:'This is a question about an existing invitation. Read that shared event and answer its actual status/details. Its current clock is evidence to identify it, not a proposed new booking to validate. If the question requires an owner decision not recorded in the evidence, offer to ask through the approval process.'});
+  if (answeredQuestion) systemBlocks.push({type:'text',text:'The current owner reply answers this exact proposal from your last message: '+JSON.stringify(answeredQuestion)+'. Complete the portion they decided through the normal tools. Other unanswered questions remain separate. This identifies the conversational referent; all normal identity, target and write checks still apply.'});
+  if(contextualApprovalDecisions?.length) systemBlocks.push({type:'text',text:
+    'Pending requests referenced by the current owner message, with their stored actions: '
+    +JSON.stringify(contextualApprovalDecisions.map(({requestId,action,instructionQuote,preservesRecipients})=>({requestId,action,instructionQuote,preservesRecipients})))
+    +'. Interpret the original owner instruction against each actual action. A scheduling constraint is a condition to apply, not a rejection of every request. Keep unrelated or already matching terms separate. Only an actual rejection closes a request. A changed time uses resolve_approval with data={tool,args} after checking the replacement. Preserve the roster and subject unless changed by the owner. A question or search-only instruction remains a read. Do not replace a pending request by creating an unrelated meeting or ask the owner to switch threads. The resolver rechecks the binding and stored action.'});
   if (priorMeetingState && (priorMeetingState.approvals.length || priorMeetingState.holds.length)) {
     systemBlocks.push({type:'text',text:'Open calendar decisions and holds belonging to this authenticated requester across their conversations: '+JSON.stringify(priorMeetingState)+
-      '. Match the current request by meeting and time. A shorter fallback leaves the original pending unless the person asks to replace it. A pending decision about another meeting does not require another approval or prevent a new search.'});
+      '. Match the current request by meetingRequestId, meeting and time. When the person corrects the same request or supplies its missing duration or participants, refresh that pending owner question with create_approval and the complete current facts. Do not ask again whether to consult the owner. If it is now a verified calendar action, use policy_exception with the checked action; the handler retains the same undecided request. A shorter fallback leaves the original pending unless the person asks to replace it. A pending decision about another meeting does not require another approval or prevent a new search.'});
   }
 
   // v2.7.7 (Module G) — intent-aware tool scoping. `toolScopes` was resolved
@@ -1770,9 +2105,39 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
   // Carry the same per-turn write boundary into dispatch. Tool descriptions
   // alone cannot prevent a stale or invented tool_use from reaching a handler.
   const blockedWriteTools = new Set<string>();
+  if (calendarOperations !== undefined) {
+    // One requested mutation does not authorize every other kind of calendar
+    // write in the conversation. In particular, correcting an explanation or
+    // rejecting a time cannot accept a still-unbooked appointment.
+    const operations = new Set(calendarOperations.map(item=>item.operation));
+    // "Book it at the corrected time" can continue an invitation already
+    // created in this same request. The accepted calendar effect may then
+    // require moving/updating that event; create's idempotency check remains.
+    if (meetingRequest?.hasConfirmedBooking && !meetingRequest.batch && operations.has('create')) {
+      operations.add('move');
+      operations.add('update');
+      systemBlocks.push({type:'text',text:'This same request has a confirmed invitation. Apply the current instruction to that existing event with move_meeting/update_meeting when its time or participants change; an unchanged repeat keeps the existing invitation. A new appointment is a separate request.'});
+    }
+    const permitted:Record<string,boolean> = {
+      create_meeting:operations.has('create'), move_meeting:operations.has('move'),
+      update_meeting:operations.has('update'), set_event_category:operations.has('update'),
+      delete_meeting:operations.has('cancel'), hold_slot:operations.has('hold'),
+      book_floating_block:operations.has('create') || operations.has('move'),
+    };
+    for (const [name,allowed] of Object.entries(permitted)) if (!allowed) blockedWriteTools.add(name);
+    tools = tools.filter(tool=>!blockedWriteTools.has(tool.name));
+    if (calendarContextRelevant) systemBlocks.push({type:'text',text:'Current direct calendar instructions: '+JSON.stringify(calendarOperations)+
+      '. Complete these instructed direct changes. Decisions on stored pending requests are separate and use resolve_approval. A declined proposal or a constraint correction alone leaves other appointments unconfirmed; check a suitable alternative or clarify the remaining choice.'});
+  }
+  if (calendarContextRelevant && meetingRequest && input.surface==='owner_dm' && input.authority==='owner' && input.userId===profile.user.slack_user_id
+    && !ownerOutreachAuthorized && !input.forceToolOnFirstTurn && !input.extraInstruction) {
+    blockedWriteTools.add('message_colleague');
+    tools=tools.filter(tool=>tool.name!=='message_colleague');
+    systemBlocks.push({type:'text',text:'This scheduling instruction authorizes calendar work. Separate colleague outreach has not been requested. Complete the requested check or calendar action and use its normal invitation/update delivery.'});
+  }
   if (ambiguousBookingClock) {
-    blockedWriteTools.add('create_meeting');
-    tools = tools.filter(tool => tool.name !== 'create_meeting');
+    for (const name of ['create_meeting','move_meeting','update_meeting','hold_slot','book_floating_block']) blockedWriteTools.add(name);
+    tools = tools.filter(tool => !blockedWriteTools.has(tool.name));
   }
   if (exactBookingRequested && !ambiguousBookingClock && !meetingExplorationOnly) {
     systemBlocks.push({type:'text',text:'The requester asked for this booking. After resolving its time and participants, use create_meeting for the requested slot. A search result alone neither books the meeting nor sends an approval. The booking handler checks current conflicts and supplies the actionable approval when needed.'});
@@ -1781,9 +2146,9 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     && socialClassification.social?.direction === 'reaction'
     && socialClassification.social?.sentiment === 'negative';
 
-  // Explicit exploration and pure negative feedback authorize no new writes,
-  // even when the previous assistant reply was only a proposal. Positive
-  // acceptance and missing classification retain existing behavior.
+  // Calendar exploration withholds calendar actions, not unrelated requested
+  // work (for example saving the participant's stated working hours). Pure
+  // negative feedback and prose retries still withhold every write.
   // Prose-only mode also strips every write tool. Used by the
   // dateVerifier retry path so a date-typo retry can't fire a fresh
   // calendar mutation. Reads (get_calendar / find_available_slots /
@@ -1793,6 +2158,8 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
   if (existingInviteSubject) logger.info('Checking organizer invitation', { threadTs });
   if (existingInviteSubject) systemBlocks.push({type:'text',text:'The requester wants the owner to join their existing invitation. Check the stated meeting with check_join_availability using the original subject. The organizer keeps the invitation. The check can route a needed attendance decision. Report its actual result in one or two sentences.'});
   if (negativeReaction || !tools.some(t => t.name === 'create_approval')) consultOwnerQuote = undefined;
+  if (consultOwnerQuote) systemBlocks.push({type:'text',text:
+    'The requester explicitly asks you to consult the owner. Complete that request through create_approval, using the existing request when the same decision is already pending. For a concrete calendar exception, first obtain a checked owner_approval_candidate from find_available_slots (owner_hours_exception_requested=true for an owner-hours exception). Copy that candidate into payload.deferred_action with tool=create_meeting and the exact subject, start, end and resolved attendees, then create_approval. A precheck verdict alone does not supply a replayable action. If unresolved booking details prevent a safe deferred action but the owner can already answer the question, use the existing freeform approval with the known facts and missing details stated explicitly; gather those details before sending any invitation. A normal free slot needs no policy exception, but an explicit request for the owner’s decision can use freeform. Do not claim the approval was raised until its receipt succeeds. The visible owner question must stand alone: name the requester, purpose, requested change, date, time and timezone, duration when known, and the actual reason a decision is needed. Use the conversation and verified calendar facts; ask only for a detail essential to that decision. Report the actual delivery receipt to the requester. This authorizes the consultation, not a calendar change. Request context (data): '+JSON.stringify({current:consultOwnerQuote,background:consultBackground})});
   // A new explicit hold is authorized only for the unambiguous interval just
   // validated by the same availability spine. Failure leaves an empty allowlist.
   if (checkRequestedHold) {
@@ -1816,10 +2183,31 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
       }
       systemBlocks.push({ type: 'text', text: `If the requester asks about a previous hold or invitation, use its actual status. If they reported sending an invitation themselves, first use get_calendar to check for that shared invitation on the discussed date. A busy interval alone cannot identify it. A matching shared invite may already reserve this time; report its actual duration and leave it in place. For a status question report only confirmed actions. If they request a tentative hold and an earlier choice has gone stale or is unclear, use find_available_slots with candidate_slots to recheck the discussed date, start and duration. If two durations or choices are plausible, clarify that detail. Offer the verified interval in their clock and ask them to select it for an internal hold. You can place that hold on their selection without an Outlook invitation.${tools.some(t => t.name === 'create_meeting') ? ' You can also send an invitation when they authorize an actual booking.' : ''}` });
     }
-    const canAsk = (!!consultOwnerQuote || !!requestedException) && !input.proseOnly && !negativeReaction && tools.some(t => t.name === 'create_approval');
+    const calendarExploration = meetingExplorationOnly && !consultOwnerQuote && !existingInviteSubject
+      && !input.proseOnly && !requestedException && !negativeReaction && !holdOnlyWindows;
+    // Asking the owner to decide an unresolved meeting question is not a
+    // calendar mutation. The authenticated requester may need that route
+    // while exploring a solution, before they can pick a concrete slot.
+    const canConsultForRequest = calendarExploration && schedulingDm
+      && input.userId!==profile.user.slack_user_id
+      && socialClassification?.kind==='task' && !continuedRefusal;
+    const canAsk = (!!consultOwnerQuote || !!requestedException || canConsultForRequest)
+      && !input.proseOnly && !negativeReaction && tools.some(t => t.name === 'create_approval');
+    // An owner counter still has to update the tracked request. Its resolver
+    // checks the bound decision and replacement action; withholding it here
+    // strands both the owner and the requester after an otherwise valid search.
+    const canResolveRequest = calendarExploration && isOwnerPath
+      && !!contextualApprovalDecisions?.length && tools.some(t=>t.name==='resolve_approval');
     if (!canAsk) requestedException = undefined;
+    if(canConsultForRequest) systemBlocks.push({type:'text',text:
+      'You may raise the current meeting question through create_approval when it needs the owner’s judgment, a rule exception or identification of an event outside the requester’s view. An ordinary permitted search needs no approval. Check what you can first; use an existing pending request for the same decision. A real owner-only blocker should reach the owner with the known facts, rather than sending the requester to ask or asking permission to ask. A concrete calendar change uses the normal structured approval; an unresolved question grants no calendar change. Calendar execution remains unavailable on this exploratory turn.'});
+    const calendarWrites = new Set(['create_meeting','move_meeting','update_meeting','delete_meeting',
+      'book_floating_block','set_event_category','hold_slot','revert_last_auto_move',
+      'set_work_schedule_override','check_calendar_health','manage_calendar_issue','create_approval','resolve_approval']);
     for (const name of WRITE_TOOLS) {
-      if (!(canHold && name === 'hold_slot') && !(canAsk && name === 'create_approval')) blockedWriteTools.add(name);
+      if (calendarExploration && !calendarWrites.has(name)) continue;
+      if (!(canHold && name === 'hold_slot') && !(canAsk && name === 'create_approval')
+        && !(canResolveRequest && name === 'resolve_approval')) blockedWriteTools.add(name);
     }
     const before = tools.length;
     tools = tools.filter(t => !blockedWriteTools.has(t.name));
@@ -1859,13 +2247,17 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
       // "Done, renamed X" still can't re-fire update_meeting; a re-fired
       // create_approval is caught by dedup anyway.
       const ackGuardTools = new Set(
-        [...WRITE_TOOLS].filter(t => t !== 'create_approval' && t !== 'resolve_approval'),
+        // Accepting an unresolved health warning is distinct from repeating
+        // the calendar mutation just completed. Issue resolution is idempotent
+        // and still requires an actual issue identity in its handler.
+        [...WRITE_TOOLS].filter(t => t !== 'create_approval' && t !== 'resolve_approval' && t !== 'manage_calendar_issue'),
       );
       const priorTurnMutated = [...ackGuardTools].some(t => lastAssistant.content.includes(`[${t} OK`));
       if (priorTurnMutated) {
         for (const name of ackGuardTools) blockedWriteTools.add(name);
         const before = tools.length;
         tools = tools.filter(t => !ackGuardTools.has(t.name));
+        systemBlocks.push({type:'text',text:'The current message is an acknowledgement after completed work. Acknowledge briefly, or record an unresolved issue decision the person just gave. Do not replay the earlier status, options or explanation unless the current message asks for it.'});
         logger.info('Orchestrator — ack-after-completed-action: stripped write tools (no re-mutation on "thanks")', {
           kind: socialClassification.kind, before, after: tools.length,
         });
@@ -1983,11 +2375,11 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     withdrawalId,
     firmWindowBooking,
     searchBeforeReply,
+    consultOwnerQuote,
+    calendarOperations,
     decisionReportLocale,
     priorMeetingState,
     requestedOptionCount,
-    consultOwnerQuote,
-    consultBackground,
     optionsReplyLocale,
     singleZoneOptions,
     exactBookingRequested,
@@ -1999,16 +2391,21 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     socialActive,
     socialClassification,
     resolvedMeetingAttendees,
+    resolvedOptionalAttendees,
+    participantContext:resolvedAttendeesBlock,
     resolvedMeetingAttendeeGroups,
     ordinaryCreateAfterOtherMeeting,
     contextualApprovalDecisions,
     standaloneBookingApproval,
+    requireAttendeeAvailability,
     exactRequestClock,
     requestedSearchWindow,
     meetingRequest,
+    ownerSettings,
     availabilityQuestionDetected,
     availabilityPrecheckToolSummaries,
     availabilityChecks,
+    availabilityAlternatives,
     bookingClockQuestion,
   };
 }

@@ -153,7 +153,7 @@ async function normalizeAvailabilitySlotsWithHaiku(
   message: string,
   profile: UserProfile,
   recentThread?: Array<{ role: 'user' | 'assistant'; content: string }>,
-  requestContext?: {requiredDay?:{date:string;zone:string}; requestZone?:string},
+  requestContext?: {requiredDay?:{date:string;zone:string}; searchDay?:{date:string;zone:string}; requestZone?:string; requesterTimezone?:string},
 ): Promise<{ slots: NormalizedSlot[]; category: string | null; searchWindow?: RequestedSearchWindow }> {
   const anthropic = getAnthropicClient();
   const ownerFirst = profile.user.name.split(' ')[0];
@@ -181,6 +181,7 @@ OWNER context:
 - Timezone: ${tz} (current offset ${ownerOffset})
 - Today's date: ${today} (${todayWeekday})
 ACTIVE REQUEST: ${JSON.stringify(requestContext ?? {})}
+searchDay is the latest day the human chose to explore. Resolve a bare follow-up clock on that day; an older meeting's date identifies the source event, not the proposed new time. requiredDay separately records a deadline.
 ${threadBlock ? `\nRECENT THREAD (older → newer; for resolving which DAY the times refer to):\n${threadBlock}\n` : ''}
 First classify the request. A search for 30 minutes between 9 and 12 CT is a search_window: the two bounds are not proposed meetings. A request to meet from 11:00 to 11:30 proposes one exact meeting: return its start and duration as points. A window with a preferred start still belongs to search_window. For search_window or other, return no slots. For ONE explicitly bounded window on one date, with a named timezone and no invitation to search other dates, also supply search_window with the dated start and end as local wall clocks, the named zone, and the requested meeting length if specified. Omit search_window for multiple windows or meetings, flexible preferences or unspecified zones.
 
@@ -191,6 +192,7 @@ RULES:
 - NEVER convert a time between timezones and NEVER compute an offset. Copy the stated clock into \`wall_clock\` as "YYYY-MM-DDTHH:MM" — no shifting. If the message itself contains a complete ISO datetime with an explicit offset or Z, copy that exact ISO string instead. If you find yourself doing arithmetic, you are doing the wrong job.
 - \`stated_timezone\` = the IANA zone the stated clock belongs to. Map the abbreviation or place the colleague used to its IANA zone ("CET"/"CEST" → Europe/Brussels, "ET"/"EST"/"EDT" → America/New_York, "Boston" → America/New_York, "London"/"BST" → Europe/London, "IDT"/"Israel" → Asia/Jerusalem; copy ambiguous "IST"/"CST" literally, without choosing a country). When they stated the time in ${ownerFirst}'s own frame ("your 19:00", "his time"), use ${tz}.
 - OMIT \`stated_timezone\` entirely when the current message names no timezone and no place for that slot — even if an EARLIER message did. Do NOT guess one and do NOT copy one over from the thread: code checks both owner and colleague frames when they differ.
+- For a stated_timezone, copy the smallest exact current phrase containing BOTH this clock and its timezone into timezone_quote, for example "16:00 Boston time". The quote must contain one clock, not a pair of converted clocks. A person's location mentioned as background does not assign that zone to the sender's clock. Bare clocks have no timezone_quote.
 - When the message gives both a foreign time AND an explicit ${ownerFirst}-local pair for the SAME slot ("12:00 Boston (your 19:00)"), output the ${ownerFirst}-local clock with stated_timezone=${tz} — it's the most reliable anchor.
 - When the colleague named a meeting LENGTH — a range ("11:00-11:15" → start 11:00, duration_minutes 15) or an explicit duration ("for 20 min", "חצי שעה" → 30) — include duration_minutes. Omit it when only a start time was given.
 - When the colleague is asking HOW MUCH time is free — the SIZE of a gap ("how much is free there?", "how long do we have then?", "how big is that window?") — rather than whether a specific slot works, set gap_query=true and use the START of the window/slot they mean (resolve "there"/"then" from the RECENT THREAD). Omit gap_query for a normal "does X work?" ask.
@@ -219,16 +221,20 @@ Output EXACTLY ONE call to normalize_slots.`;
                 start: { type: 'string', description: 'Start wall clock YYYY-MM-DDTHH:mm.' },
                 end: { type: 'string', description: 'End bound in the same frame, YYYY-MM-DDTHH:mm.' },
                 zone: { type: 'string', description: 'Timezone of both bounds, IANA name or stated ambiguous abbreviation.' },
+                startQuote: {type:'string',description:'The exact numeric start clock from the current message, e.g. 9 or 09:00. Omit the entire search_window when either bound was inferred rather than stated.'},
+                endQuote: {type:'string',description:'The exact numeric end clock from the current message, e.g. 12 or 12:30. Never invent the end of the day for an incomplete window.'},
+                zoneQuote: {type:'string',description:'The exact current phrase naming the timezone or place for these bounds. An unstated or historical timezone cannot establish this hard-window override.'},
                 requestedMinutes: { type: 'integer', minimum: 1, description: 'Length of one meeting explicitly specified by the human, without rounding. Omit when only the window is specified.' },
                 durationQuote: {type:'string',description:'Verbatim words in the current message specifying the meeting LENGTH, including its unit. The bounds of an availability window do not specify a meeting length. Omit both duration fields if the length is unspecified.'},
-              }, required: ['start', 'end', 'zone'],
+              }, required: ['start', 'end', 'zone','startQuote','endQuote','zoneQuote'],
             },
             slots: {
               type: 'array',
               items: {
                 type: 'object',
                 properties: {
-                  wall_clock: { type: 'string', description: 'The stated clock as "YYYY-MM-DDTHH:MM", never shifted. Copy a complete explicit-offset ISO verbatim only when the message contains it; never compute an offset.' },
+                  timezone_quote: {type:'string',description:'Smallest verbatim current span containing this one clock AND its stated zone. For "23:00, that is 16:00 Boston time", quote "16:00 Boston time" and use wall_clock 16:00. Background location alone cannot establish the clock frame.'},
+                  wall_clock: { type: 'string', description: 'The stated clock as "YYYY-MM-DDTHH:MM", never shifted. When timezone_quote is present, use the clock IN THAT QUOTE. Copy a complete explicit-offset ISO verbatim only when the message contains it; never compute an offset.' },
                   stated_timezone: { type: 'string', description: 'IANA zone of the stated clock; copy ambiguous CST or IST literally for code to resolve from person context. OMIT when no timezone or place was named.' },
                   duration_minutes: { type: 'number', description: 'Meeting length in minutes, ONLY when the colleague named one (a range like 11:00-11:15, or "for 20 min"). Omit otherwise.' },
                   gap_query: { type: 'boolean', description: 'true when the colleague asks HOW MUCH time is free at/from this start ("how much is free there?"), not whether a specific slot works. Omit/false otherwise.' },
@@ -246,11 +252,23 @@ Output EXACTLY ONE call to normalize_slots.`;
     });
     logLlmUsage('availability_tz_normalize', MODEL_HAIKU, resp);
     const toolUse = resp.content.find((b: any) => b.type === 'tool_use') as any;
-    const raw = toolUse?.input as { kind?: string; search_window?: Partial<RequestedSearchWindow> & {durationQuote?:string}; slots?: Array<{ wall_clock?: string; stated_timezone?: string; duration_minutes?: number; gap_query?: boolean }>; category?: string } | undefined;
+    const raw = toolUse?.input as { kind?: string; search_window?: Partial<RequestedSearchWindow> & {durationQuote?:string;startQuote?:string;endQuote?:string;zoneQuote?:string}; slots?: Array<{ wall_clock?: string; stated_timezone?: string; timezone_quote?:string; duration_minutes?: number; gap_query?: boolean }>; category?: string } | undefined;
     if (raw?.kind === 'search_window') {
       const w = raw.search_window;
       const wall = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+      // This extraction overrides the planner's search bounds. Incomplete
+      // prose must not manufacture a hard constraint (for example interpreting
+      // one stated 12:30 as "12:30 until midnight"). Only literal numeric
+      // clocks and an explicitly named frame qualify for that override.
+      // Other requests continue through the ordinary contextual search.
+      const quotedClock = (quote:unknown, iso:unknown) => {
+        if (typeof quote!=='string' || !quote || !message.includes(quote) || typeof iso!=='string') return false;
+        const clock=/^(\d{1,2})(?::(\d{2}))?$/.exec(quote);
+        return !!clock && `${clock[1].padStart(2,'0')}:${clock[2]??'00'}`===iso.slice(11,16);
+      };
       if (w && typeof w.start === 'string' && typeof w.end === 'string' && typeof w.zone === 'string'
+        && quotedClock(w.startQuote,w.start) && quotedClock(w.endQuote,w.end)
+        && typeof w.zoneQuote==='string' && !!w.zoneQuote.trim() && message.includes(w.zoneQuote)
         && wall.test(w.start) && wall.test(w.end) && w.start.slice(0, 10) === w.end.slice(0, 10)
         && w.start < w.end && DateTime.fromISO(w.start, { zone: 'UTC' }).isValid
         && DateTime.fromISO(w.end, { zone: 'UTC' }).isValid && (canonicalZone(w.zone) || ['IST','CST'].includes(w.zone))) {
@@ -277,7 +295,12 @@ Output EXACTLY ONE call to normalize_slots.`;
         ? entry.duration_minutes
         : undefined;
       // Keep raw ambiguous abbreviations for the shared person-context resolver.
-      const zone = typeof entry.stated_timezone === 'string'
+      const quotedClocks=typeof entry.timezone_quote==='string'
+        ? [...entry.timezone_quote.matchAll(/(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)/g)].map(match=>match[1].padStart(2,'0')+':'+match[2]) : [];
+      const clockBound = !/(?<!\d)(?:[01]?\d|2[0-3]):[0-5]\d(?!\d)/.test(message)
+        || (quotedClocks.length===1 && quotedClocks[0]===wall.slice(11,16));
+      const zone = clockBound && typeof entry.stated_timezone === 'string' && typeof entry.timezone_quote === 'string'
+        && entry.timezone_quote.trim() && message.includes(entry.timezone_quote)
         ? (canonicalZone(entry.stated_timezone) ?? entry.stated_timezone.trim())
         : undefined;
       out.push({
@@ -489,6 +512,8 @@ interface SlotVerdict extends SlotOutcome {
 }
 
 export interface AvailabilityPreCheckResult {
+  /** Owner-calendar openings only; attendee availability has not been checked. */
+  alternatives?: NearbyAlternative[];
   searchWindow?: RequestedSearchWindow;
   /** True when a requested slot was tested or needs source-time clarification. */
   ran: boolean;
@@ -528,6 +553,7 @@ export interface AvailabilityPreCheckResult {
  */
 export async function precheckAvailability(params: {
   requiredDay?: {date:string;zone:string};
+  searchDay?: {date:string;zone:string};
   message: string;
   profile: UserProfile;
   requestZone?: string;
@@ -653,7 +679,7 @@ export async function precheckAvailability(params: {
     // gap question with no time), so always let the language-agnostic Haiku
     // normalizer read it — it returns empty for non-availability messages.
     const { slots, category, searchWindow } = await normalizeAvailabilitySlotsWithHaiku(params.message, params.profile, params.recentThread,
-      {requiredDay:params.requiredDay,requestZone:params.requestZone});
+      {requiredDay:params.requiredDay,searchDay:params.searchDay,requestZone:params.requestZone,requesterTimezone:params.requesterTimezone});
     if (searchWindow) return { ...empty, searchWindow };
     detectedCategory = category;
     if (slots.length > 0) {
@@ -1126,7 +1152,7 @@ export async function precheckAvailability(params: {
     notClean: notBookable.length - hardBlocked,
     undecidedFrame: verdicts.filter(v => !!v.other).length,
   });
-  return { ran: true, verdicts, promptBlock, toolSummaryLines };
+  return { ran: true, verdicts, promptBlock, toolSummaryLines, alternatives:alternativesResult.alternatives };
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -1192,7 +1218,9 @@ function renderToolSummaryLines(
         : `${head}: bookable`;
     }
     const reason = o.rejection_reason ?? 'not_bookable';
-    return `${head}: not bookable (${reason}${o.outOfOfficeAllDay ? ', all-day out-of-office' : ''})`;
+    const needsDecision=ESCALATABLE.has(reason);
+    const decision=needsDecision ? '; owner_decision_required; may_request_owner_approval; not_a_final_refusal' : '';
+    return `${head}: not bookable${needsDecision?' without owner approval':''} (${reason}${o.outOfOfficeAllDay ? ', all-day out-of-office' : ''})${decision}`;
   };
   const lines = verdicts.map(v => (v.other
     ? `[availability_precheck ${clause(v)} | same clock read in ${v.other.zone}: ${clause(v.other, v.other.zone)}]`
@@ -1205,7 +1233,7 @@ function renderToolSummaryLines(
         return `${dt.toFormat("yyyy-MM-dd'T'HH:mm")}${localPart(dt.toFormat('yyyy-MM-dd'), dt.toFormat('HH:mm'), dt.toISO()!)}${a.label ? ' (' + a.label + ')' : ''}`;
       });
     if (starts.length > 0) {
-      lines.push(`[availability_precheck alternatives (bookable, ${tz}): ${starts.join(', ')}]`);
+      lines.push(`[availability_precheck alternatives (bookable, ${tz}): ${starts.join(', ')}] owner_calendar_only; attendee_availability_not_checked`);
     }
   }
   return lines;
@@ -1469,8 +1497,8 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile, reques
     // v4.2.x — carry the class `checkSlot` ESTABLISHED (G2). This line used to be
     // the bare string "NOT BOOKABLE" for every hard kind except the all-day OOO:
     // checkSlot had returned violation_kind, violation_label, level:'unfiltered'
-    // and overCommitment, and the renderer dropped all of it. So the ONE tier that
-    // is non-negotiable was the ONE tier that arrived with no reason and no
+    // and overCommitment, and the renderer dropped all of it. The actual
+    // calendar-conflict tier arrived with no reason and no
     // instruction, sitting under a header that hands the drafter the whole
     // OVERRIDABLE vocabulary ("outside his usual hours", "day-load protection",
     // "HIS to override, do NOT flatly refuse") — a reason-shaped hole next to a
@@ -1512,7 +1540,9 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile, reques
     const reasonRule = phrase
       ? `never give a reason other than the one on this line (and never name the meeting, who is on it, or whose it is)`
       : `NO reason for it is available — say plainly that it doesn't work and give none, never a guessed one`;
-    return `NOT BOOKABLE${phrase ? ` — ${phrase}` : ''}. This is a FACT about ${ownerFirst}'s calendar, not a preference and not something to push through: do NOT call it workable / tight / possible / fine-if-he-pushes, do NOT offer to book it, and ${reasonRule}.${sameDayNote}`;
+    const ownerDecision = armsHardFloor(o.rejection_reason)
+      ? ` If the requester needs this time or asks whether something can move, use the tracked owner decision path. The owner may decide to change a commitment or accept a conflict; this check grants no such permission and does not make the time free.` : '';
+    return `NOT BOOKABLE as currently scheduled${phrase ? ` — ${phrase}` : ''}. Report the actual conflict, not free availability, and ${reasonRule}.${sameDayNote}${ownerDecision}`;
   };
 
   const lines = verdicts.map(v => {

@@ -69,6 +69,15 @@ const PEOPLE=[
  {slack_id:null,name:'Kevin External',email:'kevin@ext.example',timezone:'Europe/London',timezone_set_by:'owner',working_hours_auto:auto(MF,'09:00','17:00')},
  {slack_id:null,name:'Sharon Nameonly',timezone:'America/New_York',timezone_set_by:'owner',state:'Boston',working_hours_auto:auto(MF,'09:00','17:00')},
 ];
+test('missing stored week exposes the same timezone default used by slot search without writing it',()=>{
+ const h=harness([]),hours=h.load('src/utils/workingHoursDefault.ts');
+ const person={timezone:'Asia/Jerusalem',profile_json:'{}'};
+ assert.equal(hours.getEffectiveWorkingHours(person),null);
+ const described=hours.describeEffectiveWorkingHours(person);
+ assert.deepEqual(JSON.parse(JSON.stringify(described.week)),JSON.parse(JSON.stringify(hours.defaultWorkingHoursForTz(person.timezone).week)));
+ assert.equal(described.source,'auto');assert.equal(person.profile_json,'{}');
+ assert.equal(hours.describeEffectiveWorkingHours({profile_json:'{}'}),null);
+});
 
 test('HV-roster-stated: owner roster renders a stated window at a glance, never the prose',()=>{const r=harness(PEOPLE).roster();
  const alex=line(r,'Alex Wiggins');assert.match(alex,/, hours: Mon–Fri 08:00–17:00; Sun\/Sat off, email:/);assert.doesNotMatch(alex,/tz default/);
@@ -80,7 +89,7 @@ test('HV-roster-default: owner roster marks the timezone default as not stated',
 test('HV-roster-social-off: the slim social-off roster line carries the same window',()=>{const h=harness(PEOPLE);assert.match(line(h.roster(undefined,true),'Alex Wiggins'),/hours: Mon–Fri 08:00–17:00/);assert.match(line(h.roster(new Set(['UALEX']),true),'Alex Wiggins'),/hours: Mon–Fri 08:00–17:00/);});
 test('HV-memory-effective: get_person_memory returns the effective window with its zone and provenance',async()=>{const h=harness(PEOPLE);
  const a=await h.memory('Alex Wiggins');assert.equal(a.found,true);assert.equal(a.working_hours.source,'manual');assert.equal(Object.keys(a.working_hours.week).filter(d=>a.working_hours.week[d].length).join(','),MF.join(','));assert.equal(a.working_hours.week.Monday[0].hoursStart,'08:00');assert.equal(a.working_hours.week.Monday[0].hoursEnd,'17:00');assert.equal(a.working_hours.timezone,'America/New_York');assert.equal(a.timezone,'America/New_York');assert.equal(a.timezone_set_by,'person');assert.equal(a.state,'Boston');
- const d=await h.memory('Dan Beauregard');assert.equal(d.working_hours.source,'auto');assert.match(d.working_hours.note,/initialized from timezone defaults once/);assert.equal(d.timezone_set_by,'auto');});
+ const d=await h.memory('Dan Beauregard');assert.equal(d.working_hours.source,'auto');assert.match(d.working_hours.note,/timezone defaults used by slot searches/);assert.equal(d.timezone_set_by,'auto');});
 test('HV-memory-note-rank: get_person_memory ranks the stated window above a stale free-text note',async()=>{const i=await harness(PEOPLE).memory('Isaac Levy');
  assert.equal(i.working_hours.source,'manual');assert.equal(i.working_hours.window,'Mon/Thu 09:00–17:00; Sun/Tue/Wed/Fri/Sat off Asia/Jerusalem');assert.match(i.working_hours.note,/outranks any hours mentioned in notes/);assert.equal(i.notes.length,1);});
 test('HV-correction-next-turn: a correction the owner just made is what the store reads back next turn',async()=>{const h=harness(PEOPLE);

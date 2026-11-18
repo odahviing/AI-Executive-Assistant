@@ -309,8 +309,8 @@ for (const [id, draft] of [
     });
     const detector = calls.prompts.at(-1);
     assert.ok(detector.includes(draft) && detector.includes(line));
-    assert.match(detector.match(/"claimed_action": boolean,[^\n]*/)[0], /exclusivity/);
-    assert.match(detector.split('Output schema').pop(), /matching time with unsupported exclusivity is a positive verdict/);
+    assert.match(detector, /"verdict":"unsupported"\|"supported"\|"no_calendar_claim"\|"unknown"/);
+    assert.match(detector, /unsupported exclusivity claim, choose unsupported even if the offered time itself is verified/);
     assert.match(detector, /only option returned.{0,120}grounded/i);
     modelReply = { verdict: 'keep' };
     await rewriteOwningTheMiss({ ...context, draft, actionSummary: 'only 10:15', actionType: 'ungrounded_slot_claim', groundedToolLines: [line] });

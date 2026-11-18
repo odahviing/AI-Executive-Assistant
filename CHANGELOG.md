@@ -1,3 +1,25 @@
+## 5.5.0 — Rebuild scheduling context, approvals and replies
+
+Scheduling carries each request's participants, chosen times and confirmed outcomes through a shared flow. Follow-ups can return to an earlier appointment without borrowing another meeting's recipients or losing the owner's pending decision.
+
+### Changed
+- Preserve request identity, complete appointment groups, explicit email bindings, duration and date choices across follow-ups and corrections.
+- Use the existing classifier for both operation and participant interpretation. Remove the candidate's extra invitation interpreter, clock-choice judge and fallback reply writer; the execution planner owns the answer.
+- Finish scheduling answers with a brief outcome or the actual blocker and next decision. Render selected options, durations and attributed clocks from verified results.
+
+### Fixed
+- Keep owner approvals attached to the exact request, action and recipients. Distinguish an approval, a completed calendar action and a delivered notification.
+- Let a proven meeting arranger request cancellation through owner approval even when not on the invite. Withdrawing a request cannot withdraw another pending meeting decision.
+- Preserve the chosen slot and clock, and use one consistent date for search and booking constraints derived from the same human phrase.
+- Keep explicit participant addresses when adding someone to an existing request. Retain ambiguity checks before invitations are sent.
+- Preserve earlier confirmed action receipts when later calendar reads occur, and keep the complete question when composing a reply.
+- Maintain scoped calendar evidence, hold selection, truthful provider failures, existing-event identity and shared scheduling validation across search, booking, move and cancellation paths.
+
+### Validation
+- Full local regression checkpoint and affected rechecks, typecheck and a SOLO structural review of the 30 Golden paths. Exact evidence and cumulative 5.4.0 baseline are recorded in `.claude/releases/5.5.0.json`.
+- No further real-model simulations were run after the owner's cost restriction. Earlier conversation runs still contained failures; final-source conversational quality and a 95% success rate are not established by these local checks.
+
+
 ## 5.4.7 — Read complete calendars and confirm the exact invitation
 
 - Read all calendar pages and the full requested free/busy range. Treat incomplete provider data as unconfirmed availability and retain independently verified busy intervals.

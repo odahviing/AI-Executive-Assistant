@@ -31,7 +31,8 @@ function planner(opts={}){
  getOwnerEventsForDecision:async()=>[],
  checkSlot:p=>{state.rules.push(p);return opts.ownerConflict?{passes:true,level:'unfiltered',overCommitment:{subject:'Real commitment',window:'11:00–11:40',attendeeCount:1}}:{passes:true,level:'free'};},
  getFreeBusyForDecision:async(_own,emails,start,end,tz,diag)=>{if(opts.freebusy)return opts.freebusy(emails,diag);state.freebusy.push([...emails]);return Object.fromEntries(emails.map(e=>[e,(e===own||opts.peerBusy)?[{start:'2026-10-13T11:30:00+03:00',end:'2026-10-13T11:55:00+03:00',status:'busy'}]:[]]));},
- loadAttendeeAvailabilityForEmails:()=>[],subjectViewerFor:()=> 'owner',
+ loadAttendeeAvailabilityForEmails:()=>opts.offHours?[{email:peer}]:[],
+ attendeeWorkSegmentsBetween:()=>[{fitsWorkHours:false}],subjectViewerFor:()=> 'owner',
  };
  const deps=new Proxy(stubs,{get(t,k){if(k==='then')return undefined;if(k in t)return t[k];return ()=>{throw Error('UNMOCKED '+String(k));};}});
  const module={exports:{}};vm.runInNewContext(ts.transpileModule(code,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{module,exports:module.exports,require:id=>id==='luxon'?luxon:deps});

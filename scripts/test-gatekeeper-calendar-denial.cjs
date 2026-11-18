@@ -10,16 +10,30 @@ const draft='You are right about the times. I could not read Levana’s calendar
 const clean='You are right about the times.';
 const profile={user:{name:'Idan Cohen',slack_user_id:'UOWNER',email:'owner@example.com',timezone:'Asia/Jerusalem'},assistant:{name:'Maelle'}};
 const ctx=extra=>({profile,result:{toolSummaries:[]},history:[{role:'assistant',content:receipt+'\nI found options.',toolSummaries:[receipt]}],userMessage:'Those times do not work.',senderId:'UPEER',role:'colleague',channelId:'DPEER',threadTs:'1.2',...extra});
-function harness(opts={}){const calls=[];const client={messages:{create:async req=>{calls.push(req);if(opts.error)throw Error('fixture unavailable');if(req.tools)return {stop_reason:'tool_use',content:[{type:'tool_use',name:'verdict',input:opts.rewrite??{verdict:'rewrite',minimalRedaction:clean,minimalRedactionPreservesRest:true}}]};const prompt=req.messages[0].content;const enabled=prompt.includes('Additional class: denied_calendar_read')&&prompt.includes(opts.receipt??receipt);return {content:[{type:'text',text:opts.malformed?'broken':JSON.stringify(opts.verdict??(enabled&&!opts.keep?{claimed_action:true,action_type:'denied_calendar_read',target_name:'levana.b@example.com',action_summary:'Denied the earlier calendar read'}:{claimed_action:false}))}]};}}};
+
+test('a claim quoted from older history cannot veto a current text edit',async()=>{
+ const h=harness({verdict:{claimed_action:true,claim_quote:'Daniel weekly was updated.',action_type:'permission_granted'}});
+ const reply='I moved the registration link to the end of your post.';
+ const result=await h.checker.checkReplyClaims({reply,toolSummaries:['[update_meeting FAILED]'],bookingOccurred:false,ownerFirstName:'Idan'});
+ assert.equal(result.claimed_action,false);assert.equal(result.failed_open,true);
+ assert.ok(h.calls[0].messages[0].content.includes('exact offending words from the CURRENT DRAFT'));
+});
+test('a source-bound phantom-send claim still invokes the factual remedy',async()=>{
+ const reply='I sent the invitation to Alex.';
+ const h=harness({verdict:{claimed_action:true,claim_quote:reply,action_type:'message'}});
+ const result=await h.checker.checkReplyClaims({reply:reply+' It is confirmed.',toolSummaries:[],bookingOccurred:false,ownerFirstName:'Idan'});
+ assert.equal(result.claimed_action,true);assert.equal(result.action_type,'message');
+});
+function harness(opts={}){const calls=[];const client={messages:{create:async req=>{calls.push(req);if(opts.error)throw Error('fixture unavailable');if(req.tools)return {stop_reason:'tool_use',content:[{type:'tool_use',name:'verdict',input:opts.rewrite??{verdict:'rewrite',minimalRedaction:clean,minimalRedactionPreservesRest:true}}]};const prompt=req.messages[0].content;const enabled=prompt.includes('EARLIER CALENDAR READ RECEIPTS:')&&prompt.includes(opts.receipt??receipt);return {content:[{type:'text',text:opts.malformed?'broken':JSON.stringify(require('./fixtures/action-claim-verdict.cjs')(opts.verdict??(enabled&&!opts.keep?{claimed_action:true,action_type:'denied_calendar_read',target_name:'levana.b@example.com',action_summary:'Denied the earlier calendar read'}:{claimed_action:false}),req))}]};}}};
 const checker=load('src/utils/claimChecker.ts',{'@anthropic-ai/sdk':{},'../llm/client':{getAnthropicClient:()=>client},'../llm/models':models,'./logger':log,'./extractJson':{extractFirstJsonObject:s=>s},'./usageLog':usage,'./detectMessageLanguage':{detectMessageLanguage:()=> 'en'}});
 const gates=load('src/utils/guards/runOutputGates.ts',{'../../llm/client':{getAnthropicClient:()=>client},'../../core/requests/types':{FREEFORM_OWNER_FLAG_SUBKIND:'freeform_owner_flag'},'../../llm/models':models,'../../core/orchestrator/turnHelpers':turn,'../../connections/slack/formatting':{formatForSlack:s=>s},'../logger':log,'../usageLog':usage,'../claimChecker':checker,'../availabilityGate':{freshHardBlockedSlots:()=>[]},'../humanGate':{runHumanGate:async()=>({ok:true})},'../dateVerifier':{verifyDates:async()=>({ok:true,mismatches:[]})},'../securityGate':{filterColleagueReply:async o=>({reply:o.reply,filtered:false})},'../../db/requests':{getLatestRequestForThread:()=>null},'../../db':{getPersonMemory:()=>({email:'peer@example.com'})}},'export {runOwnerFactCheckAndMaybeRewrite as __fact};');return {calls,gates,checker};}
-for(const [id,extra] of [['colleague-dm',{}],['colleague-room',{isMpim:true}],['owner-room',{senderId:'UOWNER',isMpim:true,isOwnerInGroup:true}],['email',{transport:'email'}]])test('regression '+id+' historical denial routes through existing fact call',async()=>{const h=harness();const out=await h.gates.runOutputGates(draft,ctx(extra));assert.equal(out,clean);const detect=h.calls.filter(c=>c.messages[0].content.includes('Additional class:'));assert.equal(detect.length,1);assert.ok(detect[0].messages[0].content.includes(receipt));assert.equal(h.calls.filter(c=>c.tools).length,1);});
+for(const [id,extra] of [['colleague-dm',{}],['colleague-room',{isMpim:true}],['owner-room',{senderId:'UOWNER',isMpim:true,isOwnerInGroup:true}],['email',{transport:'email'}]])test('regression '+id+' historical denial routes through existing fact call',async()=>{const h=harness();const out=await h.gates.runOutputGates(draft,ctx(extra));assert.equal(out,clean);const detect=h.calls.filter(c=>c.messages[0].content.includes('EARLIER CALENDAR READ RECEIPTS:'));assert.equal(detect.length,1);assert.ok(detect[0].messages[0].content.includes(receipt));assert.equal(h.calls.filter(c=>c.tools).length,1);});
 for(const [id,extra] of [['no-history',{history:[]}],['prose-only',{history:[{role:'assistant',content:'I read Levana’s calendar.'}]}],['newer-failed',{history:[...ctx().history,{role:'assistant',content:'[find_available_slots FAILED: timeout]\nCould not check.',toolSummaries:['[find_available_slots FAILED: timeout]']}]}],['newer-unknown',{history:[...ctx().history,{role:'assistant',content:'[find_available_slots 2026-09-15: 1 slots attendee_partial=1]\nUnknown.',toolSummaries:['[find_available_slots 2026-09-15: 1 slots attendee_partial=1]']}]}],['same-row-later-failure',{history:[{role:'assistant',content:receipt+' [find_available_slots FAILED: timeout]\nUnknown.',toolSummaries:[receipt,'[find_available_slots FAILED: timeout]']}]}],['current-failure',{result:{toolSummaries:['[find_available_slots FAILED: timeout]']}}],['expired-history-window',{history:[...ctx().history,...Array.from({length:12},()=>({role:'user',content:'later'}))]}]])test('preserved '+id+' cannot turn old receipt into current access',async()=>{const h=harness();assert.equal(await h.gates.__fact(ctx(extra),draft),draft);assert.equal(h.calls.filter(c=>c.tools).length,0);});
 for(const [id,opts] of [['semantic-keep',{keep:true}],['judge-unavailable',{error:true}],['malformed-json',{malformed:true}]])test('preserved '+id+' keeps original',async()=>{const h=harness(opts);assert.equal(await h.gates.__fact(ctx(),draft),draft);});
 for(const [id,r] of [['veto',{verdict:'keep'}],['empty',{verdict:'rewrite',minimalRedaction:'',minimalRedactionPreservesRest:true}],['additions',{verdict:'rewrite',minimalRedaction:'Everyone is available.',minimalRedactionPreservesRest:true}],['unattested',{verdict:'rewrite',minimalRedaction:clean}],['reasoning-only',{verdict:'rewrite',message:'model reasoning'}]])test('regression denial rewrite '+id+' safely keeps original',async()=>{const h=harness({rewrite:r});const out=await h.checker.rewriteOwningTheMiss({draft,actionType:'denied_calendar_read',targetName:'levana.b@example.com',ownerFirstName:'Idan',toolSummaries:[receipt]});assert.equal(out,null);});
 test('regression exact target receipt required despite false classifier flag',async()=>{const h=harness({verdict:{claimed_action:true,action_type:'denied_calendar_read',target_name:'external@example.com'}});assert.equal(await h.gates.__fact(ctx(),draft),draft);assert.equal(h.calls.filter(c=>c.tools).length,0);});
-test('regression multilingual instructions and bounded deletion use actual checker',async()=>{const h=harness();await h.gates.__fact(ctx(),draft);const prompt=h.calls[0].messages[0].content;assert.ok(prompt.includes('ANY language'));for(const p of ['later outage','unknown/external','different date/window','disputing suggested times'])assert.ok(prompt.includes(p));});
-test('preserved owner private does not invoke colleague fact mode',async()=>{const h=harness({keep:true});assert.equal(await h.gates.runOutputGates(draft,ctx({senderId:'UOWNER',role:'owner',channelId:'DOWNER'})),draft);assert.ok(!h.calls.some(c=>c.messages[0].content.includes('Additional class:')));});
+test('regression multilingual instructions and bounded deletion use actual checker',async()=>{const h=harness();await h.gates.__fact(ctx(),draft);const prompt=h.calls[0].messages[0].content;assert.ok(prompt.includes('any language'));for(const p of ['Present inability','different interval','exact identity','never name similarity'])assert.ok(prompt.includes(p));});
+test('preserved owner private does not invoke colleague fact mode',async()=>{const h=harness({keep:true});assert.equal(await h.gates.runOutputGates(draft,ctx({senderId:'UOWNER',role:'owner',channelId:'DOWNER'})),draft);assert.ok(!h.calls.some(c=>c.messages[0].content.includes('EARLIER CALENDAR READ RECEIPTS:')));});
 for(const [id,status] of [['read','free'],['outage','unknown']])test('preserved producer '+id+' summary carries only confirmed calendars',()=>{const line=turn.summarizeToolCall('find_available_slots',{duration_minutes:15},{slots:[{start:'2026-09-14T10:00:00+03:00',end:'2026-09-14T10:15:00+03:00',attendee_status:[{email:'levana.b@example.com',status}]}]},'Asia/Jerusalem');assert.equal(line.includes('calendars_read=levana.b@example.com'),status==='free');});
 test('owner decision candidates retain checked attendees and their individual conflicts', () => {
  const summary = turn.summarizeToolCall('find_available_slots', {duration_minutes:25}, {
@@ -58,7 +72,49 @@ for(const [lang,whole,remaining] of [['Hebrew','את צודקת. לא יכולת
 for(const [id,text] of [['current-outage','I read Levana’s calendar earlier, but I cannot access it now.'],['different-window','I could not confirm Levana’s calendar for next month.'],['disputed-slot','Those times still do not work for Levana.'],['external','I could not check the external attendee’s calendar.']])test('preserved false detector '+id+' existing veto keeps truthful reply',async()=>{const h=harness({verdict:{claimed_action:true,action_type:'denied_calendar_read',target_name:'levana.b@example.com',action_summary:'scripted false detector'},rewrite:{verdict:'keep'}});assert.equal(await h.gates.__fact(ctx(),text),text);assert.equal(h.calls.filter(c=>c.tools).length,1);});
 test('regression persisted history replay is read-only and repeatable',async()=>{const context=ctx(),saved=JSON.stringify(context);for(let i=0;i<2;i++){const h=harness();assert.equal(await h.gates.__fact(context,draft),clean);}assert.equal(JSON.stringify(context),saved);});
 test('final owner personal fact rejects new unchecked prose',async()=>{const h=harness({verdict:{claimed_action:true,action_type:'invented_fact',target_name:'Idan',action_summary:'unbacked habit'},rewrite:{verdict:'rewrite',message:'Let me check with Idan.',noUnfoundedOwnerClaim:true}});assert.equal(await h.gates.__fact(ctx(),'Idan always works through lunch.'),"I don't have confirmed information about that.");});
-test('preserved coda caller remains outside historical denial class',async()=>{const h=harness({keep:true});await h.checker.checkReplyClaims({reply:'Congratulations on the launch.',toolSummaries:[],bookingOccurred:false,ownerFirstName:'Idan',mode:'coda',recipientContext:'Known launch'});assert.ok(!h.calls.some(c=>c.messages[0].content.includes('Additional class:')));});
+
+test('personal fact check leaves calendar claims to the dedicated final checker',async()=>{
+  const human='I will be on vacation Wednesday and Thursday; please find another day.';
+  const h=harness({verdict:{claimed_action:true,action_type:'ungrounded_slot_claim',action_summary:'scripted availability flag'},rewrite:{verdict:'keep'}});
+  const context=ctx({userMessage:human,colleagueName:'Yael',history:[],result:{toolSummaries:['[find_available_slots 2026-11-24 dur=25m: 1 slots owner_status=available attendee_status=peer@example.com:busy]']}});
+  const reply='Tuesday is open for Idan, but your calendar is busy. Shall I look for another day?';
+  assert.equal(await h.gates.__fact(context,reply),reply);
+  const calls=h.calls.map(c=>c.messages[0].content);
+  assert.equal(calls.length,1);
+  assert.ok(calls[0].includes(human));
+  assert.ok(calls[0].includes('peer@example.com'));
+  assert.ok(calls[0].includes('Reader: Yael'));
+});
+
+test('unavailable final evidence check restores the original answer after a style rewrite',async()=>{
+ const original='No invitation has been sent. Which time should I use?';
+ const h=harness({malformed:true});
+ const answer=await h.gates.__fact(ctx(), 'Which time should I use?',original);
+ assert.equal(answer,original);
+ assert.ok(!answer.includes('confirmed information'));
+});
+
+test('a false action flag cannot erase a useful offer before independent review',async()=>{
+ const draft='I can hold Thursday for you. Which time should I hold: 16:00 or 16:30?';
+ const h=harness({verdict:{claimed_action:true,action_type:'book',action_summary:'Claimed an invitation'},rewrite:{verdict:'keep'}});
+ assert.equal(await h.gates.__fact(ctx(),draft),draft);
+ assert.equal(h.calls.filter(call=>call.tools).length,1);
+});
+test('a genuinely false action sentence is removed while the next decision survives',async()=>{
+ const draft='You are already on the invite. Which time should I book: 16:00 or 16:30?';
+ const h=harness({verdict:{claimed_action:true,action_type:'book'},rewrite:{verdict:'rewrite',remove_clauses:[{sentence:0,quote:'You are already on the invite. '}],removal_verified:true}});
+ assert.equal(await h.gates.__fact(ctx(),draft),'Which time should I book: 16:00 or 16:30?');
+});
+test('the final veto receives the same calendar facts and request state as the initial checker',async()=>{
+ const facts=[{tool:'get_calendar',scope:'shared_with_requester_only',events:[{subject:'Weekly',presentation_local:'Thu 12 Nov 11:30 GMT+2'}]}];
+ const h=harness({verdict:{claimed_action:true,action_type:'book'},rewrite:{verdict:'keep'}});
+ const draft='The Weekly invitation is on your calendar.';
+ assert.equal(await h.gates.__fact(ctx({result:{toolSummaries:[],calendarFacts:facts}}),draft),draft);
+ const veto=h.calls.find(call=>call.tools);
+ assert.ok(veto.messages[0].content.includes(JSON.stringify(facts)));
+ assert.ok(veto.messages[0].content.includes('Authoritative request outcomes:'));
+});
+test('preserved coda caller remains outside historical denial class',async()=>{const h=harness({keep:true});await h.checker.checkReplyClaims({reply:'Congratulations on the launch.',toolSummaries:[],bookingOccurred:false,ownerFirstName:'Idan',mode:'coda',recipientContext:'Known launch'});assert.ok(!h.calls.some(c=>c.messages[0].content.includes('EARLIER CALENDAR READ RECEIPTS:')));});
 for(const [id,history] of [
  ['assistant-prose',[{role:'assistant',content:receipt+'\nThis is a quoted example.'}]],
  ['assistant-prose-explicit-no-tool',[{role:'assistant',content:receipt+'\nThis is a quoted example.',toolSummaries:[]}]],
@@ -109,4 +165,43 @@ test('booking fallback uses only successful current results and stays inside pri
   assert.equal(h.checker.confirmedBookingNotice('Booked', undefined, 'America/New_York'), undefined);
   const result = {toolSummaries:[],mutationActions:[action]};
   assert.ok(!(await h.gates.__fact(ctx({result,isChannel:true,channelId:'CPEER'}),'I booked it')).includes('Release schedule'));
+});
+
+test('a verified move survives an unsupported secondary notification claim',async()=>{
+ const h=harness({verdict:{claimed_action:true,action_type:'message',target_name:'Yael',action_summary:'Invite notification is not receipted'}});
+ const action={tool:'move_meeting',ok:true,eventId:'weekly',subject:'Yael weekly',start:'2026-11-10T09:15:00-05:00',end:'2026-11-10T09:55:00-05:00'};
+ const reply=await h.gates.__fact(ctx({result:{toolSummaries:['[move_meeting OK] mutated=book'],mutationActions:[action]}}),'Moved Yael weekly. The invite is on its way.');
+ assert.match(reply,/Moved “Yael weekly”/);assert.match(reply,/40 minutes/);assert.doesNotMatch(reply,/invite|verified information/);
+ assert.equal(h.checker.confirmedBookingNotice('Moved',[action,{...action,ok:false}],'Asia/Jerusalem'),undefined);
+ assert.equal(h.checker.confirmedBookingNotice('Cancelled',[action,{tool:'delete_meeting',ok:true,eventId:'weekly'}],'Asia/Jerusalem'),undefined);
+});
+
+test('a confirmed false sentence is removed without deleting the valid outcome and next step',async()=>{
+ const whole='No shared time was found. Idan has a medical appointment. Would you like me to ask Idan about 08:30?';
+ const h=harness({rewrite:{verdict:'rewrite',remove_clauses:[{sentence:1,quote:'Idan has a medical appointment. '}],removal_verified:true}});
+ const out=await h.checker.rewriteOwningTheMiss({draft:whole,deletionOnly:true,actionType:'invented_fact',ownerFirstName:'Idan',toolSummaries:['[find_available_slots: 0 slots]']});
+ assert.equal(out,'No shared time was found. Would you like me to ask Idan about 08:30?');assert.equal(h.calls.length,1);
+});
+for(const remove of [[9],[-1],[0.5],[1,1]])test('invalid clause selection cannot edit a reply '+JSON.stringify(remove),async()=>{
+ const h=harness({rewrite:{verdict:'rewrite',remove_clauses:remove.map(sentence=>({sentence,quote:'Idan is on vacation.'})),removal_verified:true}});
+ const out=await h.checker.rewriteOwningTheMiss({draft:'The request exists. Idan is on vacation.',deletionOnly:true,actionType:'invented_fact',ownerFirstName:'Idan'});
+ assert.equal(out,"I don't have confirmed information about that.");
+});
+
+for(const [whole,remove,expected] of [
+ ['Moved the meeting to Monday 11:30; the update went out to Alex and Elinor. Elinor is busy then.',
+  '; the update went out to Alex and Elinor','Moved the meeting to Monday 11:30. Elinor is busy then.'],
+ ['הזזתי את הפגישה ליום שני ב־11:30 ושלחתי הודעה לאלכס. אלינור תפוסה אז.',
+  ' ושלחתי הודעה לאלכס','הזזתי את הפגישה ליום שני ב־11:30. אלינור תפוסה אז.'],
+])test('a false clause cannot erase the real action sharing its sentence '+expected,async()=>{
+ const h=harness({rewrite:{verdict:'rewrite',remove_clauses:[{sentence:0,quote:remove}],removal_verified:true}});
+ const answer=await h.checker.rewriteOwningTheMiss({draft:whole,deletionOnly:true,actionType:'message',ownerFirstName:'Idan',toolSummaries:['[move_meeting OK] mutated=book']});
+ assert.equal(answer,expected);
+});
+test('invented or ambiguous clause spans cannot alter the draft',async()=>{
+ for(const quote of ['was sent','Booked']){
+  const h=harness({rewrite:{verdict:'rewrite',remove_clauses:[{sentence:0,quote}],removal_verified:true}});
+  const answer=await h.checker.rewriteOwningTheMiss({draft:'Booked means Booked.',deletionOnly:true,actionType:'message',ownerFirstName:'Idan'});
+  assert.equal(answer,"I don't have confirmed information about that.");
+ }
 });

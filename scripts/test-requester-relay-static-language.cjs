@@ -71,3 +71,14 @@ test('unsupported owner exhaustion copy is failed before transport, not unknown,
  const h=harness({lang:'ja',row:{state:'expired',informed:1,outcome_json:JSON.stringify({requester_relay:{delivery:'exhausted',send_attempts:3,body:'Prior body'}})}});
  assert.equal(await h.retry(),false);assert.equal(h.effects.owner.length,0);assert.equal(h.effects.sends.length,0);assert.equal(h.effects.prompts.length,0);const stored=JSON.parse(h.row().outcome_json).requester_relay;assert.equal(stored.owner_delivery,'failed');assert.equal(stored.owner_send_attempts,0);assert.equal(h.row().informed,1);assertBriefAttention(h.row());assert.equal(h.row().next_check_at,null);h.check();
 });
+
+test('a concrete approval retains the requester context beside the verified action',async()=>{
+ const h=harness({lang:'en'}),details=JSON.parse(h.row().details_json);
+ details.context='We need this urgently for the pricing decision.';
+ details.honest_hard_reason='This is under the required four-hour notice.';
+ h.update(h.row().id,{details});
+ const text=await h.ask();
+ assert.ok(text.includes(details.context),text);
+ assert.ok(text.includes(details.honest_hard_reason));assert.ok(text.includes('10:00'));
+ assert.equal(h.effects.prompts.length,0);h.check();
+});

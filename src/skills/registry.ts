@@ -138,7 +138,8 @@ const SKILL_MAP = buildSkillMap();
 //     contact is always one call away. Person writes are also backstopped by the
 //     end-of-chat capture pass, so a missed in-turn save is recovered.
 //   - task detail (update_task, get_my_tasks, get_briefing, send_briefing_now)
-//     → 'tasks' scope. create_task stays (cross-cutting; claim-checker refs it).
+//     → 'tasks' scope; tracked-work reads also serve scheduling. create_task
+//     stays cross-cutting (claim-checker refs it).
 //   - web_extract → 'knowledge' scope (pairs with research). web_search stays.
 const ALWAYS_ON_TOOLS = new Set<string>([
   // Memory + people READS + preference learning (cross-cutting, any turn).
@@ -163,6 +164,9 @@ const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
     // direct path: find_available_slots → create_meeting.)
     'check_join_availability',
     'find_available_slots', 'get_calendar', 'analyze_calendar', 'get_free_busy',
+    // Pending moves and recently completed coordination live in the request
+    // ledger, including work that is no longer awaiting owner approval.
+    'get_my_tasks',
     'create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting',
     'check_calendar_health', 'book_floating_block', 'set_event_category',
     // v2.9 — get_calendar_issues + update_calendar_issue merged.
@@ -366,8 +370,8 @@ function logUnmappedToolOnce(toolName: string): void {
  *   - Read or write owner preferences / memory
  *   - See task lists, briefings, or interaction history
  *   - Send messages on the owner's behalf
- *   - Cancel or modify other existing coordinations
- *   - Create or delete calendar events
+ *   - Cancel existing meetings without owner approval
+ *   - Bypass the meeting handlers' requester and booking-rule checks
  */
 const COLLEAGUE_ALLOWED_TOOLS = new Set([
   'find_slack_user',
@@ -407,6 +411,9 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
   // needs_owner_approval=true so Sonnet falls back to create_approval. Owner
   // retains veto via the approval path when rules break.
   'move_meeting',
+  // A colleague can request cancellation of a shared occurrence. The handler
+  // verifies membership, then returns an owner-approval action without writing.
+  'delete_meeting',
   // v2.3.2 — inbound 1:1 booking auto-accept. When a colleague has confirmed
   // slot + duration + subject in this DM, Maelle calls create_meeting directly
   // instead of falling back to "you send the invite". The handler enforces: single colleague-attendee

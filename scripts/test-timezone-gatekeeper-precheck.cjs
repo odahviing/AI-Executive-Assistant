@@ -13,14 +13,16 @@ const cache=new Map(),source=rel=>fs.readFileSync(path.join(contextBeforeRoot&&f
 function compile(rel){if(!cache.has(rel))cache.set(rel,ts.transpileModule(source(rel),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText);return cache.get(rel);}
 const producerFile='src/core/orchestrator/buildTurnContext.ts',ast=ts.createSourceFile(producerFile,source(producerFile),ts.ScriptTarget.Latest,true),blocks=[];
 function visit(n){if(ts.isIfStatement(n)&&n.expression.getText(ast).includes("input.authority === 'colleague'")&&n.thenStatement.getText(ast).includes('const result = await precheckAvailability('))blocks.push(n);ts.forEachChild(n,visit);}visit(ast);assert.equal(blocks.length,1);
-const producer=ts.transpileModule(`(async()=>{let availabilityPrecheckBlock='',requestedSearchWindow,availabilityQuestionDetected=false,availabilityPrecheckToolSummaries=[],availabilityChecks=[];${blocks[0].getText(ast)};return {availabilityChecks,availabilityPrecheckBlock,requestedSearchWindow,availabilityQuestionDetected,availabilityPrecheckToolSummaries};})()`,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
+const producer=ts.transpileModule(`(async()=>{let availabilityPrecheckBlock='',requestedSearchWindow,availabilityQuestionDetected=false,availabilityPrecheckToolSummaries=[],availabilityChecks=[],availabilityAlternatives=[];${blocks[0].getText(ast)};return {availabilityChecks,availabilityAlternatives,availabilityPrecheckBlock,requestedSearchWindow,availabilityQuestionDetected,availabilityPrecheckToolSummaries};})()`,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
 const actual=new Set(['src/utils/schedulingClockReply.ts','src/utils/meetingDuration.ts','src/utils/weTimeResolver.ts','src/utils/availabilityPreCheck.ts','src/utils/attendeeAvailability.ts','src/utils/workingHoursDefault.ts','src/utils/locationTz.ts','src/utils/timezoneValidator.ts','src/utils/timezoneConvert.ts','src/utils/dateTimeExtract.ts','src/core/orchestrator/turnHelpers.ts']);
 const travel={from:'2026-09-14',until:'2026-09-18',location:'New York'};
 async function run(options={}){
  const profile={user:{name:'Owner Fixture',slack_user_id:'UOWNER',email:'owner@example.test',timezone:options.ownerZone||'Asia/Jerusalem'},meetings:{default_meeting_duration:25,allowed_durations:[10,25,50],categories:[]}};
  const person=options.missing?null:{person_id:42,slack_id:'UCOLLEAGUE',email:null,timezone:Object.hasOwn(options,'rawZone')?options.rawZone:'Asia/Jerusalem',profile_json:JSON.stringify({working_hours_structured:{week:require('./fixtures/regular-week.cjs').regularWeek(['Monday','Tuesday','Wednesday','Thursday','Friday'],'07:00','16:00'),source:'manual',timezone:options.hoursZone??'Europe/London'}}),working_hours_auto:JSON.stringify({workdays:['Monday','Tuesday','Wednesday','Thursday','Friday'],hoursStart:'09:00',hoursEnd:'18:00'}),private_notes:'PRIVATE_PERSON_NOTE'};
  const calls={checks:[],forgets:[],records:[],calendar:[],model:0,person:0,stash:[],precheck:[],warnings:[]},modules=new Map(),noop=()=>{};
- const slots=options.slots??[{wall_clock:'2026-09-15T10:00'}];
+ const slots=(options.slots??[{wall_clock:'2026-09-15T10:00'}]).map(slot=>options.message===undefined && slot.stated_timezone
+   ? {...slot,timezone_quote:slot.timezone_quote??slot.wall_clock+' '+slot.stated_timezone} : slot);
+ const fixtureMessage=options.message??slots.map(slot=>slot.wall_clock+' '+(slot.stated_timezone??'')).join(' or ')+'?';
  const mocks={
   'src/utils/workHours.ts':{slotDayMinutes:()=>{throw Error('Work-window evaluation is outside this precheck fixture');}},
   'src/db.ts':{getPersonMemory:()=>{calls.person++;if(options.personError)throw Error('person offline');return person;},getEffectiveTimezoneById:()=>({timezone:Object.hasOwn(options,'homeZone')?options.homeZone:'Asia/Jerusalem'}),getTravelRecordById:()=>options.noTravel?null:(options.travel||travel)},
@@ -42,7 +44,7 @@ async function run(options={}){
  }
  const input={authority:'colleague',userId:'UCOLLEAGUE',channelId:'DCOLLEAGUE',threadTs:'123.45',...options.input};
  const consumer=load('src/utils/availabilityPreCheck.ts').precheckAvailability;
- const output=await vm.runInNewContext(producer,{DateTime,profile,input,meetingRequest:options.meetingRequest,existingInviteSubject:options.existingInviteSubject,exactBookingRequested:options.exactBookingRequested===true,holdOnlyWindows:options.holdOnlyWindows,checkRequestedHold:options.checkRequestedHold===true,userMessage:options.message??'2026-09-15 10:00?',namedInternalAttendeeEmails:options.named||[],conversationHistory:options.history||[],logger:mocks['src/utils/logger.ts'].default,require:s=>{
+ const output=await vm.runInNewContext(producer,{DateTime,profile,input,meetingRequest:options.meetingRequest,existingStatusOnly:options.existingStatusOnly===true,existingInviteSubject:options.existingInviteSubject,exactBookingRequested:options.exactBookingRequested===true,holdOnlyWindows:options.holdOnlyWindows,checkRequestedHold:options.checkRequestedHold===true,userMessage:fixtureMessage,namedInternalAttendeeEmails:options.named||[],conversationHistory:options.history||[],logger:mocks['src/utils/logger.ts'].default,require:s=>{
   if(s==='../../utils/availabilityPreCheck')return {precheckAvailability:async a=>{calls.precheck.push(a);const result=await consumer(a);calls.result=result;return result;}};
   if(s==='../../utils/attendeeAvailability'&&options.noEntry)return {loadAttendeeAvailabilityForPerson:()=>undefined};
   return load(path.posix.normalize('src/core/orchestrator/'+s)+'.ts');
@@ -51,6 +53,13 @@ async function run(options={}){
  return {calls,output,profile,load,result:calls.result};
 }
 const cases=[];function test(id,fn){cases.push([id,fn]);}
+test('nearby alternatives survive into reply data with their real availability scope',async()=>{
+ const h=await run({noTravel:true,alternatives:[{start:'2026-09-15T11:00:00+03:00',end:'2026-09-15T11:25:00+03:00',label:'Tue 15 Sep 11:00–11:25 IDT',presentationZone:'Asia/Jerusalem'}]});
+ assert.equal(h.output.availabilityAlternatives.length,1);
+ assert.equal(h.output.availabilityAlternatives[0].presentation_local,'Tue 15 Sep 11:00 GMT+3');
+ assert.equal(h.output.availabilityAlternatives[0].attendees[0].status,'unknown');
+ assert.ok(h.output.availabilityPrecheckToolSummaries.some(line=>line.includes('owner_calendar_only; attendee_availability_not_checked')));
+});
 function times(h){return h.calls.checks.map(x=>DateTime.fromISO(x.slotStartIso).setZone('Asia/Jerusalem').toFormat("yyyy-MM-dd'T'HH:mm"));}
 test('a search window never registers endpoints as offers even if extraction includes clocks',async()=>{
  const h=await run({kind:'search_window',message:'Find 30 minutes between 09:00 and 12:00 CT?',slots:[{wall_clock:'2026-11-17T09:00'},{wall_clock:'2026-11-17T12:00'}]});
@@ -71,19 +80,36 @@ test('bare clock follows the delivered offer clock and carries the meeting lengt
 });
 test('ordinary search receives original bounds, length and zone without point evidence',async()=>{
  const searchWindow={start:'2026-11-17T09:00',end:'2026-11-17T12:00',zone:'America/Chicago',requestedMinutes:30};
- const h=await run({kind:'search_window',searchWindow:{...searchWindow,durationQuote:'30 minutes'},message:'Find 30 minutes tomorrow between 9 and 12 CT?'});
+ const quoted={startQuote:'9',endQuote:'12',zoneQuote:'CT'};
+ const h=await run({kind:'search_window',searchWindow:{...searchWindow,...quoted,durationQuote:'30 minutes'},message:'Find 30 minutes tomorrow between 9 and 12 CT?'});
  assert.deepEqual({...h.output.requestedSearchWindow},searchWindow);assert.equal(h.calls.calendar.length,0);
- const unstated=await run({kind:'search_window',searchWindow:{...searchWindow,requestedMinutes:1},message:'Thursday morning, Boston time, while I am free?'});
+ const unstated=await run({kind:'search_window',searchWindow:{...searchWindow,...quoted,requestedMinutes:1},message:'Tomorrow between 9 and 12 CT?'});
  assert.equal(unstated.output.requestedSearchWindow.requestedMinutes,undefined);
  const malformed=await run({kind:'search_window',searchWindow:{...searchWindow,end:'2026-11-17T05:00'}});
  assert.equal(malformed.output.requestedSearchWindow,undefined);assert.equal(malformed.calls.calendar.length,0);
+});
+
+test('a partially stated window cannot manufacture a hard end or clock frame',async()=>{
+ const window={start:'2026-10-25T12:30',end:'2026-10-25T23:59',zone:'Asia/Jerusalem'};
+ for(const extra of [{},{startQuote:'12:30',endQuote:'23:59',zoneQuote:'Israel'}]){
+  const h=await run({kind:'search_window',searchWindow:{...window,...extra},message:'אולי ביום ראשון בין השעות 12:30 עדיפות לכמה שיותר מוקדם'});
+  assert.equal(h.output.requestedSearchWindow,undefined);assert.equal(h.calls.calendar.length,0);
+ }
+});
+
+test('a verified calendar conflict stays blocked while retaining the owner decision path',async()=>{
+ const h=await run({noTravel:true,message:'2026-09-15T10:00+03:00?',slots:[{wall_clock:'2026-09-15T10:00+03:00'}],check:()=> 'owner_busy_collision'});
+ assert.equal(h.result.verdicts[0].bookable,false);
+ assert.equal(h.calls.records.length,1);
+ assert.match(h.result.promptBlock,/tracked owner decision/);
+ assert.doesNotMatch(h.result.promptBlock,/not something to push through/);
 });
 test('unclassified prose containing clocks supplies no fallback offers',async()=>{
  const h=await run({modelError:true,message:'Find 30 minutes between 09:00 and 12:00 CT?'});
  assert.equal(h.result.ran,false);assert.equal(h.calls.checks.length,0);
 });
 test('competing weekdays reach the normalization prompt and both returned dates reach the checker',async()=>{
- const h=await run({ownerZone:'America/New_York',rawZone:'America/New_York',noTravel:true,
+ const h=await run({ownerZone:'America/New_York',rawZone:'America/New_York',homeZone:'America/New_York',noTravel:true,
   history:[{role:'user',content:'Thursday morning in Boston?'},{role:'assistant',content:'Thursday afternoon or Friday 08:30.'}],
   message:'What about 8:30?',slots:['12','13'].map(day=>({wall_clock:'2026-11-'+day+'T08:30',stated_timezone:'America/New_York'}))});
  assert.match(h.calls.normalizationPrompt,/Thursday morning in Boston/);
@@ -104,7 +130,7 @@ test('missing person retains owner-frame default',async()=>{const h=await run({m
 test('missing shared entry uses validated raw-zone compatibility',async()=>{const h=await run({noEntry:true,rawZone:'America/New_York'});assert.deepEqual(times(h),['2026-09-15T10:00','2026-09-15T17:00']);});
 test('invalid raw fallback stays owner-frame',async()=>{const h=await run({noEntry:true,rawZone:'not/a-zone'});assert.deepEqual(times(h),['2026-09-15T10:00']);});
 test('explicit source zone wins across travel',async()=>{const h=await run({slots:[{wall_clock:'2026-09-15T10:00',stated_timezone:'Asia/Tokyo'}]});assert.deepEqual(times(h),['2026-09-15T04:00']);assert.equal(h.result.verdicts[0].other,undefined);});
-test('explicit offsets do not replace copied source wall clock',async()=>{const h=await run({slots:[{wall_clock:'2026-09-15T10:00-04:00',stated_timezone:'Asia/Tokyo'}]});assert.deepEqual(times(h),['2026-09-15T04:00']);});
+test('invented offsets do not replace copied source wall clock',async()=>{const h=await run({message:'2026-09-15 10:00 Tokyo time?',slots:[{wall_clock:'2026-09-15T10:00-04:00',stated_timezone:'Asia/Tokyo',timezone_quote:'10:00 Tokyo time'}]});assert.deepEqual(times(h),['2026-09-15T04:00']);});
 test('owner direct and owner room authority clamp remain excluded',async()=>{for(const input of [{authority:'owner',userId:'UOWNER'},{authority:'colleague',userId:'UOWNER',channelId:'CROOM'}]){const h=await run({input});assert.equal(h.calls.person+h.calls.model+h.calls.calendar.length,0);}});
 test('colleague room keeps same scoped precheck and private details withheld',async()=>{const h=await run({input:{channelId:'CROOM'},noTravel:true});assert.equal(h.result.ran,true);assert.ok(h.calls.checks.every(x=>x.viewer==='other'&&x.leadTimeHours===4));assert.doesNotMatch(JSON.stringify(h.output),/PRIVATE_/);assert.equal(h.calls.precheck[0].channelId,'CROOM');});
 test('one hard blocked reading with one free cannot arm floor',async()=>{const h=await run({noTravel:true,rawZone:'America/New_York',homeZone:'America/New_York',check:(_,n)=>n===1?'owner_busy_collision':undefined});assert.equal(h.calls.records.length,0);assert.equal(h.calls.forgets.length,2);});
@@ -150,6 +176,23 @@ test('a request to hold a prior offer cannot manufacture another via the prechec
  const h=await run({holdOnlyWindows:new Map()});
  assert.equal(h.calls.model,0);
  assert.equal(h.calls.stash.length,0);
+});
+for(const quote of [undefined,'New York'])test('a fabricated timezone without a current source keeps both clock interpretations: '+String(quote),async()=>{
+ const h=await run({message:'16:15 works',slots:[{wall_clock:'2026-09-15T16:15',stated_timezone:'America/New_York',timezone_quote:quote}]});
+ assert.equal(h.calls.checks.length,2);assert.ok(h.result.verdicts[0].other);
+});
+test('existing-event status does not validate its old clock as a new booking',async()=>{
+ const h=await run({existingStatusOnly:true,message:'Is my 11:30 call approved?',slots:[{wall_clock:'2026-09-15T11:30',stated_timezone:'America/New_York',timezone_quote:'11:30'}]});
+ assert.equal(h.calls.precheck.length,0);assert.equal(h.calls.calendar.length,0);
+});
+
+test('a verbatim clock-frame phrase settles the source timezone',async()=>{
+ const h=await run({message:'16:15 New York time works',slots:[{wall_clock:'2026-09-15T16:15',stated_timezone:'America/New_York',timezone_quote:'16:15 New York time'}]});
+ assert.equal(h.calls.checks.length,1);assert.equal(h.result.verdicts[0].other,undefined);
+});
+test('the zone on the second clock cannot be applied to the first clock',async()=>{
+ const h=await run({message:'מה עם 23:00? זה יהיה 16:00 שעון בוסטון',slots:[{wall_clock:'2026-09-15T23:00',stated_timezone:'America/New_York',timezone_quote:'16:00 שעון בוסטון'}]});
+ assert.equal(h.calls.checks.length,2);assert.ok(h.result.verdicts[0].other);
 });
 if(require.main===module)(async()=>{const results=[];for(const [id,fn]of cases){try{await fn();results.push({id,status:'pass'});console.log('ok - '+id);}catch(e){results.push({id,status:'fail',error:e.stack});console.log('not ok - '+id+'\n'+e.stack);}}const passed=results.filter(x=>x.status==='pass').length,failed=results.length-passed;console.log(`${passed} passed; ${failed} failed`);process.exitCode=failed?1:0;})();
 module.exports={run};

@@ -30,6 +30,13 @@ function setup(t,raw, extraMocks={}){
  const f=fixtureModule.exports.fixture(t,{...extraMocks,'src/core/social/classifyTurn.ts':classifier.exports,'src/llm/client.ts':{getAnthropicClient:()=>anthropic},'src/utils/availabilityPreCheck.ts':{precheckAvailability:async p=>{prechecks.push(p);return {ran:false,verdicts:[]};}}});
  return {...f,requests,prechecks};
 }
+test('a new unrelated task does not manufacture a meeting request',async t=>{
+ const f=setup(t,{scopes:['knowledge','general'],meeting_action:'none',request_relation:'new',meeting_continuation:false,meeting_people:[]});
+ const text='Make the draft less salesy and show me the result.';
+ const r=await f.run({userMessage:text,typedUserMessage:text,conversationHistory:history});
+ assert.equal(r.meetingRequest,undefined);
+ assert.equal(r.ownerSettings,undefined);
+});
 const canonical = x => JSON.parse(JSON.stringify(x));
 const matcher={exports:{}};
 const matcherCode=ts.transpileModule(fs.readFileSync(path.join(root,'src/utils/closeLoopOnOwnerHandled.ts'),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;
@@ -61,6 +68,14 @@ test('Paul amendment evidence never becomes approval',async t=>{
  const f=approvalFixture(t,{meeting_action:'explore',approval_decisions:[accepted[1]]});
  const r=await f.run({userMessage:message,conversationHistory:conversation});assert.deepEqual(canonical(r.contextualApprovalDecisions).map(d=>d.disposition),['amend_or_search']);
 });
+
+for (const action of ['execute','explore']) test('pending amendment keeps its own '+action+' authority with no direct calendar mutation',async t=>{
+ const f=approvalFixture(t,{meeting_action:action,calendar_operations:[],approval_decisions:[accepted[1]],participants_unchanged:true});
+ const r=await f.run({userMessage:message,conversationHistory:conversation});
+ assert.equal(r.blockedWriteTools.has('resolve_approval'),action==='explore');
+ assert.equal(r.blockedWriteTools.has('create_meeting'),true);
+ assert.equal(r.contextualApprovalDecisions[0].disposition,'amend_or_search');
+});
 test('actual classifier and context preserve explicit pair decision with Paul amendment only',async t=>{
  const f=approvalFixture(t,{approval_decisions:accepted});
  const r=await f.run({userMessage:message,conversationHistory:conversation});
@@ -68,9 +83,14 @@ test('actual classifier and context preserve explicit pair decision with Paul am
  assert.deepEqual(canonical(r.contextualApprovalDecisions).map(x=>[x.requestId,x.disposition]),[['req_Adam','approve_existing'],['req_Paul','amend_or_search']]);
  assert.equal(r.contextualApprovalDecisions[0].requestDetailsJson,rows[0].details_json);
  assert.equal(r.contextualApprovalDecisions[0].action.args.start,'2026-11-16T15:40:00');
+ assert.ok(r.prompt.includes('Pending requests referenced by the current owner message'));
+ assert.ok(r.prompt.includes('"requestId":"req_Adam"'));
+ assert.ok(!r.prompt.includes('"disposition":"amend_or_search"'),'classifier proposal is not projected as an owner command');
+ assert.ok(r.prompt.includes('"start":"2026-11-16T16:30:00"'),'stored action remains available for interpreting the actual owner constraint');
+ assert.ok(r.prompt.includes('"instructionQuote":'+JSON.stringify(message)));
  assert.equal(f.requests.length,1);
  const schema=f.requests[0].tools[0].input_schema;assert.ok(schema.required.includes('approval_decisions'));
- assert.equal(schema.properties.approval_decisions.items.additionalProperties,false);
+ assert.ok(schema.properties.approval_decisions.items.oneOf.every(candidate=>candidate.additionalProperties===false));
 
 });
 test('stored counter supplies actual effective action snapshot',async t=>{

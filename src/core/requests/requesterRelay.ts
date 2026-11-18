@@ -177,6 +177,11 @@ const relayCopy = {
     'Should I book “{subject}”?', 'לקבוע את ״{subject}״?', 'Soll ich „{subject}“ buchen?',
     '¿Agendo «{subject}»?', 'هل أحجز «{subject}»؟', 'Назначить встречу «{subject}»?',
   ],
+  requester_context: [
+    'Requester’s context (quoted): “{quote}”', 'הרקע שמסר הפונה (ציטוט): ״{quote}״',
+    'Kontext der anfragenden Person (Zitat): „{quote}“', 'Contexto de quien lo solicita (cita): «{quote}»',
+    'سياق مقدم الطلب (اقتباس): «{quote}»', 'Контекст заявителя (цитата): «{quote}»',
+  ],
   approval_title_unavailable: ['existing meeting — title unavailable', 'פגישה קיימת — הכותרת אינה זמינה', 'bestehender Termin — Titel nicht verfügbar', 'reunión existente — título no disponible', 'اجتماع موجود — العنوان غير متاح', 'существующая встреча — название недоступно'],
   consequence_zone: ['If yes → I\'ll update their stored timezone to {value}.', 'אם כן ← אעדכן את אזור הזמן השמור ל{value}.', 'Bei Zustimmung → ich ändere die gespeicherte Zeitzone auf {value}.', 'Si aceptas → actualizaré la zona horaria guardada a {value}.', 'عند الموافقة ← سأحدّث المنطقة الزمنية المحفوظة إلى {value}.', 'Если да → обновлю сохранённый часовой пояс на {value}.'],
   consequence_run: ['If yes → I\'ll run {value}.', 'אם כן ← אבצע את {value}.', 'Bei Zustimmung → ich führe {value} aus.', 'Si aceptas → ejecutaré {value}.', 'عند الموافقة ← سأنفذ {value}.', 'Если да → выполню {value}.'],

@@ -244,12 +244,19 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
     return result;
   }
   const { context, userEmail, timezone } = ctx;
+  if (context.meetingRequestId && context.requestMovingEventId && args.moving_event_ids === undefined) {
+    args = {...args,moving_event_ids:[context.requestMovingEventId]};
+  }
+  if (context.meetingRequestId && context.requestExistingMeeting && context.requestDurationMinutes === undefined &&
+      (!Array.isArray(args.moving_event_ids) || !args.moving_event_ids.length)) {
+    return {error:'existing_meeting_not_identified',message:'This request concerns an existing meeting. Read get_calendar for its original date and pass that occurrence ID as moving_event_ids. Search must preserve its actual duration and attendees, and exclude the original occurrence. Do not substitute a new-meeting default.'};
+  }
   const window = context.requestedSearchWindow;
   if (window) {
     args = {
       ...args, search_from: window.start, search_to: window.end, search_window_timezone: window.zone,
       time_window_is_hard: true,
-      duration_minutes: window.requestedMinutes ?? (context.meetingRequestId && !args.moving_event_ids ? context.requestDurationMinutes : args.duration_minutes),
+      duration_minutes: window.requestedMinutes ?? (context.meetingRequestId && !args.moving_event_ids ? context.requestDurationMinutes : undefined) ?? args.duration_minutes,
     };
   }
   try {
@@ -298,7 +305,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
   const offerCount = context.requestedOptionCount === undefined
     ? explicitCount ?? offeredSlotCount(context.profile)
     : context.requestedOptionCount ?? offeredSlotCount(context.profile);
-        // v1.6.4 — meeting_mode is required from the LLM. Do NOT pre-pass
+        // An omitted mode searches either kind of day. Do NOT pre-pass
         // workDays from here: every work day is walked, and in_person on a
         // non-office day is checkSlot rule 1b (soft, owner-overridable) per slot.
         {
@@ -549,10 +556,11 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // path and coordinate_meeting consistently. Owner can opt out via
           // `ignore_attendee_availability: true` for "find times I'm free,
           // I'll handle the others" scenarios.
-          let attendeeEmails = (args.attendee_emails as string[]) ?? [];
+          const optionalAttendees=new Set((context.resolvedOptionalAttendees ?? []).map(email=>email.toLowerCase()));
+          let attendeeEmails = ((args.attendee_emails as string[]) ?? []).filter(email=>!optionalAttendees.has(email.toLowerCase()));
           let resolvedAttendees = context.resolvedMeetingAttendeeGroups === undefined
-            ? context.resolvedMeetingAttendees ?? []
-            : meetingScopedAttendees(context.resolvedMeetingAttendeeGroups, attendeeEmails, userEmail,
+            ? (context.resolvedMeetingAttendees ?? []).filter(email=>!optionalAttendees.has(email.toLowerCase()))
+            : meetingScopedAttendees(context.resolvedMeetingAttendeeGroups.map(group=>({...group,emails:group.emails.filter(email=>!optionalAttendees.has(email.toLowerCase()))})), attendeeEmails, userEmail,
                 getPersonMemory(context.userId)?.email);
           // An organizer looking for owner availability can check the owner's
           // calendar before an external attendee is known. This result covers
@@ -568,6 +576,13 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             && (context.requestSearchAddresses?.includes(explicitPeople[0]) || (
               context.resolvedMeetingAttendeeGroups?.length === 0 && context.individualSearchEmails?.includes(explicitPeople[0])
               && known.some(email => email.toLowerCase() === explicitPeople[0])));
+          // An ambiguous multi-meeting partition cannot authorize an invitation,
+          // but it must not prevent a clearly scoped calendar read. Check the
+          // explicitly named known people and disclose that limited coverage.
+          // A uniquely identified roster still auto-fills every required member.
+          const explicitSearch = resolvedAttendees === null && explicitPeople.length > 0 && !args.moving_event_ids
+            && explicitPeople.every(email => known.some(member=>member.toLowerCase()===email)
+              || context.requestSearchAddresses?.includes(email));
           const groups = context.resolvedMeetingAttendeeGroups;
           // An incomplete extraction cannot establish a roster for an invite.
           // It can still support a bounded check of these two known calendars.
@@ -575,15 +590,21 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             && !!context.meetingRequestId && !!requesterEmail && !explicitPeople.length
             && !ownerOnlySearch && args.requester_is_attending !== false && !args.moving_event_ids;
           const unverifiedNames = groups?.length === 1 ? groups[0].unresolvedNames : [];
-          const partialSearch = ownerOnlySearch || individualSearch || pairSearch || unverifiedNames.length > 0;
-          const scope = partialSearch ? {
-            availability_scope:ownerOnlySearch ? 'owner_only' : pairSearch ? 'owner_and_requester' : individualSearch ? 'explicit_participant_only' : 'identified_participants_only',
+          const partialSearch = ownerOnlySearch || individualSearch || explicitSearch || pairSearch || unverifiedNames.length > 0;
+          const scope:Record<string,unknown> = partialSearch ? {
+            availability_scope:ownerOnlySearch ? 'owner_only' : pairSearch ? 'owner_and_requester' : individualSearch || explicitSearch ? 'explicit_participant_only' : 'identified_participants_only',
             other_participants:unverifiedNames.length ? 'not_verified' : 'not_checked',
             ...(unverifiedNames.length ? {unverified_participant_names:unverifiedNames} : {}),
           } : {};
+          if (args.prefer_morning === true) scope.time_preference = {period:'morning',zone:timezone,before:'12:00',strength:'preference'};
+          if (context.requestExistingMeeting && (!Array.isArray(args.moving_event_ids) || !args.moving_event_ids.length)) {
+            scope.existing_meeting_identity='unresolved';
+            scope.search_basis='The human supplied the requested duration. These checks use the requested participants, but have not verified the existing event or excluded its occurrence. Identify it before changing the calendar.';
+          }
           if (ownerOnlySearch) resolvedAttendees = [];
           if (pairSearch) resolvedAttendees = [requesterEmail!];
           if (individualSearch) resolvedAttendees = explicitPeople;
+          if (explicitSearch) resolvedAttendees = explicitPeople;
 
           // MOVE-PATH AUTO-FILL: when moving_event_ids is set, auto-read the moving
           // event's real roster so a later call that DROPPED an attendee still checks
@@ -872,6 +893,18 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 }
               }
               const fromEvent = [...new Set(qualifyingIds.flatMap(id => rosterById.get(id)?.attendees ?? []))];
+              // An existing occurrence owns its length unless the human chose a
+              // new one. Tool arguments alone must not reset it to the default.
+              // Recheck its access and roster on every continued search.
+              const soleId = qualifyingIds.length === 1 && movingIdsForAttendees.length === 1 ? qualifyingIds[0] : undefined;
+              const info = soleId && rosterById.get(soleId);
+              const sameRoster = attendeeEmails.every(email => email.toLowerCase() === userEmail.toLowerCase()
+                || fromEvent.some(person => person.toLowerCase() === email.toLowerCase()));
+              if (context.meetingRequestId && soleId && info && sameRoster && info.durationMinutes && info.durationMinutes > 0) {
+                args.duration_minutes = context.requestDurationMinutes === undefined ? info.durationMinutes
+                  : meetingDuration(context.requestDurationMinutes,allowed,isOwnerPath).durationMin;
+                scope.moving_meeting = {event_id:soleId,duration_minutes:args.duration_minutes};
+              }
               // A single authorized existing event supplies its complete roster.
               // Human request groups may name only Alex while the invitation
               // also includes Elinor. Resolve that scope after the event read
@@ -1242,7 +1275,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // `oofUntilDisplay` passes through to the `owner_out_of_office`
             // case only; every other reason ignores it.
             const labelFor = (reason: SearchRejectReason | undefined, oofUntilDisplay?: string): string =>
-              humanizeViolationLabel(reason, ownerFirst, oofUntilDisplay);
+              humanizeViolationLabel(reason, ownerFirst, oofUntilDisplay, viewerEmail);
 
             // #148 — the zone the candidate times were STATED in (searchWindowTz), or an
             // explicit present_in_timezone, used to echo each result back in that zone.
@@ -1316,15 +1349,28 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // real rejection reason in rejectedCounts — no WE special-casing.
                 const brokenRule = matches ? undefined : firstRejectReason(diag.rejectedCounts, diag.daySummary);
                 const brokenRules = matches ? [] : Object.keys(diag.rejectedCounts ?? {}) as SearchRejectReason[];
+                const attendeeConflicts = brokenRules.flatMap(reason => {
+                  const separator=reason.indexOf(':');
+                  const kind=reason.slice(0,separator), email=reason.slice(separator+1);
+                  const mapped=kind==='attendee_busy_collision' ? 'busy'
+                    : kind==='outside_attendee_work_hours' ? 'off_hours'
+                    : kind==='attendee_out_of_office' ? 'out_of_office' : undefined;
+                  return separator>0 && email && mapped ? [{email,reason:mapped,
+                    line:labelFor(reason,oofUntilDisplayFor(reason,diag.daySummary,cand.start.slice(0,10)))}] : [];
+                });
                 // The shared search can stop at an attendee's busy block before
                 // checking the owner. Preserve that joint verdict and check the
                 // owner separately through the same search and rule validator.
-                let ownerAvailable = matches ? true : undefined;
+                let ownerAvailable = matches ? true : attendeeConflicts.length ? undefined : brokenRules.length ? false : undefined;
                 if (brokenRules.some(reason=>reason.startsWith('attendee_busy_collision:')
                   || reason.startsWith('outside_attendee_work_hours:') || reason.startsWith('attendee_out_of_office:'))) {
+                  const ownerDiag:typeof diag = {};
                   const ownerSlots = await findAvailableSlots({...candidateParams,
-                    attendeeBusyEmails:[],attendeeAvailability:undefined,diagnosticsOut:{}});
+                    attendeeBusyEmails:[],attendeeAvailability:undefined,diagnosticsOut:ownerDiag});
                   ownerAvailable = ownerSlots.some(slot=>DateTime.fromISO(slot.start,{zone:timezone}).toMillis()===startMs);
+                  if (!ownerAvailable) for (const reason of Object.keys(ownerDiag.rejectedCounts ?? {}) as SearchRejectReason[]) {
+                    if (!brokenRules.includes(reason)) brokenRules.push(reason);
+                  }
                 }
                 // gh#200 — an all-day OOF rejects every instant on that day
                 // before checkSlot ever runs, so the away span's real end
@@ -1340,18 +1386,15 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // Guard the empty-string parse-fail exactly like the present_in_timezone path.
                 const candidateZone = groundTz(cand.start);
                 const presentLocal = candidateZone ? renderClockInZone(cand.start, timezone, candidateZone) : '';
-                // gh#169 — same grounding gh#168-a computes for the bulk day_summary
-                // path (attendeeHoursGroundingNotes), applied to the sibling
-                // candidate_validation branch: a candidate rejected on
-                // outside_attendee_work_hours carries the blocked attendee's real
-                // hours converted into the owner's zone, so a follow-up ("why is
-                // that excluded?") is answered by quoting this instead of Sonnet
-                // inferring the conversion herself.
-                const brokenRuleKind = brokenRule?.includes(':') ? brokenRule.split(':')[0] : brokenRule;
-                const blockedEmail = brokenRule?.includes(':') ? brokenRule.slice(brokenRule.indexOf(':') + 1) : undefined;
-                const attendeeHoursNote = (brokenRuleKind === 'outside_attendee_work_hours' && blockedEmail)
+                // Explain every attendee-hours constraint, including ones behind
+                // an earlier busy rejection. One person's clock cannot ground
+                // the hours of another person in a different timezone.
+                const blockedHoursEmails = [...new Set(brokenRules
+                  .filter(reason=>reason.startsWith('outside_attendee_work_hours:'))
+                  .map(reason=>reason.slice('outside_attendee_work_hours:'.length)))];
+                const attendeeHoursNote = blockedHoursEmails.length
                   ? attendeeHoursGroundingNotes(
-                      [{ email: blockedEmail, slots_blocked: 1 }],
+                      blockedHoursEmails.map(email=>({email,slots_blocked:1})),
                       cand.start.slice(0, 10),
                       attendeeAvailability,
                       timezone,
@@ -1363,7 +1406,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   end: cand.end,
                   available: matches,
                   ...(ownerAvailable !== undefined ? {owner_available:ownerAvailable} : {}),
+                  ...(attendeeConflicts.length ? {attendee_conflicts:attendeeConflicts,
+                    _attendee_busy_note:attendeeConflicts.map(person=>person.line).join('; ')} : {}),
                   ...(ownerAvailable && !matches ? {_attendee_decision_note:'The owner is available at this exact time. The joint check reports an attendee constraint. A calendar conflict can be accepted by the booker after disclosure; use the normal booking or move handler for their selection. Working-hours changes still require the appropriate consent.'} : {}),
+                  ...(ownerAvailable===false ? {_scheduling_decision_note:'The owner also has a scheduling constraint at this exact time. An attendee conflict is a separate decision and does not remove the owner constraint. For an instructed booking or move, use the normal handler to obtain the verified result and any required owner approval. For an availability question, explain the constraint and offer the tracked owner decision or checked alternatives.'} : {}),
                   ...(presentLocal ? presentationClockFields(presentLocal, groundTzStated ? 'requested' : 'attendee', cand.start, cand.end, ownerClockProfile) : {}),
                   ...(brokenRule ? { broken_rule: brokenRule, broken_rule_label: labelFor(brokenRule, brokenRuleUntilDisplay) } : {}),
                   ...(brokenRules.length ? { broken_rules: brokenRules, broken_rule_labels: brokenRules.map(reason => labelFor(reason, oofUntilDisplayFor(reason, diag.daySummary, cand.start.slice(0, 10)))) } : {}),
@@ -1491,6 +1537,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               const hoursBlocked = !allDaysOccupied && summary?.some(day => day.top_reasons.includes('outside_attendee_work_hours'));
               const reasons = [...new Set(summary?.flatMap(day=>day.top_reasons) ?? [])];
               return {
+                ...scope,
                 slots: [],
                 search_outcome:{joint_openings:0,from:effectiveSearchFrom,to:effectiveSearchTo,zone:timezone,duration_minutes:args.duration_minutes,
                   mixed_reasons:reasons.length>1,owner_all_day_busy:allDaysOccupied},
@@ -1531,7 +1578,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               })),
             });
 
-            const { attendeeEmailWarning, attendeeNotCheckedWarning } = attendeeCheckWarnings({
+            let { attendeeEmailWarning, attendeeNotCheckedWarning } = attendeeCheckWarnings({
               userEmail,
               ownerFirstName: context.profile.user.name.split(' ')[0],
               unresolvedAttendees: diagnosticsOut.unresolvedAttendees ?? [],
@@ -1733,6 +1780,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               ) {
                 return {
                   slots: rawSlots,
+                  ...scope,
                   ...(diagnosticsOut.daySummary && diagnosticsOut.daySummary.length > 0
                     ? { day_summary: diagnosticsOut.daySummary } : {}),
                   ...(attendeeEmailWarning ?? {}),
@@ -1818,6 +1866,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 if ((strictDaySummary && strictDaySummary.length > 0) || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || movingEventIdMismatchWarning) {
                   return {
                     slots: [],
+                    ...scope,
                     ...(strictDaySummary && strictDaySummary.length > 0 ? { day_summary: strictDaySummary } : {}),
                     ...(attendeeEmailWarning ?? {}),
                     ...(attendeeNotCheckedWarning ?? {}),
@@ -1877,6 +1926,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   c.broken_rules.length === 1 && c.broken_rules[0] === 'in_person_on_home_day');
                 return {
                   slots: [],
+                  ...scope,
                   owner_approval_candidates: context.channel === 'slack' && context.surface === 'colleague_dm' && attendeeEmails.length
                     ? await annotateMeetingOptions(candidates, attendeeEmails, userEmail, timezone, viewerEmail) : candidates,
                   ...(ownerHoursExceptionRequested ? {
@@ -2137,9 +2187,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // hard drop); we then run the SAME annotation so the result is
             // "12:30: owner free, Dina busy" and Maelle can say "works for you —
             // want me to ask Dina to move it?" instead of "no time".
-            const annotateForFlexibleRequester = isOwnerInitiatedSearch && ignoreAttendeeBusy;
             let annotatedSlots: Array<any> = slots;
-            if ((!isOwnerInitiatedSearch || annotateForFlexibleRequester) && attendeeEmails.length > 0) {
+            if (attendeeEmails.length > 0) {
               try {
                 annotatedSlots = await annotateMeetingOptions(slots, attendeeEmails, userEmail, timezone, viewerEmail);
               } catch (err) {
@@ -2147,6 +2196,19 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   err: String(err).slice(0, 200),
                 });
               }
+            }
+
+            // The annotation is a later read of the actual offered intervals.
+            // Retain a window-read warning only for people still unverified at
+            // an offered interval. A failed broad read must not contradict a
+            // successful per-option read; unresolved directory identities stay
+            // blocked by attendeeEmailWarning independently.
+            if (annotatedSlots.length && attendeeNotCheckedWarning) {
+              const missing = attendeeNotCheckedWarning.attendees_not_checked as string[];
+              const stillMissing = missing.filter(email=>annotatedSlots.some(slot=>
+                !slot.attendee_status?.some((person:{email:string;status:string})=>person.email.toLowerCase()===email.toLowerCase() && person.status!=='unknown')));
+              attendeeNotCheckedWarning = attendeeCheckWarnings({userEmail,ownerFirstName:context.profile.user.name.split(' ')[0],
+                unresolvedAttendees:[],attendeesNotChecked:stillMissing,logSuffix:' after per-option verification'}).attendeeNotCheckedWarning;
             }
 
             // v2.5.2 — surface travelers so Sonnet renders dual-TZ on slot
@@ -2315,7 +2377,13 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               if (!Array.isArray(s.attendee_conflicts) || s.attendee_conflicts.length === 0) return s;
               return {
                 ...s,
-                attendee_conflicts: s.attendee_conflicts.map((c: any) => ({ ...c, line: attendeeConflictLine(c, viewerEmail) })),
+                attendee_conflicts: s.attendee_conflicts.map((c: any) => {
+                  const actual = s.attendee_status?.find((person:{email:string})=>person.email.toLowerCase()===c.email.toLowerCase());
+                  // The feasibility reason groups busy and tentative together;
+                  // the later calendar status gives the precise human wording.
+                  return {...c,line:c.reason==='busy' && actual && ['busy','tentative','oof'].includes(actual.status)
+                    ? actual.line : attendeeConflictLine(c,viewerEmail)};
+                }),
               };
             });
             const hasAttendeeConflicts = annotatedSlots.some(
@@ -2397,10 +2465,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               && !attendeeEmailWarning && !attendeeNotCheckedWarning && !movingEventIdMismatchWarning && !timezoneHint
               && !args.owner_hours_exception_requested && !travelers.length
               ? (await import('../offerReply')).renderOpenTimes(annotatedSlots,
-                { locale: optionLocale, owner: replyOwner, singleZoneOptions:context.singleZoneOptions, requestedMinutes:carriedDuration ?? window?.requestedMinutes, zoneFor: start => presentTzForOutput(start) || timezone },
+                { locale: optionLocale, owner: replyOwner, singleZoneOptions:context.singleZoneOptions, requestedMinutes, zoneFor: start => presentTzForOutput(start) || timezone },
                 attendeeEmails.filter(email => email.toLowerCase() !== userEmail.toLowerCase()), viewerEmail, attendeeFirstName)
               : undefined;
-            if (partialSearch || ordinaryReply || travelers.length > 0 || hasDaySummary || isRecoveryResult || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional || requestedTimeLocal || timezoneHint || preferredSlotStatus || hasAttendeeStatus || movingEventIdMismatchWarning || travelBufferNote) {
+            if (scope.moving_meeting || scope.existing_meeting_identity || scope.time_preference || partialSearch || ordinaryReply || travelers.length > 0 || hasDaySummary || isRecoveryResult || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional || requestedTimeLocal || timezoneHint || preferredSlotStatus || hasAttendeeStatus || movingEventIdMismatchWarning || travelBufferNote) {
               const result: Record<string, unknown> = { slots: annotatedSlots, ...scope, ...(ordinaryReply ? { options_reply: ordinaryReply } : {}) };
               // Positions refer to the intact slots, including their individual clocks and rules.
               if (context.channel !== 'email' && (hasAttendeeConflicts || hasAttendeeStatus)) {
@@ -2462,22 +2530,11 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   // the REQUESTER's call, NOT the owner's — Maelle serves the owner, not the
                   // attendee. Name who's busy, and if they still want it, book it directly.
                   // Never escalate to the owner: his own busy/rules never reach this set.
-                  // search-path-book-it-directly-note-collides-with-the-new-guard
-                  // (2026-09-09) — this used to tell the model "BOOK IT
-                  // directly with create_meeting" once the requester said yes,
-                  // as if that call would simply succeed. It doesn't:
-                  // create_meeting's own Guard B independently re-verifies in
-                  // real time and, per its tool schema, may NEVER accept
-                  // confirm_attendee_conflict on that first call — so it
-                  // re-raises the SAME "Just FYI — <reason>. Want me to book
-                  // it anyway?" question a second time, and the requester was
-                  // asked once here and again there. Fix: don't pre-empt that
-                  // check with a narration of our own — hand the slot straight
-                  // to create_meeting and let ITS refusal be the one and only
-                  // ask, sourced from ONE place instead of two that can drift
-                  // (M1).
+                  // The handler checks the recorded disclosure and assent for
+                  // this exact interval and roster; a prior create call is not
+                  // itself required and does not establish that consent.
                   result._attendee_busy_colleague_note =
-                    `No time here is free for everyone — every slot works for ${ownerFirst}, but a REQUIRED ATTENDEE is busy then (each slot's \`attendee_conflicts: [{email, reason, line}]\` names who). This is THEIR call, not ${ownerFirst}'s — do NOT route it to him and do NOT say there's no time. Present the slots plainly so they can pick one, but do NOT yourself ask "still want it?" or narrate who's busy as a decision point — once they pick a slot, call create_meeting there directly with NO confirm_attendee_conflict set. It independently re-verifies and its OWN refusal already asks "book it anyway?" naming everyone blocked (attendee_conflict error) — relay exactly THAT one question, don't ask your own version first. Once they answer yes to it, re-call create_meeting with the SAME args plus confirm_attendee_conflict:true to book. Never make them answer this twice.`;
+                    `These times work for ${ownerFirst}, with the attendee conflicts shown on each slot. Present the checked choices and their actual conflicts. The booker decides whether to accept an attendee's busy time; that alone needs no owner approval. Once they select a time after those conflicts were disclosed, use the normal booking or move handler with confirm_attendee_conflict:true. The handler verifies that consent against the recorded interval and roster. Without prior disclosure, let its refusal identify the conflicts and obtain one decision. Do not ask an already answered question again.`;
                 } else {
                   // Owner-tagged backstop: the strict pass found no suitable slot;
                   // these are his genuinely open times inside attendee working

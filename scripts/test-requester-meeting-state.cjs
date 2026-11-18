@@ -39,6 +39,21 @@ test('counter terms replace the original pending time without claiming a booking
   assert.equal(result.approvals[0].state,'awaiting_colleague');
   assert.equal(result.approvals[0].ownerNotificationDelivered,false);
 });
+
+test('a bound calendar question stays visible with its identity and current facts, without execution authority',()=>{
+ const question={...request,id:'req_question',subkind:'freeform',details_json:JSON.stringify({meeting_request_id:'meeting-request',question:'40 minutes with Paul; waiting for his mailbox',context:'Wednesday 17:00 Israel time'})};
+ const result=fixture([question,{...question,requester_slack_id:'UOTHER'}])('UOWNER','UPEER','DPEER','thread');
+ assert.equal(result.approvals.length,1);assert.equal(result.approvals[0].operation,'question');
+ assert.equal(result.approvals[0].meetingRequestId,'meeting-request');assert.equal(result.approvals[0].question,'40 minutes with Paul; waiting for his mailbox');
+ assert.equal(result.approvals[0].start,undefined);
+});
+
+test('passed appointment and expired approval cannot appear as actionable pending decisions',()=>{
+ const past='2000-01-01T00:00:00Z';
+ for(const change of [{expires_at:past},{details_json:JSON.stringify({deferred_action:{tool:'create_meeting',args:{start:past,end:'2000-01-01T00:25:00Z'}}})}]){
+   const row={...request,...change};const state=fixture([row])('UOWNER','UPEER','DPEER','thread');assert.equal(state.approvals[0].state,'expired');assert.equal(row.state,'awaiting_owner');
+ }
+});
 test('other people, owners, rooms, terminal requests and unrelated tasks are excluded',()=>{
   const changes=[{requester_slack_id:'UOTHER'},{owner_user_id:'UOTHER'},{kind:'task'},{state:'resolved'},
     {details_json:JSON.stringify({deferred_action:{tool:'send_email',args:{}}})}];

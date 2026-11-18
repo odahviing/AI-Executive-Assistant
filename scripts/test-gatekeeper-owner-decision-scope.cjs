@@ -11,10 +11,10 @@ function fixture(options={}){
  const changes=db.prepare('SELECT total_changes() AS n').get().n;
  const logger=Object.fromEntries(['info','warn','debug','error'].map(k=>[k,(...a)=>logs.push([k,...a])]));
  const client={messages:{create:async req=>{calls.push(req);
-  if(req.tools?.[0]?.input_schema?.properties?.verdict)return {stop_reason:'tool_use',content:[{type:'tool_use',name:'verdict',input:{verdict:'rewrite',minimalRedaction:'The request is recorded.',minimalRedactionPreservesRest:true}}]};
+  if(req.tools?.[0]?.input_schema?.properties?.verdict)return {stop_reason:'tool_use',content:[{type:'tool_use',name:'verdict',input:{verdict:'rewrite',remove_clauses:options.removeClauses??[{sentence:1,quote:'I booked it.'}],removal_verified:true}}]};
   if(req.tools?.some(t=>t.name==='verdict'))return {content:[{type:'tool_use',name:'verdict',input:{ok:true}}]};
   if(options.modelUnavailable)throw Error('model unavailable');
-  return {content:[{type:'text',text:JSON.stringify(options.claim??{claimed_action:false,action_type:null})}]};
+  return {content:[{type:'text',text:JSON.stringify(require('./fixtures/action-claim-verdict.cjs')(options.claim??{claimed_action:false,action_type:null},req))}]};
  }}};
  const mocks={
   'src/llm/client.ts':{getAnthropicClient:()=>client},'src/llm/models.ts':require('./load-test-models.cjs'),
@@ -68,4 +68,26 @@ test('repeated terminal read and fresh loader are read-only with identical evide
 test('shared daily thread retains distinct request decisions without a blanket grant',async()=>{
  const h=fixture({rows:[baseRow,{id:'req_other',subject:'Different pending request',state:'awaiting_owner',created_at:'2026-10-19 12:00:00',outcome_json:null}],claim:{claimed_action:true,action_type:'permission_granted',target_name:'Different requester'}});
  try{const draft='The different pending request is approved.';assert.notEqual(await h.run({},draft),draft);const p=h.contexts()[0];assert.ok(p.includes('"subject":"Oran post decision"'));assert.ok(p.includes('"subject":"Different pending request"'));assert.ok(p.includes('"approved":true'));assert.ok(p.includes('"approved":null'));assert.ok(p.includes('Require evidence for the SAME request/action'))}finally{h.close()}
+});
+
+test('confirmed profile hours survive the real summary and final checker input',async()=>{
+ const h=fixture();try{
+  const hours={in_force:true,timezone:'Asia/Jerusalem',window:'Tue 09:00–18:00, 20:30–22:30 Asia/Jerusalem'};
+  const receipt=h.turn.summarizeToolCall('update_person_profile',{colleague_name:'Yael',working_hours_structured:{operation:'add'}},{updated:true,name:'Yael',scheduling_hours:hours},'America/New_York');
+  assert.ok(receipt.includes('20:30–22:30'));assert.ok(receipt.includes('Asia/Jerusalem'));assert.ok(receipt.includes('mutated=other'));
+  const draft="Yael's Tuesday hours now include 20:30–22:30 Israel time.";
+  assert.equal(await h.run({result:{toolSummaries:[receipt]}},draft),draft);
+  assert.ok(h.contexts().some(text=>text.includes('20:30–22:30')));
+ }finally{h.close()}
+});
+
+test('a rejected or unchanged profile write does not acquire a causal mutation receipt',()=>{
+ const h=fixture();try{
+  for(const result of [{updated:false,name:'Yael',not_saved:['working_hours_structured'],scheduling_hours:{in_force:false}},
+    {updated:false,name:'Yael',already_set:['working_hours_structured'],scheduling_hours:{in_force:true,window:'Tue 09:00–18:00 Asia/Jerusalem'}}]){
+   const summary=h.turn.summarizeToolCall('update_person_profile',{colleague_name:'Yael',working_hours_structured:{week:{Tuesday:[]}}},result,'UTC');
+   assert.ok(!summary.includes('mutated='));assert.ok(summary.includes('updated=false'));
+   if(result.not_saved)assert.ok(summary.includes('not_saved'));
+  }
+ }finally{h.close()}
 });

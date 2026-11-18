@@ -1,0 +1,10 @@
+const {test}=require('node:test'),assert=require('node:assert/strict');
+const {harness,profile}=require('./test-gatekeeper-readiness.cjs');
+const sentences=['Booked your meeting with Alex at 14:30. ','The invitation has been sent to everyone you requested. ','I have taken care of all the details for this meeting and everything is now set up as requested. ','Would you like me to include the agenda?'];
+const draft=sentences.join('');
+const response=(keep,stop='tool_use')=>({stop_reason:stop,content:[{type:'tool_use',name:'verdict',input:{ok:true,keep_sentences:keep}}]});
+const run=(h,text=draft)=>h.human.runHumanGate(text,profile,'owner',undefined,false,false,undefined,undefined,'Book Alex at 14:30.');
+test('existing voice call requires a conciseness decision, without another model pass',async()=>{const h=harness([response([0,1,3])]);const out=await run(h);assert.equal(h.calls.length,1);assert.ok(h.calls[0].tools[0].input_schema.required.includes('keep_sentences'));assert.equal(out.rewrite,sentences[0]+sentences[1]+sentences[3]);});
+test('completed end_turn structured decision is usable',async()=>{const h=harness([response([0,1,3],'end_turn')]);assert.equal((await run(h)).rewrite,sentences[0]+sentences[1]+sentences[3]);});
+for(const [name,keep,stop] of [['question removal',[0,1]],['time removal',[1,3]],['unordered',[3,0]],['invalid',[0,99]],['empty',[]],['truncated',[0,1,3],'max_tokens']])test(name+' preserves the original answer',async()=>{assert.equal((await run(harness([response(keep,stop)]))).rewrite,null);});
+test('short replies and optional social content keep their original contract',async()=>{const h=harness([response([0])]);await run(h,'Booked.');assert.ok(!h.calls[0].tools[0].input_schema.required.includes('keep_sentences'));});

@@ -6,6 +6,7 @@ type Slot = {
   start: string; end: string; attendee_status?: Status[]; less_preferred_label?: string;
   broken_rule_label?: string; broken_rules?: string[]; attendee_conflicts?: unknown[];
   on_hold?: unknown; per_attendee_local?: { local_iso: string }[];
+  matches_time_preference?: boolean;
 };
 interface Display {
   locale: Locale;
@@ -26,7 +27,8 @@ export function renderOpenTimes(slots: Slot[], display: Display, attendees: stri
   const named = new Map<string, string>();
   let minutes: number | undefined;
   for (const slot of slots) {
-    if (slot.on_hold || slot.less_preferred_label || slot.broken_rules?.length || slot.broken_rule_label || slot.attendee_conflicts?.length) return;
+    if (slot.on_hold || slot.less_preferred_label || slot.broken_rules?.length || slot.broken_rule_label || slot.attendee_conflicts?.length
+      || slot.matches_time_preference === false) return;
     const zone = zoneFor(slot.start);
     const start = DateTime.fromISO(slot.start, { zone }).setLocale(locale);
     const end = DateTime.fromISO(slot.end, { zone }).setLocale(locale);
@@ -59,17 +61,17 @@ export function renderOpenTimes(slots: Slot[], display: Display, attendees: stri
     rows.push({ day: start.toFormat(he ? 'ccc d.M' : 'ccc d LLL') + ' (' + start.toFormat('ZZZZ') + ')',
       clock: start.toFormat('HH:mm'), instant:start.toMillis(), facts });
   }
-  // Keep the supplied preference order. Combine only adjacent, equally
-  // qualified options on the same local date. A fact common to every time is
-  // disclosed once; days that return later in the ranking retain their place.
+  // Selection keeps the scheduling preference ranking. Presentation is
+  // chronological, so one day does not reappear across a confusing list.
+  // Per-option qualifications stay attached when rows move.
   if (display.singleZoneOptions) {
     // For an ordinary availability question show the actual usable choices.
     // Keep uncertainty when none are confirmed free. Other presentations
     // retain their full ranked results and per-person disclosures.
     const confirmed = rows.filter(row => !row.facts.length);
     if (confirmed.length) rows.splice(0, rows.length, ...confirmed);
-    rows.sort((a,b) => a.instant - b.instant);
   }
+  rows.sort((a,b) => a.instant - b.instant);
   const shared = rows[0].facts.filter(fact => rows.every(row => row.facts.includes(fact)));
   const groups: Array<{ day: string; clocks: string[]; caveat: string }> = [];
   for (const row of rows) {

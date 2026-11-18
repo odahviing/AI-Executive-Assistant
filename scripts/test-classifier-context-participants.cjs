@@ -1,3 +1,10 @@
+// Fixture migration: combine the old independent labels into one provider response.
+// This does not call a provider twice; stop reason applies to the whole response.
+function singleClassification(first, interpretation) {
+ const primary=first.content.find(b=>b.type==='tool_use');
+ const route=interpretation.content.find(b=>b.type==='tool_use');
+ return {...first,stop_reason:interpretation.stop_reason,content:[{...primary,input:{...primary.input,meeting_request_route:route.input}}]};
+}
 // Run: node --test scripts/test-classifier-context-participants.cjs
 // Baseline replay: node scripts/test-classifier-context-participants.cjs --before
 //
@@ -17,6 +24,7 @@ const revisionAt = process.argv.indexOf('--source-revision');
 const sourceRevision = revisionAt >= 0 ? process.argv[revisionAt + 1] : null;
 
 function source(rel) {
+  if (process.env.CLASSIFIER_BEFORE) return fs.readFileSync(process.env.CLASSIFIER_BEFORE, 'utf8');
   if (process.argv.includes('--before')) return fs.readFileSync(path.join(repo, 'artifacts/workshop-verification/opportunities-20261026/librarian/classifyTurn.before.ts'), 'utf8');
   if (sourceRevision) return cp.execFileSync('git', ['show', `${sourceRevision}:${rel}`], { cwd: repo, encoding: 'utf8' });
   return fs.readFileSync(path.join(repo, rel), 'utf8');
@@ -46,6 +54,114 @@ function loadClassifier() {
 
 
 const profile = {user:{name:'Owner Example'},assistant:{name:'Maelle'},skills:{}};
+
+for(const [label,operation,quote,expected] of [
+ ['existing status','read','Is my Thursday call approved?',true],
+ ['different question','read','A different question',false],
+ ['requested move','move','Is my Thursday call approved?',false],
+])test('existing status routing '+label,async()=>{
+ const message='Is my Thursday call approved?';let calls=0;
+ const result=await loadClassifier()({profile,message,senderRole:'colleague',needIntent:false,needScopes:false,needMeetingPeople:true,meetingContextMessages:[],
+  anthropic:{messages:{create:async req=>{calls++;return {stop_reason:'tool_use',content:[{type:'tool_use',name:req.tools[0].name,input:({...{meeting_action:'explore',request_relation:'new',request_clock_zone:{quote:'Thursday',zone:'America/New_York'}},meeting_request_route:{route:'B',calendar_operation:operation,instruction:null,consultClause:null,existing_meeting_quote:'my Thursday call',existing_status_quote:quote}})}]};}}}});
+ assert.equal(result.existingStatusQuote,expected?message:undefined);
+ if(expected)assert.equal(result.requestUpdate.clockZone,undefined);
+ assert.equal(calls,1);
+});
+
+for(const [label,operation,subject,expected] of [
+ ['prior invitation','read','Idan, Chris and Scott',true],
+ ['invented title','read','Other appointment',false],
+ ['write cannot borrow read authority','move','Idan, Chris and Scott',false],
+])test('a short existing-event reply binds its read target to the actual prior message: '+label,async()=>{
+ const message='you can book';let calls=0;
+ const result=await loadClassifier()({profile,message,senderRole:'colleague',needIntent:false,needScopes:false,needMeetingPeople:true,
+  meetingContextMessages:[{role:'assistant',content:'I booked "Idan, Chris and Scott" for Monday 11:00. Tell me if that works.'}],
+  anthropic:{messages:{create:async req=>({stop_reason:'tool_use',content:[{type:'tool_use',name:req.tools[0].name,input:(++calls,({...{meeting_action:'execute',request_relation:'continue'},meeting_request_route:{route:'B',calendar_operation:operation,instruction:null,consultClause:null,existing_meeting_quote:subject,existing_status_quote:message}}))}]})}}});
+ assert.equal(result.existingStatusQuote,expected?message:undefined);
+ assert.equal(result.existingMeetingQuote,expected?subject:undefined);
+ assert.equal(result.exactBookingQuote,undefined);
+});
+
+for(const [label,route,message,clause,stop,expected] of [
+ ['booking and consultation','E','Book it and confirm with Owner.','confirm with Owner','tool_use',true],
+ ['move and consultation','B','Move it after checking with Owner.','checking with Owner','tool_use',true],
+ ['availability only','B','Could we move it to Thursday?',null,'tool_use',false],
+ ['invented consultation','E','Book it.','check with Owner','tool_use',false],
+ ['truncated consultation','E','Book it and confirm with Owner.','confirm with Owner','max_tokens',false],
+])test('owner consultation is independent of calendar route: '+label,async()=>{
+ const result=await loadClassifier()({profile,message,senderRole:'colleague',needIntent:true,needScopes:false,needMeetingPeople:true,
+  meetingContextMessages:[],anthropic:{messages:{create:async request=>singleClassification({stop_reason:'tool_use',content:[{type:'tool_use',name:'classify_turn',input:{kind:'task',meeting_action:'execute',request_relation:'new',meeting_people:[]}}]},{stop_reason:stop,content:[{type:'tool_use',name:'invitation_route',input:{route,locale:'en',subject:'Review',calendar_operation:'move',instruction:message,consultClause:clause}}]})}}});
+ assert.equal(result.consultOwnerQuote,expected?message:undefined);
+});
+
+for(const [label,route,quote,expected] of [
+ ['explicit existing reference','B','our weekly',true],
+ ['invented existing reference','B','the quarterly review',false],
+ ['new booking','E','our weekly',false],
+])test('existing meeting identity requires a literal source: '+label,async()=>{
+ const result=await loadClassifier()({profile,message:'Can we move our weekly to Tuesday?',senderRole:'colleague',needIntent:true,needScopes:false,needMeetingPeople:true,
+  meetingContextMessages:[],anthropic:{messages:{create:async request=>singleClassification({stop_reason:'tool_use',content:[{type:'tool_use',name:'classify_turn',input:{kind:'task',meeting_action:'explore',request_relation:'new',meeting_people:[]}}]},{stop_reason:'tool_use',content:[{type:'tool_use',name:'invitation_route',input:{route,locale:'en',subject:'weekly',calendar_operation:'read',instruction:null,existing_meeting_quote:quote,consultClause:null}}]})}}});
+ assert.equal(result.existingMeetingQuote,expected?quote:undefined);
+});
+
+for(const [label,operation,instruction,initial,stop,expected] of [
+ ['selected move','move','16:15 works','explore','tool_use','execute'],
+ ['availability question','read',null,'execute','tool_use','explore'],
+ ['invented instruction','move','different human message','explore','tool_use','explore'],
+ ['truncated decision','move','16:15 works','explore','max_tokens','explore'],
+])test('existing-meeting route preserves its actual requested operation '+label,async()=>{
+ const message='16:15 works',history=[{role:'user',content:'Move our Wednesday meeting to Tuesday.'},
+  {role:'assistant',content:'Tuesday at 16:15 or 17:15 is available. Which replacement should I use?'}];
+ const result=await loadClassifier()({profile,message,senderRole:'colleague',needIntent:true,needScopes:false,needMeetingPeople:true,
+  meetingContextMessages:history,anthropic:{messages:{create:async request=>singleClassification({stop_reason:'tool_use',content:[{type:'tool_use',name:'classify_turn',input:{kind:'task',meeting_action:initial,request_relation:'continue',meeting_continuation:true,meeting_people:[]}}]},{stop_reason:stop,content:[{type:'tool_use',name:'invitation_route',input:{route:'B',locale:'en',subject:'Wednesday meeting',calendar_operation:operation,instruction}}]})}}});
+ assert.equal(result.meetingAction,expected);
+});
+test('an explored date is carried separately from a required deadline',async()=>{
+ const {result}=await run({request_relation:'new',search_day:{kind:'calendar_date',date:'2026-11-24',quote:'Tuesday 24.11'}},{message:'How about Tuesday 24.11?',senderRole:'owner'});
+ assert.deepEqual(result.requestUpdate.searchDay,{date:'2026-11-24',quote:'Tuesday 24.11'});
+ assert.equal(result.requestUpdate.dayChange,undefined);
+});
+
+for(const [relation,prior,expected,batch] of [['batch',undefined,'new',true],['new',undefined,'new',false],['continue',{original:'Move our PPC meeting',updates:[],requestId:'active'},'continue',false]])
+test('the complete operation route also repairs contradictory request identity: '+relation,async()=>{
+ const message='Move PPC later and put Tal in that time';let calls=0;
+ const result=await loadClassifier()({profile,message,senderRole:'colleague',needIntent:true,needScopes:false,needMeetingPeople:true,
+  priorMeetingRequest:prior,meetingContextMessages:[],anthropic:{messages:{create:async request=>{calls++;
+   return {stop_reason:'tool_use',content:[{type:'tool_use',name:request.tools[0].name,input:({...{kind:'task',meeting_action:'explore',request_relation:'other',meeting_continuation:false,meeting_people:['Tal']},meeting_request_route:{route:'B',request_relation:relation,calendar_operation:'move',instruction:message,existing_meeting_quote:'PPC',locale:'en',consultClause:null}})}]};
+  }}}});
+ assert.equal(calls,1,'one response owns operation and request identity');
+ assert.equal(result.meetingAction,'execute');assert.equal(result.requestUpdate?.relation,expected);assert.equal(result.requestUpdate?.batch,batch);
+ assert.equal(result.meetingContinuation,relation==='continue');
+});
+
+for(const [stop,instruction] of [['max_tokens','Move PPC later'],['tool_use','Invented instruction']])test('an unbound route cannot manufacture a request identity '+stop,async()=>{
+ const message='Move PPC later';
+ const result=await loadClassifier()({profile,message,senderRole:'colleague',needIntent:true,needScopes:false,needMeetingPeople:true,meetingContextMessages:[],
+ anthropic:{messages:{create:async request=>singleClassification({stop_reason:'tool_use',content:[{type:'tool_use',name:'classify_turn',input:{kind:'task',meeting_action:'explore',request_relation:'other'}}]},{stop_reason:stop,content:[{type:'tool_use',name:'invitation_route',input:{route:'B',request_relation:'new',calendar_operation:'move',instruction,existing_meeting_quote:'PPC'}}]})}}});
+ assert.equal(result.requestUpdate,undefined);
+});
+
+test('an acceptance with a typo is bound as a literal schema choice, not retyped by the route',async()=>{
+ const message='16:15 זה מצויים';let routeSchema;
+ const result=await loadClassifier()({profile,message,senderRole:'colleague',needIntent:true,needScopes:false,needMeetingPeople:true,meetingContextMessages:[],
+ anthropic:{messages:{create:async request=>{
+  routeSchema=request.tools[0].input_schema.properties.meeting_request_route;
+  return {stop_reason:'tool_use',content:[{type:'tool_use',name:'classify_turn',input:{kind:'task',meeting_action:'explore',request_relation:'continue',meeting_request_route:{route:'B',request_relation:'new',calendar_operation:'move',instruction:message,existing_meeting_quote:'16:15'}}}]};
+ }}}});
+ assert.deepEqual(JSON.parse(JSON.stringify(routeSchema.properties.instruction.enum)),[message,null]);
+ assert.equal(result.meetingAction,'execute');
+});
+test('an invented date quote cannot change the search context',async()=>{
+ const {result}=await run({request_relation:'new',search_day:{kind:'calendar_date',date:'2026-11-24',quote:'Tuesday 24.11'}},{message:'What about 16:00?',senderRole:'owner'});
+ assert.equal(result.requestUpdate.searchDay,undefined);
+});
+test('short owner answer binds only to a verbatim question in the last assistant message',async()=>{
+ const question='Should I tag both as Meeting?';
+ const args={message:'yes both',senderRole:'owner',meetingContextMessages:[{role:'assistant',content:'Which call should move? '+question}]};
+ assert.equal((await run({answered_question:question},args)).result.answeredQuestion,question);
+ assert.equal((await run({answered_question:'Cancel both meetings.'},args)).result.answeredQuestion,undefined);
+ assert.equal((await run({answered_question:question},{...args,senderRole:'colleague'})).result.answeredQuestion,undefined);
+});
 
 const alex = 'Customer success status with Alex';
 const ayalla = 'Customer success with Ayalla';
@@ -156,6 +272,48 @@ async function run(raw, extra = {}, response = {}) {
   });
   return { result:JSON.parse(JSON.stringify(result)), captured, calls };
 }
+
+test('a short explicit calendar request retains the scope from the classification already performed',async()=>{
+ const {result,calls}=await run({scopes:['calendar'],meeting_action:'explore',request_relation:'new'},
+  {message:'All meetings',needScopes:true});
+ assert.deepEqual(result.scope,{scopes:['calendar'],source:'classifier'});assert.equal(calls,1);
+});
+
+for(const message of ['Read above.','תקראי למעלה.'])test('a correction retains the same request context without new action authority: '+message,async()=>{
+ const {result}=await run({kind:'other',conversation_state:'open',meeting_action:'none',request_relation:'other',meeting_continuation:false,participants_unchanged:true,standalone_courtesy:false},
+  {message,priorMeetingRequest:{original:'Craig at the default length; Adam for 45 minutes',updates:[]}});
+ assert.equal(result.requestUpdate.relation,'continue');assert.equal(result.meetingContinuation,true);assert.equal(result.meetingAction,'none');
+});
+for(const correction of [{standalone_courtesy:true},{request_relation:'new'},{scopes:['knowledge']}])test('unrelated work or courtesy does not inherit the prior meeting: '+JSON.stringify(correction),async()=>{
+ const {result}=await run({meeting_action:'none',request_relation:'other',participants_unchanged:true,...correction},
+  {message:'Different topic',priorMeetingRequest:{original:'Book Craig',updates:[]}});
+ assert.equal(result.requestUpdate,undefined);assert.equal(result.meetingContinuation,false);
+});
+
+test('one malformed approval citation does not discard a separately grounded decision',async()=>{
+ const first={candidateIndex:0,disposition:'amend_or_search',instructionQuote:'Move Paul',sourceMessageIndex:0,sourceQuote:'Invented question prefix: Chris and Paul'};
+ const second={candidateIndex:1,disposition:'approve_existing',instructionQuote:'approve Adam',sourceMessageIndex:0,sourceQuote:'Chris and Adam'};
+ const args={senderRole:'owner',message:'Move Paul; approve Adam',approvalCandidates:[
+  {subject:'Chris and Paul',action:{tool:'create_meeting',args:{subject:'Chris and Paul'}}},
+  {subject:'Chris and Adam',action:{tool:'create_meeting',args:{subject:'Chris and Adam'}}},
+ ],meetingContextMessages:[{role:'assistant',content:'Chris and Paul needs a new time; Chris and Adam is ready.'}]};
+ const {result,captured}=await run({meeting_action:'execute',approval_decisions:[first,second]},args);
+ assert.deepEqual(result.approvalDecisions,[second]);
+ const variants=captured.tools[0].input_schema.properties.approval_decisions.items.oneOf;
+ assert.deepEqual([...variants[0].properties.sourceQuote.enum],['Chris and Paul']);
+ assert.deepEqual([...variants[1].properties.sourceQuote.enum],['Chris and Adam']);
+ const valid={...first,sourceQuote:'Chris and Paul'};
+ assert.equal((await run({meeting_action:'execute',approval_decisions:[valid,second]},args)).result.approvalDecisions.length,2);
+ assert.deepEqual((await run({meeting_action:'execute',approval_decisions:[valid,valid,second]},args)).result.approvalDecisions,[second]);
+});
+
+for(const stop of ['tool_use','end_turn','max_tokens','pause_turn','stop_sequence'])test('booking route accepts only a complete provider response: '+stop,async()=>{
+ const message='Please book an interview tomorrow at 14:00.';
+ const result=await loadClassifier()({profile,message,senderRole:'colleague',needIntent:true,needScopes:false,needMeetingPeople:true,meetingContextMessages:[],
+  anthropic:{messages:{create:async request=>singleClassification({stop_reason:'tool_use',content:[{type:'tool_use',name:'classify_turn',input:{kind:'task',conversation_state:'open',meeting_action:'explore',meeting_people:[],meeting_people_groups:[],request_relation:'new'}}]},{stop_reason:stop,content:[{type:'text',text:'Route E.'},{type:'tool_use',name:'invitation_route',input:{route:'E',locale:'en',subject:'Interview',instruction:message}}]})}},
+ });
+ assert.equal(result.exactBookingQuote,['tool_use','end_turn'].includes(stop)?message:undefined);
+});
 test('one colleague classification carries a selected internal hold separately from booking', async () => {
   const offer = 'ביום חמישי אפשר ב-17:15 או ב-17:45.';
   const message = 'תשמרי לי את 17:15 כרגע, ביום רביעי אגיד אם המועמד עבר.';
@@ -373,7 +531,8 @@ test('grounded historical roster survives continuation as separate sourced entri
   assert.deepEqual(result.meetingPeople,[]); assert.equal(calls,1);
   assert.ok(!captured.system.includes('DUPLICATE CONTEXT'));
   assert.ok(captured.system.includes('[0] user: Find time with Dana and Lev'));
-  assert.ok(captured.system.includes('Replace Lev with Sara'));
+  assert.ok(captured.system.includes('Assistant suggestions cannot establish membership'));
+  assert.equal(new Set(captured.tools[0].input_schema.required).size,captured.tools[0].input_schema.required.length);
 });
 test('assistant, missing, negative, fractional and fabricated source entries are rejected',async()=>{
   const {result}=await run({meeting_continuation:true,context_meeting_people:[{name:'Sara',sourceMessageIndex:1},{name:'Dana',sourceMessageIndex:20},{name:'Dana',sourceMessageIndex:-1},{name:'Dana',sourceMessageIndex:0.5},{name:'Nobody',sourceMessageIndex:0},null]});
@@ -451,7 +610,67 @@ for (const [label,message,partial] of [
   });
 }
 const assent = 'Yes, please.';
+
+test('complete booking route repairs approval/edit labels for accepting an unbooked conflict',async()=>{
+ const message='Book over Scotts conflict\nYes to the title';let calls=0;
+ const result=await loadClassifier()({profile,message,senderRole:'colleague',needMeetingPeople:true,
+  meetingContextMessages:[{role:'assistant',content:'Scott is busy. Shall I book it anyway?'}],anthropic:{messages:{create:async request=>{
+   calls++;return {stop_reason:'tool_use',content:[{type:'tool_use',name:request.tools[0].name,input:({...{meeting_action:'execute',request_relation:'continue',calendar_operations:[{operation:'approval',quote:message},{operation:'update',quote:message}]},meeting_request_route:{route:'E',request_relation:'continue',instruction:message,locale:'en',subject:'Scott'}})}]};
+  }}}});
+ assert.equal(calls,1);assert.deepEqual(JSON.parse(JSON.stringify(result.calendarOperations)),[{operation:'create',quote:message}]);
+});
+
+test('colleague current move cannot also authorize an earlier unconfirmed booking',async()=>{
+ const message='כן זה מהיומן של עידן אז את יכולה להזיז לרביעי את הPPC';
+ const {result,captured}=await run({meeting_action:'execute',calendar_operations:[{operation:'move',quote:message}]},{senderRole:'colleague',message,meetingContextMessages:undefined});
+ assert.ok(captured.tools[0].input_schema.required.includes('calendar_operations'));
+ assert.deepEqual(result.calendarOperations,[{operation:'move',quote:message}]);
+});
+test('multi-line owner actions select a real current-message span instead of reconstructing it',async()=>{
+ const message='19:00 Israel time\nWith Alpha and Beta\nProject review\n25 minutes';
+ const {captured,result}=await run({meeting_action:'execute',calendar_operations:[{operation:'create',quote:message}]},{senderRole:'owner',message});
+ const choices=captured.tools[0].input_schema.properties.calendar_operations.items.properties.quote.enum;
+ assert.ok(choices.includes(message));assert.ok(choices.includes('19:00 Israel time'));
+ assert.ok(choices.every(quote=>message.includes(quote)));
+ assert.equal(result.meetingAction,'execute');assert.equal(result.calendarOperations[0].quote,message);
+});
+for(const [message,quote] of [
+ ['Ok move the two\nMeetings','Ok move the two Meetings'],
+ ['תזיזי את\nשתי הפגישות','תזיזי את שתי הפגישות'],
+ ['Move\tWeekly\u00a0to Tuesday.','Move Weekly to Tuesday.'],
+])test('whitespace-normalized operation is rebound to actual human text '+JSON.stringify(message),async()=>{
+ const {result}=await run({meeting_action:'execute',calendar_operations:[{operation:'move',quote}]},{senderRole:'owner',message});
+ assert.equal(result.meetingAction,'execute');
+ assert.equal(result.calendarOperations[0].quote,message);
+});
+for(const quote of ['Move the three Meetings','Book the two Meetings','Move it to alice@example.test'])test('source binding preserves words and addresses '+quote,async()=>{
+ const {result}=await run({meeting_action:'execute',calendar_operations:[{operation:'move',quote}]},
+ {senderRole:'owner',message:'Move the two\nMeetings to bob@example.test'});
+ assert.equal(result.meetingAction,'explore');
+ assert.deepEqual(result.calendarOperations,[]);
+});
 const evidence = acceptance(assent);
+test('a source-bound standalone approval survives an empty ordinary operation list',async()=>{
+ const {result}=await run({...evidence,calendar_operations:[]},{...currentBooking,message:assent});
+ assert.equal(result.standaloneApprovalQuote,assent);
+ assert.equal(result.meetingAction,'execute');
+ assert.deepEqual(result.calendarOperations,[]);
+});
+for(const disposition of ['approve_existing','reject'])test('a grounded pending '+disposition+' survives empty ordinary operations',async()=>{
+ const decision={candidateIndex:0,disposition,instructionQuote:assent,sourceMessageIndex:0,sourceQuote:'project review'};
+ const {result}=await run({...evidence,standalone_approval_quote:null,calendar_operations:[],approval_decisions:[decision]},
+  {...currentBooking,message:assent});
+ assert.equal(result.standaloneApprovalQuote,undefined);
+ assert.equal(result.approvalDecisions.length,1);
+ assert.equal(result.meetingAction,'execute');
+});
+test('a source-invalid pending decision does not open writes through the aggregate label',async()=>{
+ const {result}=await run({...evidence,standalone_approval_quote:null,calendar_operations:[],approval_decisions:[
+  {candidateIndex:0,disposition:'approve_existing',instructionQuote:assent,sourceMessageIndex:0,sourceQuote:'imaginary meeting'},
+ ]},{...currentBooking,message:assent});
+ assert.equal(result.meetingAction,'explore');
+ assert.deepEqual(result.approvalDecisions,[]);
+});
 const namedDecision = {candidateIndex:0,instructionQuote:assent,sourceMessageIndex:0,sourceQuote:'project review'};
 for (const [label,patch] of [
   ['missing quote',{standalone_approval_quote:undefined}],['non-text quote',{standalone_approval_quote:true}],
@@ -517,6 +736,24 @@ for(const [label,message,quote] of [
   assert.equal(result.meetingAction,'explore');
   assert.equal(result.requestedHoldQuote,undefined);
 });
+test('a quoted explicit clock phrase retains its zone inside a longer booking request',async()=>{
+  const message='7pm Israel time\nme <@U03MN44KQAE>\n“Offensive hub priority”\n25 mins';
+  const {result}=await run({meeting_action:'execute',meeting_people_groups:[['<@U03MN44KQAE>']],
+    exact_request_clock:{clock:'19:00',zone:'Asia/Jerusalem',quote:'7pm Israel time'},
+    request_clock_zone:{zone:'Asia/Jerusalem',quote:'Israel time'}},{message});
+  assert.deepEqual(result.exactRequestClock,{clock:'19:00',zone:'Asia/Jerusalem',quote:message});
+});
+test('an exact clock extraction does not require a second redundant timezone extraction',async()=>{
+  const message='7pm Israel time\nme <@U03MN44KQAE>\n“Offensive hub priority”\n25 mins';
+  const {result}=await run({meeting_action:'execute',meeting_people_groups:[['<@U03MN44KQAE>']],
+    exact_request_clock:{clock:'19:00',zone:'Asia/Jerusalem',quote:'7pm Israel time'}},{message});
+  assert.deepEqual(result.exactRequestClock,{clock:'19:00',zone:'Asia/Jerusalem',quote:message});
+});
+for(const [name,quote,zone] of [['absent phrase','8pm Israel time','Asia/Jerusalem'],['zone omitted','7pm','Asia/Jerusalem'],['conflicting zone','7pm Israel time','America/New_York']])test('partial clock quotation rejects '+name,async()=>{
+  const {result}=await run({meeting_action:'execute',exact_request_clock:{clock:'19:00',zone,quote},request_clock_zone:{zone:'Asia/Jerusalem',quote:'Israel time'}},{message:'Book 7pm Israel time for 25 minutes.'});
+  assert.equal(result.exactRequestClock,undefined);
+});
+
 test('participant correction binds the old group member to a current human quote',async()=>{
   const correction={group:0,from:'Ayalla',to:'Ayala',quote:'2. Ayala is better'};
   const {result}=await run({meeting_action:'execute',participant_corrections:[correction]},
@@ -563,4 +800,27 @@ for (const clock of [
 ]) test('ungrounded exact clock is discarded '+JSON.stringify(clock), async () => {
   const {result}=await run({meeting_action:'execute',exact_request_clock:clock},{message:'Book at 7pm Israel time'});
   assert.equal(result.exactRequestClock,undefined);
+});
+
+for(const [role,quote,expected]of [['owner','Ask Alex',true],['owner','Another message',false],['colleague','Ask Alex',false]])test('outreach quote respects authenticated owner and source '+role+' '+quote,async()=>{
+ const {result}=await run({owner_outreach_quote:quote},{message:'Ask Alex',senderRole:role});
+ assert.equal(result.ownerOutreachQuote,expected?'Ask Alex':undefined);
+});
+
+for(const [role,quote,expected]of [['owner','If she is free, move it',true],['owner','Invented request',false],['colleague','If she is free, move it',false]])test('availability condition is source bound '+role+' '+quote,async()=>{
+ const {result}=await run({require_availability_quote:quote},{message:'If she is free, move it',senderRole:role});
+ assert.equal(result.requireAvailabilityQuote,expected?'If she is free, move it':undefined);
+});
+
+test('self participant confirmation binds only a stored name and literal current evidence',async()=>{
+ const args={senderRole:'colleague',message:'yes, Daniel is me',priorMeetingRequest:{original:'Book Daniel and Sara',updates:[],participantGroups:[['Daniel','Sara']]}};
+ const a=await run({request_relation:'continue',self_participant:{name:'Daniel',quote:'Daniel is me'}},args);assert.deepEqual(a.result.selfParticipant,{name:'Daniel',quote:'Daniel is me'});
+ for(const patch of [{senderRole:'owner'},{message:'no'},{priorMeetingRequest:{original:'Book Sara',updates:[],participantGroups:[['Sara']]}}])assert.equal((await run({self_participant:{name:'Daniel',quote:'Daniel is me'}},{...args,...patch})).result.selfParticipant,undefined);
+});
+
+for(const selection of [0,1,99])test('request selection uses only a supplied history candidate: '+selection,async()=>{
+ const seen=[],requests=[{requestId:'sunday',original:'Book Branding with Tal on Sunday',updates:[],duration:{minutes:40,quote:'40 minutes'}},{requestId:'ppc',original:'Move the PPC meeting',updates:[],existingMeeting:{sourceQuote:'PPC'}}];
+ const result=await loadClassifier()({profile:{...profile,user:{...profile.user,timezone:'UTC'}},message:'Please book that Sunday meeting',senderRole:'owner',needIntent:false,needScopes:false,needMeetingPeople:true,priorMeetingRequest:requests[1],recentMeetingRequests:requests,meetingContextMessages:[{role:'assistant',content:'Sunday Branding is ready to book. PPC is a separate pending move.'}],anthropic:{messages:{create:async req=>{seen.push(req);return {stop_reason:'tool_use',content:[{type:'tool_use',name:'classify_turn',input:{request_selection:selection,request_relation:'continue',meeting_action:'execute',calendar_operations:[{operation:'create',quote:'Please book that Sunday meeting'}],meeting_people:[],meeting_people_groups:[],participants_unchanged:true}}]};}}}});
+ assert.equal(result.selectedRequestId,requests[selection]?.requestId);assert.equal(result.requestUpdate.relation,'continue');assert.equal(seen.length,1);
+ assert.ok(seen[0].tools[0].input_schema.required.includes('request_selection'));
 });

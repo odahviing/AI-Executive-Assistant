@@ -19,10 +19,14 @@ export function meetingScopedAttendees(
   const normalize = (email: string) => email.trim().toLowerCase();
   const rosters = groups.map(group => [...new Set(group.emails.map(normalize))]);
   if (rosters.length === 0) return null;
-  if (rosters.length === 1) return rosters[0];
   const known = new Set(rosters.flat());
   const explicit = explicitEmails.map(normalize).filter(email => email
     && email !== normalize(ownerEmail) && email !== (requesterEmail ? normalize(requesterEmail) : undefined));
+  // One stored group can still be the wrong meeting. An explicit different
+  // recipient cannot acquire every attendee of that stale group. Requester-
+  // only calls and groups with an unresolved external member remain valid.
+  if (rosters.length === 1) return explicit.length && !groups[0].unresolvedNames.length
+    && !explicit.some(email=>known.has(email)) ? null : rosters[0];
   if (explicit.length === 0) return null;
   const knownExplicit = explicit.filter(email => known.has(email));
   const hasUnknown = explicit.some(email => !known.has(email));

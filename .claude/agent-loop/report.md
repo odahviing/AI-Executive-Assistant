@@ -24,9 +24,5 @@
 
 | Lane · ref | What happened | Your options | Risk |
 |---|---|---|---|
-| handyman · nov13-boston-office-location | bug: config/users/idan.yaml:189,356 incorrect office city for owner (1 retained example) | Not verified; review or repair required | Not assessed |
-
-### Framework work (1 open)
-
-- X234 — verification-unproven: Stale citation checker reports heuristic body-anchor distance as proven stale — approved-batch-20261004-X234-a1 — Framework behavioral pass. Inspection confirms detector, scope selection and blocking exit unchanged; suspected declaration-distance drift is no longer called proven semantic error. Executed16 cases cover body/declaration/use/weak/unresolved/EOF, unrelated diff filtering, mixed categories and strict exits. Synchronous CLI has no product caller, persisted state, background lifecycle or external action. Heuristic positional results still require human semantic review.
+| handyman · nov13-boston-office-location | bug: The originally reported wrong office city is already corrected in local and deployed private configuration. (1 retained example) | Not verified; review or repair required | Not assessed |
 

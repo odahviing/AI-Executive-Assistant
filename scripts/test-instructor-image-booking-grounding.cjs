@@ -80,24 +80,18 @@ test('attached-image title and roster facts are first-class subject sources', ()
 
 test('explicit purpose and actual participants ground the subject', () => {
   assert.match(description, /explicit title or purpose/i);
-  assert.match(description, /name exactly the participants included/i);
+  assert.match(description, /actual participants/i);
   assert.match(subjectDescription, /explicit title or purpose/i);
   assert.match(subjectDescription, /actual participants/i);
 });
 
 test('a stated exclusion constrains both attendee set and title', () => {
-  assert.match(description, /excludes someone or a group/i);
+  assert.match(subjectDescription, /Respect stated exclusions/i);
   assert.match(description, /exclusion applies to both the attendee set and the subject/i);
 });
 
-test('ordinary text keeps its named title authoritative', () => {
-  assert.match(description, /ordinary text and images follow the same rule/i);
-  assert.match(description, /Positioning with Einav/);
-});
-
 test('legitimate multi-person requests retain every named participant', () => {
-  assert.match(description, /multi-person meeting names every participant explicitly included/i);
-  assert.match(description, /Strategy with Anna and Ben/);
+  assert.match(tool.input_schema.properties.attendees.description, /Preserve all requested participants/i);
   const attendees = tool.input_schema.properties.attendees;
   assert.equal(attendees.type, 'array');
   assert.deepEqual(Array.from(attendees.items.required), ['name']);
@@ -105,23 +99,20 @@ test('legitimate multi-person requests retain every named participant', () => {
 });
 
 test('message and calendar actions remain separate completion obligations', () => {
-  assert.match(description, /message_colleague completes only the message/i);
-  assert.match(description, /create_meeting completes the calendar action/i);
-  assert.match(description, /unavailable, fails, or has an unknown result/i);
-  assert.match(description, /calendar part remains incomplete/i);
+  assert.match(description, /calendar booking and a separately requested message need their own successful operations/i);
+  assert.match(description, /failure remains incomplete/i);
 });
 
 test('external missing-subject flow still asks before booking', () => {
-  assert.match(description, /with an EXTERNAL on the invite, ASK for a real subject BEFORE create_meeting/i);
-  assert.match(description, /batched with other missing fields; a later rename sends a second notification/i);
+  assert.match(description, /external invitation needs its real purpose and confirmed recipient address/i);
+  assert.match(description, /gather genuinely missing details together/i);
 });
 
-test('colleague missing-subject flow still asks instead of inventing', () => {
-  assert.match(description, /On the COLLEAGUE path/);
-  assert.match(description, /instead of inventing a placeholder/i);
+test('internal missing-topic flow uses the actual participant roster', () => {
+  assert.match(description, /internal meeting with no purpose, a title naming its actual participants suffices/i);
 });
 
 test('shared invite fields remain English-only', () => {
-  assert.match(subjectDescription, /ENGLISH ONLY/);
-  assert.match(description, /keep subject \+ body in English/i);
+  assert.match(subjectDescription, /English title/);
+  assert.match(description, /Keep subject and any supplied body in English/i);
 });

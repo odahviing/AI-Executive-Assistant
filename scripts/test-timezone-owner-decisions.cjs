@@ -280,3 +280,11 @@ test('read-only uncertain-write verifier reports unresolved historical clock wit
 });
 }
 module.exports={harness};
+
+test('a mixed-zone booking attributes each attendee clock instead of assigning the foreign clock to everyone',()=>{
+ const h=harness({ownerZone:'America/New_York',travel:null,otherPeople:[{person_id:'p2',email:'boston@example.test',timezone:'America/New_York'}]});
+ const display=h.availability.presentationLocalFieldFor([h.person.email,'boston@example.test'],'2026-12-01T09:45:00-05:00',h.profile.user.email,h.profile.user.timezone,h.profile);
+ assert.ok(display.per_attendee_local.some(p=>p.email==='boston@example.test'&&p.local_display.includes('09:45')));
+ assert.ok(display.per_attendee_local.some(p=>p.email===h.person.email&&p.local_display.includes('16:45')));
+ assert.ok(display.clock_display.includes('boston@example.test:'));
+});

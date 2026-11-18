@@ -66,6 +66,7 @@ test('control scheduled message does not pretend requester received it', async (
 test('queued completion notice retains delivery status instead of reversing owner completion', async () => {
   const h = setup({
     execution:{status:'tracked',result:{ok:true,scheduled:true,jobId:'out_later'}},
+    modelText:'The quote is with Idan; I will let you know when he decides.',
     row:{subject:'Sign Starz Renewal quote',details_json:JSON.stringify({
       question:'Can you sign the renewal quote?',
       deferred_action:action('COLLEAGUE','Idan signed the renewal quote.'),
@@ -77,10 +78,8 @@ test('queued completion notice retains delivery status instead of reversing owne
   assert.match(r.effect,/message scheduled and awaiting delivery/);
   assert.match(h.effects.sends[0].body,/message.*scheduled.*delivery/);
   assert.doesNotMatch(h.effects.sends[0].body,/action.*not completed|scheduled to be signed/);
-  const composed = h.effects.modelInputs.find(input=>input.messages[0].content.includes('Their request:'));
-  assert.ok(composed);
-  assert.ok(composed.messages[0].content.includes('This was sending a message.'));
-  assert.ok(composed.messages[0].content.includes('The message is scheduled and awaiting delivery.'));
+  assert.equal(r.requester_notice,'message_pending');
+  assert.equal(h.effects.modelInputs.length,0,'known delivery status is not reinterpreted from the original ask');
   h.check();
 });
 

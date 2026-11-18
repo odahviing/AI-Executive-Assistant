@@ -293,8 +293,18 @@ export async function handleGetCalendar(args: Record<string, unknown>, ctx: OpCt
           });
           // Colleague view — masked by construction (no viewer arg = 'other').
           const sharedProcessed = processCalendarEvents(sharedRaw, userEmail, context.profile.user.name, timezone, context.profile);
+          const {loadAttendeeAvailabilityForPerson,attendeeTzForDay} = await import('../../../../utils/attendeeAvailability');
+          const {renderClockInZone} = await import('../../../../utils/timezoneConvert');
+          const reader = loadAttendeeAvailabilityForPerson(getPersonMemory(context.userId) ?? undefined,timezone);
+          const presented = sharedProcessed.map(event => {
+            if (event.isAllDay || !event._localDate || !event._localStartTime) return event;
+            const start = DateTime.fromISO(event._localDate+'T'+event._localStartTime,{zone:timezone});
+            if (!start.isValid) return event;
+            const zone = reader ? attendeeTzForDay(reader,start.toISO()!) : timezone;
+            return {...event,presentation_local:renderClockInZone(start.toISO()!,timezone,zone)};
+          });
           return {
-            events: sharedProcessed,
+            events: presented,
             _colleague_view: true,
             _scope_note: "Only shared events are visible. An empty result does not establish that a previously reported booking is missing. Do not recreate it from this result. For availability use find_available_slots or check_join_availability. For a change use a verified shared event or a verified event the requester requested. If identification is ambiguous ask for the invitation. If the owner must decide, route the request through the approval tool. Keep other events private.",
           };
@@ -551,9 +561,7 @@ export async function handleRevertAction(args: Record<string, unknown>, ctx: OpC
       ownerUserId,
       meetingId: eventId,
       reason: 'moved',
-      subject: viewSubject,
-      bookingThreadTs: context.threadTs,
-      newStartIso: originalStart,
+      subject: viewSubject,      newStartIso: originalStart,
       newEndIso: originalEnd,
     });
 
@@ -601,7 +609,7 @@ export async function handleRevertAction(args: Record<string, unknown>, ctx: OpC
     try { updateRequest(rec.id, { closureReason: `${rec.subkind}_reverted` }); } catch { /* best-effort */ }
     await closeMeetingArtifacts({
       ownerUserId, meetingId: eventId, reason: 'deleted',
-      subject: viewSubject, bookingThreadTs: context.threadTs,
+      subject: viewSubject,
     });
     logger.info('revert_action — create reverted (deleted)', { requestId: rec.id, subkind: rec.subkind, eventId });
     return {
@@ -913,6 +921,25 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
         try {
           const { getEventType } = await import('../../../../connectors/graph/calendar');
           const probe = await getEventType(userEmail, meetingId);
+          // A shared attendee or the recorded arranger can request cancellation,
+          // never execute it directly. Verify that relationship before returning
+          // calendar-derived detail or creating a replayable owner decision.
+          if (context.authority !== 'owner') {
+            const requesterEmail = getPersonMemory(context.userId)?.email?.trim().toLowerCase();
+            const shared = requesterEmail && (probe?.organizer?.emailAddress?.address?.toLowerCase() === requesterEmail
+              || probe?.attendees?.some(a => a?.emailAddress?.address?.toLowerCase() === requesterEmail));
+            let recordedArranger=false;
+            if (!shared && probe) {
+              const {getMeetingsRequestedBy}=await import('../../../../db/requests');
+              recordedArranger=getMeetingsRequestedBy(context.profile.user.slack_user_id,context.userId,{withEventIdOnly:true})
+                .some(row=>row.owner_user_id===context.profile.user.slack_user_id && row.requester_slack_id===context.userId
+                  && row.subkind==='colleague_booking_record' && row.state==='resolved' && row.outcome_external_event_id===meetingId);
+            }
+            if (!shared && !recordedArranger) return {
+              error: 'not_your_meeting',
+              message: 'I could not verify a shared meeting for this cancellation. Nothing has been changed. Identify the invitation you want to cancel.',
+            };
+          }
           // gh#154-R2 (2026-08-06) / o#216 (bouncer fix, 2026-08-12) — mask the
           // probed subject ONCE, off the raw Graph value, before it reaches ANY
           // caller-facing payload below: the seriesMaster refusal, the
@@ -969,6 +996,20 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
               // seriesMaster refusal above, which already masks.
               actual_subject: preDeleteSubjectMasked,
               message: `The id given for "${args.meeting_subject}" actually points to a different event on the calendar ("${preDeleteSubjectMasked}") — I won't cancel the wrong meeting. Re-read the calendar (get_calendar) to find the real id for "${args.meeting_subject}" and retry.`,
+            };
+          }
+          if (context.authority !== 'owner') {
+            const ownerFirst = context.profile.user.name.split(' ')[0];
+            const reason = `Cancelling this existing meeting needs ${ownerFirst}'s approval.`;
+            return {
+              error: 'cancellation_needs_owner', needs_owner_approval: true,
+              meeting_subject: preDeleteSubjectMasked, event_start_iso: preDeleteStartIso,
+              violation_label: reason,
+              message: `${reason} Nothing has been cancelled. Raise create_approval(kind=policy_exception) for this occurrence; the stored cancellation runs only after approval.`,
+              _deferred_action_hint: {tool:'delete_meeting',args:{
+                meeting_id:meetingId, meeting_subject:preDeleteSubjectMasked,
+                ...(typeof args.comment === 'string' && args.comment.trim() ? {comment:args.comment.trim()} : {}),
+              }},
             };
           }
         } catch (err: any) {
@@ -1101,9 +1142,13 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
             });
           }
         } catch (err) {
-          logger.warn('delete_meeting planMeeting threw — proceeding with raw delete', {
+          logger.warn('delete_meeting ownership decision failed — withholding cancellation', {
             err: String(err).slice(0, 200), meetingId,
           });
+          return {
+            success: false, error:'ownership_unverified', meeting_subject:preDeleteSubjectMasked,
+            message: 'The meeting organizer could not be verified, so nothing was cancelled or declined. Retry the calendar check before cancelling.',
+          };
         }
 
         // gh#decline-cancel-comment-not-wired (2026-08-12) — Graph already
@@ -1175,9 +1220,7 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
           ownerUserId: context.profile.user.slack_user_id,
           meetingId,
           reason: 'deleted',
-          subject: args.meeting_subject as string | undefined,
-          bookingThreadTs: context.threadTs,
-          fulfillingRequestId: args._fulfilling_request_id as string | undefined,
+          subject: args.meeting_subject as string | undefined,          fulfillingRequestId: args._fulfilling_request_id as string | undefined,
         });
         // #147.2 / M11-M13 — getEventType already resolves Graph's separate
         // wall-clock+zone pair into one offset-bearing instant. Convert that ONE
@@ -1347,12 +1390,12 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
         // intention. Each shape corresponds to a Graph call whose outcome we read.
         const notifiedSentence =
           notifiedVia === 'outlook_decline_to_organizer'
-            ? `Outlook sent ${notifiedWho} the decline for this occurrence. I did NOT send any Slack message.`
+            ? `Outlook sent ${notifiedWho} the decline for this occurrence.`
             : notifiedVia === 'outlook_cancellation_to_attendees'
-              ? 'Outlook sent the cancellation to everyone on the invite. I did NOT send any Slack message.'
+              ? 'Outlook sent the cancellation to everyone on the invite.'
               : notifiedVia === 'nobody'
-                ? 'Nobody was notified — there was no one to notify (no attendees / no organizer response accepted). I did NOT send any Slack message.'
-                : 'I could not confirm who Outlook notified. I did NOT send any Slack message.';
+                ? 'There was no Outlook notice to send (no attendees / no organizer response accepted).'
+                : 'I could not confirm who Outlook notified.';
 
         return {
           success: true,
@@ -1369,7 +1412,7 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
           organizer_name: organizerName ?? undefined,
           organizer_email: organizerEmail ?? undefined,
           action_summary: `Cancelled '${cancelledLabel}'. ${notifiedSentence}`,
-          _note: 'Report ONLY this occurrence, named by cancelled_label, and report the notification ONLY as notified_via says. Maelle sends NO Slack message on a cancellation — never write "I let <name> know" / "<name> has been notified" / "I\'ll notify them", and never say the decline is permanent or covers other dates: each call cancels exactly one occurrence and Outlook\'s notice says so. If several cancellations ran this turn, list one line per SUCCESSFUL call\'s cancelled_label and nothing else.',
+          _note: 'Report this occurrence, named by cancelled_label, and its Outlook notification as notified_via says. This result describes the calendar operation only; a separate requester relay has its own receipt. Each call cancels exactly one occurrence, not future dates. If several cancellations ran this turn, list one compact line per successful occurrence.',
         };
 }
 

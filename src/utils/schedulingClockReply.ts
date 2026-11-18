@@ -12,10 +12,16 @@ for (const locale of ['en', 'he', 'ru', 'ar']) {
 }
 
 export function isClockReply(message: string): boolean {
+  return clockReply(message)!==undefined;
+}
+
+/** The literal clock in a bounded clock-only reply; never a conversion. */
+export function clockReply(message:string):string|undefined {
   const clock = /(?<!\d)(?:[01]?\d|2[0-3]):[0-5]\d(?!\d)/;
-  if (!clock.test(message)) return false;
+  const match=clock.exec(message);
+  if (!match) return;
   const rest = message.replace(clock, '').trim().replace(/^[,\s]+|[,?؟？\s]+$/g, '').toLocaleLowerCase();
-  return !rest || weekdays.has(rest);
+  return !rest || weekdays.has(rest) ? match[0].padStart(5,'0') : undefined;
 }
 
 // Compare the clocks actually displayed to the clocks of verified offers.

@@ -228,12 +228,9 @@ export async function deleteMeeting(
  * an Outlook decline is per-occurrence by construction — it can neither claim a
  * notification that didn't happen nor overstate the scope.
  *
- * If Graph REFUSES the decline, the likeliest reason is that the owner is the
- * organizer after all (Graph won't let an organizer decline their own meeting) —
- * an ownership read that came back wrong. So fall through to the organizer verb
- * rather than a bare DELETE: a mis-read must never silently strip a meeting off
- * his calendar with nobody told. `notified` reports which of the three actually
- * happened, so the caller states it instead of assuming it.
+ * A failed decline does not establish organizer authority. Preserve that
+ * failure so the caller can retry the intended operation; never escalate an
+ * attendee's decline into cancellation for all invitees.
  *
  * Retention: Outlook normally drops a declined meeting off the attendee's
  * calendar, but that is not a contract we can lean on — so verify and remove
@@ -254,11 +251,10 @@ export async function declineMeeting(
       Comment: options.comment ?? '',
     });
   } catch (err: any) {
-    logger.warn('declineMeeting — /decline rejected, falling back to the organizer verb', {
+    logger.warn('declineMeeting — decline failed; no cancellation attempted', {
       meetingId, code: err?.statusCode ?? err?.code,
     });
-    const { cancellationSent } = await deleteMeeting(userEmail, meetingId, options);
-    return { notified: cancellationSent ? 'attendees' : 'nobody' };
+    throw err;
   }
   if (!(await verifyEventDeleted(userEmail, meetingId))) {
     await client.api(`/users/${userEmail}/events/${meetingId}`).delete();

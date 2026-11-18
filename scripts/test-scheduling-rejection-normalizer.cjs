@@ -67,3 +67,32 @@ test('regression create transient retry discards stale off-day diagnostics befor
  }});
  assert.equal((await mod.exports()).length,1);assert.equal(calls,2);
 });
+
+for(const mode of ['busy','confirmed','not-attending'])test('requester calendar participates in the actual booking decision: '+mode,async()=>{
+ const file='src/skills/meetings/ops/handlers/createMeeting.ts',tree=ts.createSourceFile(file,read(file),ts.ScriptTarget.Latest,true);
+ const declarations=new Map(),ifs=[];
+ (function visit(node){
+  if(ts.isVariableStatement(node))for(const d of node.declarationList.declarations)if(ts.isIdentifier(d.name))declarations.set(d.name.text,node.getText());
+  if(ts.isIfStatement(node)&&node.expression.getText()==='matched && attendeeConflicts.length > 0')ifs.push(node.getText());
+  ts.forEachChild(node,visit);
+ })(tree);
+ assert.equal(ifs.length,1);const h=harness({}, {extraMocks:{'src/db.ts':{getPersonByEmail:()=>({name:'Requester'})}}}),labels=h.load('src/skills/meetings/ops/violationLabels.ts');
+ const requester='requester@example.test',conflict={email:requester,reason:'busy'};
+ let writes=0;const asked=[],m={exports:{}};
+ const body=`module.exports=async()=>{${declarations.get('otherRequiredAttendeeEmails')};${declarations.get('runSlotCheck')};const matched=(await runSlotCheck({from:args.start,to:args.end},undefined,{}))[0];const attendeeConflicts=matched?.attendee_conflicts??[];${ifs[0]};return write();}`;
+ vm.runInNewContext(ts.transpileModule(body,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{
+  module:m,userEmail:'owner@example.test',ownerEmailLowerForGuardB:'owner@example.test',ownerDomainForGuardB:'example.test',requesterEmail:requester,
+  attendees:mode==='not-attending'?[{email:'peer@example.test'}]:[{email:requester},{email:'peer@example.test'}],
+  context:{profile:h.profile,channel:'slack',userId:'UREQUESTER',disclosedAttendeeConflicts:[{start,end,conflicts:[conflict]}]},
+  args:{start,end},timezone:'Asia/Jerusalem',durationMin:25,viewerEmail:requester,
+  attendeeConflictConfirmed:mode==='confirmed',bookedOverAttendees:undefined,logger:{info(){}},
+  subjectViewerFor:()=> 'other',attendeeCheckParams:emails=>({attendeeBusyEmails:emails}),
+  findAvailableSlots:async args=>{asked.push(...args.attendeeBusyEmails);return [{start,end,attendee_conflicts:args.attendeeBusyEmails.includes(requester)?[conflict]:[]}];},
+  conflictsPreviouslyDisclosed:labels.conflictsPreviouslyDisclosed,attendeeConflictRefusal:labels.attendeeConflictRefusal,
+  write:()=>{writes++;return {success:true};},
+ });
+ const result=await m.exports();
+ if(mode==='busy'){assert.equal(writes,0);assert.equal(result.error,'attendee_conflict');assert.equal(result.owner_available,true);}
+ else assert.equal(writes,1,'free roster or previously disclosed and accepted conflict can book');
+ assert.equal(asked.includes(requester),mode!=='not-attending');
+});

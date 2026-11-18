@@ -60,23 +60,7 @@ export class MeetingsSkill implements Skill {
       // meetings concern. Auto-registered when SlackConnection is registered.
       {
         name: 'check_join_availability',
-        description: `Check if the owner can join an EXISTING meeting the colleague is organising. Use when a colleague asks "is ${profile.user.name.split(' ')[0]} free at X", "can ${profile.user.name.split(' ')[0]} join our meeting", "we'd love ${profile.user.name.split(' ')[0]} in our call".
-
-Route 2 — the COLLEAGUE owns the meeting and its invite. Maelle does NOT book or add anyone. She only confirms availability so the colleague can send the invite themselves.
-
-Reply phrasing when available:
-- RIGHT: "Yes, he's free at 3pm — send him the invite."
-- RIGHT: "He's free, you can add him."
-- WRONG: "Want me to add him to the invite?" (Maelle doesn't own the meeting, can't add)
-- WRONG: "I'll add him." (same — not hers to do)
-
-Results include meeting_start, meeting_timezone and code-rendered presentation_local. Quote presentation_local verbatim for the checked time in every verdict; use the rendered field instead of timezone arithmetic.
-- Free → confirm availability, tell the colleague to send the invite themselves
-- Partially free → offer partial join (first or last N minutes), same ownership rule
-- Blocked by scheduling rule (lunch, travel buffer) → escalate to owner with context
-- Busy with another meeting → decline with the conflict info
-
-If the meeting is NOT yet booked and they need to find a time together, use find_available_slots (it checks every internal attendee's calendar) and book the agreed slot with create_meeting.`,
+        description: "Check whether the owner can attend an existing event organized by the requester. This checks availability; it does not send an invitation or add anyone. The organizer retains their event. Quote presentation_local verbatim for the returned clock. Confirm free or partial attendance from the result. If a conflict needs the owner's judgment, use the tracked owner decision; explain what is pending. For an unbooked meeting use find_available_slots and create_meeting.",
         input_schema: {
           type: 'object',
           properties: {
@@ -200,53 +184,7 @@ Do NOT use for:
       },
       {
         name: 'find_available_slots',
-        description: `Find owner availability or meeting-specific slots, applying the supplied attendees and category. For the owner's preliminary availability, use attendee_emails=[] when no attendees are established. Retain known attendee and internal/external category constraints. If missing meeting type changes the applicable rules, ask only the needed type question or label results as general owner availability conditional on meeting type. Colleague searches retain the authenticated requester and established attendee context. Reuse stated duration, dates and mode; default only unstated duration/dates. Named attendees constrain joint searches; clarify ambiguous identities. Booking requires necessary details and invitation authorization; options alone authorize only search.
-
-For a complete joint move check, pass coordinated_moves; the tool loads each occurrence's attendees, duration and location and evaluates their replacements together. This is discovery only, with no writes. For ordinary slot search, supply duration_minutes, attendee_emails and meeting_mode from the request; existing duration, attendee-resolution and mode defaults apply when omitted.
-
-For ordinary slot search: ASK ${profile.user.name.split(' ')[0]} TWO HUMAN QUESTIONS first if you don't already know the answer. Do NOT use the words "meeting_mode" or list four options — that's robotic. Ask like a person:
-  • "In person or online?"
-  • If in-person and the venue isn't ${profile.user.name.split(' ')[0]}'s office: "Where?"
-
-SMART-SKIP THE ASK — two cases where you skip the two-question ask, in this order:
-  • Thread already established it: an earlier message or an earlier search in this thread that gave you the mode / venue — including a visit stated once for the whole trip ("X is coming to visit") — carries to EVERY meeting with that person in this thread. Reuse it; reading the thread is your job, not the owner's to repeat.
-  • Cross-timezone default: when nothing above applies and at least one attendee is in a different timezone than ${profile.user.name.split(' ')[0]} (people_memory has TZ data on each colleague), pass meeting_mode='online' yourself — asking reads obtuse when the attendee is clearly remote. Ask only when every attendee shares ${profile.user.name.split(' ')[0]}'s TZ and nothing has established the mode.
-
-Then YOU pick the right meeting_mode based on what they said:
-  • "online" / "Teams" / "Zoom" / "call" / "video" → meeting_mode='online'
-  • "in person at the office" / "in person" with no other venue / "onsite" / "at our office" / "from the office" / "in the office" → meeting_mode='in_person'
-  • "in person at <somewhere else>" / "at the client" / "their place" / "offsite" / "I need to join their meeting" → meeting_mode='custom'
-  • "either" / "whatever works" / "doesn't matter" → meeting_mode='either'
-
-ONLINE ≠ "AT HOME". meeting_mode='online' is a scheduling flag — it tells the tool the meeting does NOT require physical presence at the office, so all day types are searched. It does NOT mean ${profile.user.name.split(' ')[0]} attends from home. An online meeting can land on an office day; he may be at the office while joining via Teams/Zoom. Never frame online and in-person as mutually exclusive places — they describe the meeting's connection method, not where he sits.
-
-EXPLAINING WHY A DAY ISN'T OFFERED. The tool returns a \`day_summary\` array with one entry per workday touched: \`{ date, accepted, top_reasons, blocked_by? }\`. When the user pushes back ("what about Monday?" / "nothing on Tuesday?"), look up that date in \`day_summary\` and narrate the actual reason:
-  • \`accepted: 0, top_reasons: ['owner_busy_collision', 'focus_time_office']\` → "Monday is fully booked — back-to-back meetings, and what's left would put you under your free-time floor."
-  • \`accepted: 0, top_reasons: ['wrong_day_type']\` → "Monday is a home day, in-person needs an office day." (a mismatch, not a day off — he's working, just not from the office)
-  • \`accepted: 0, top_reasons: ['vacation_or_off_day']\` → this IS a real day off — say so plainly: "Monday is a day off for ${profile.user.name.split(' ')[0]}."
-  • \`accepted: 0, top_reasons: ['owner_out_of_office']\` → "Monday is out — ${profile.user.name.split(' ')[0]} is out of office that day." If that entry also carries \`oof_until_display\`, the away stretch runs past this one day — name the real end instead: "Monday is out — ${profile.user.name.split(' ')[0]} is away through Friday 29 Aug."
-  • \`accepted: 0, top_reasons: ['category_per_day']\` → "Already at the daily cap for that category."
-  • \`attendee_busy_collision\` (also in \`blocked_by\`) → the attendee's OWN calendar is genuinely busy during your shared hours — real evidence. Scope it ("X is booked during your shared hours Thursday"), don't inflate to "unavailable all day."
-  • \`outside_attendee_work_hours\` → use the returned hours note: distinguish stated hours from an assumed window. Describe the hours conflict without claiming the attendee is booked. If ${profile.user.name.split(' ')[0]} then states the attendee's REAL hours ("Lori starts 7am ET, so 7am works"), pass \`attendee_hours\` (below) to OVERRIDE the assumed default for that one search — don't keep clipping to the wrong hours.
-  • \`accepted: >0\` → the day HAS options; if Sonnet's spread picker didn't surface one, say "there are slots that day, want me to pull them?"
-  • Date not in \`day_summary\` at all → "I haven't checked that day yet — want me to look?"
-
-NEVER fabricate a reason. Say "day off" / "not a workday" only when \`top_reasons\` includes \`vacation_or_off_day\` — that's the actual day-off case. \`wrong_day_type\` is a different mismatch (in-person requested on a home day) — he's working, just not from the office, so don't call that one a day off. The data has the truth — use it. And NEVER blame the colleague for the owner's full day: "X isn't available / can't make it" is honest ONLY with positive evidence from X's calendar (\`attendee_busy_collision\` / \`blocked_by\`). When the real block is the owner's own calendar, or you lack positive evidence he's free then, say it owner-first / no-overlap ("your Thursday is full", "no opening that works for both of you Thursday") — never a false absolute about the colleague.
-
-A SPREAD IS A SAMPLE. Returned options sample the window; unshown times may still be free. Preserve the returned ranking and earlier reasonable alternatives when the requested count permits. The slot's priority (good/medium/low) is relative preference after validity checks, using actual working-hour overlap and day quality. It grants no booking authority or additional availability assurance: retain all conflict, unknown-calendar and approval annotations.
-
-Omit both search dates when timing is unspecified: search the next five owner working dates, counting today only while work time remains. Supply the requested date bounds when given; the search stays within those dates. Set time_window_is_hard for explicit clock windows or deadlines.
-
-PREFERRED SLOT (v2.9.2): when the requester names a SPECIFIC preferred time ("preferably 11:30", "around 14:00", "if 10:00 works"), pass that exact ISO datetime as \`preferred_slot\`. The tool will check that slot specifically and include it in the result if it's free — even when the spread-picker (1h gap rule, 2/day cap) would have filtered it out. Without this, the requester's asked time can vanish from the offered options and you end up narrating "X isn't clean" when X is actually free.
-
-CANDIDATE SLOTS — BATCH VALIDATION (v3.0.6): when you have MULTIPLE specific times to check ("can we do A, B, C, or D?" — requester or owner proposed N candidate times), pass them ALL in a single call as \`candidate_slots: [{start}, ...]\` instead of N separate find_available_slots calls. The tool validates each candidate against ${profile.user.name.split(' ')[0]}'s calendar + attendee availability + your rules and returns a results array — one verdict per candidate.
-
-Return shape in this mode is DIFFERENT:
-  { mode: 'candidate_validation', results: [{ start, end, available, broken_rule_label? }, ...] }
-
-When ALL candidates are blocked: narrate WHY using each \`broken_rule_label\` verbatim ("Jun 9 7pm is outside the attendee's working hours; Jun 10 5:30pm conflicts with another meeting…") and offer to widen the search. When at least one is available: surface those.
-
-Omit \`search_from\` / \`search_to\` in candidate mode; the candidate range is used.`,
+        description: "Find verified availability without changing calendars. Reuse this request's people, duration, dates, mode and known venue. Resolve genuinely ambiguous contacts; do not require external email addresses just to search the owner's availability. A general owner-availability result is not a check of every attendee.\n\nUse candidate_slots for all specifically proposed times in one check; its results array gives each candidate's actual status and all broken_rule_labels. Use preferred_slot for a preferred time within a broader search. For a move, pass moving_event_ids so the original attendees and duration are checked and the old occurrence is excluded. coordinated_moves checks an entire proposed sequence together. A read or search never itself authorizes a calendar change.\n\nUse the human's explicit date bounds and time_window_is_hard for a genuine clock window or deadline. Omit unstated dates to use the next five owner working dates, counting today only while work time remains. The search stays within those dates. Pass the stated zone through search_window_timezone and present_in_timezone; use returned date-specific clocks. Preserve the requested duration and let the handler apply configured presets. more_options requests different choices; option_count follows an explicit requested count, otherwise the configured count applies.\n\nMode: reuse what is established, including a visit's venue across the conversation. Known remote participants imply online. in_person means the owner's office, custom means a different venue, either searches both. When mode is unknown, preliminary either-mode availability remains conditional on the eventual location; clarify only when it affects the requested booking. Online does not mean the owner is at home.\n\nExplain a rejected time with its actual returned reasons. day_summary describes the checked dates; different candidates may fail for different reasons. A home-day mismatch is not a day off. Busy, out-of-office, outside stated hours and unverified availability are distinct; distinguish stated hours from an assumed window. Never turn mixed rejection reasons into 'booked all day' or blame someone whose calendar was not checked. Keep every relevant owner and attendee conflict in the answer so the person can decide.\n\nWhen ordinary working hours yield no shared option, ask whether the requester can consider a bounded earlier/later window in their own timezone, or wants you to ask the owner for an exception. Apply a requester-hours change only to that person; search owner-hour exceptions only after that choice, then use the normal approval flow before booking. An attendee meeting conflict is annotated for the booker to decide. A specific owner time remains visible with its conflicts. Use the tool's actual result and existing approval path; do not send the requester to the owner.\n\nThe slot priority (good/medium/low) is relative preference after validity checks and gives no booking authority or additional availability assurance; preserve conflict, unknown-calendar and approval annotations. Returned ordinary slots sample the checked window. Present the applicable options and their annotations; absence from the sample does not prove unavailability. To answer about another date or time, check it. No calendar writes occur in this tool.",
         input_schema: {
           type: 'object',
           properties: {
@@ -288,7 +226,7 @@ Omit \`search_from\` / \`search_to\` in candidate mode; the candidate range is u
             meeting_mode: {
               type: 'string',
               enum: ['in_person', 'online', 'either', 'custom'],
-              description: 'REQUIRED. Reuse it if this thread already established it for this person\'s visit (see SMART-SKIP above) — otherwise ask the owner.',
+              description: 'Reuse the stated mode or established visit. Online for known remote participants; either for preliminary availability when unstated. Resolve mode before a location-dependent booking.',
             },
             travel_buffer_minutes: {
               type: 'number',
@@ -308,7 +246,7 @@ Omit \`search_from\` / \`search_to\` in candidate mode; the candidate range is u
             },
             relaxed: {
               type: 'boolean',
-              description: 'OPTIONAL (default false). Owner override path — see OWNER-PATH OVERRIDE rule in the MEETINGS SKILL section. Owner-only; ignored on colleague-path calls.',
+              description: 'Owner only: true for an accepted scheduling exception or an explicitly chosen otherwise off-hours time. Preserve the requested people and date. Annotate remaining conflicts; a new undisclosed conflict needs its own decision. This does not grant a colleague an override.',
             },
             owner_hours_exception_requested: {
               type: 'boolean',
@@ -350,42 +288,14 @@ Omit \`search_from\` / \`search_to\` in candidate mode; the candidate range is u
       },
       {
         name: 'create_meeting',
-        description: `Create a new calendar event directly — THE booking tool. Use the agreed time and the finder’s per-attendee status. Externals receive the invite by email. Follow the location / category / work-day rules in the prompt section.
-
-RESCHEDULING ≠ CREATING. Before booking a recurring 1:1 (Weekly / BiWeekly) to a NEW time: if that person's series already exists on the calendar, you are RESCHEDULING — call move_meeting on the existing occurrence (get its id from get_calendar), NOT create_meeting. Creating a fresh event leaves a duplicate next to the live series. create_meeting is for genuinely NEW meetings only.
-
-LOCATION & ONLINE — THE HANDLER DECIDES from day type and party shape. ${profile.user.name.split(' ')[0]}'s home day + internal-only → Huddle; ${profile.user.name.split(' ')[0]}'s office day + internal-only → Office. External + home → online with Teams. External + office on the OWNER path follows total roster regardless of the external's timezone: owner plus one external → online; three or more total participants → asks ${profile.user.name.split(' ')[0]} once whether the group meets onsite or all online (on create, move, or an update_meeting attendee change). On the COLLEAGUE path, an external office-day meeting → online without owner approval. Let the handler run.
-
-WHEN TO PASS \`is_online\` AT ALL (v2.9.1):
-- **DEFAULT: OMIT.** No conversational signal → leave \`is_online\` unset. The handler picks per day-type + party shape. Do NOT default to \`true\` "to be safe" — that corrupts the decision (an internal home-day meeting should be Huddle, not Teams).
-- Pass \`is_online: true\` ONLY when the conversation explicitly said online ("Zoom", "Teams", "video", "remote", "let's do a call").
-- Pass \`is_online: false\` ONLY when the conversation explicitly said in-person ("at our office", "in person", "they'll come over", "let's meet") — including a visit stated once for the whole trip ("X is coming to visit"): that covers EVERY meeting of that visit, so pass \`is_online: false\` on each of them. A visiting guest still carries their home TZ in people_memory, and that stored TZ is what the handler books online from when the flag is omitted.
-- When the handler asks "online or in person?" and ${profile.user.name.split(' ')[0]} answers, THAT's an explicit signal → pass the matching boolean on the retry.
-
-LOCATION FIELD:
-- Specific venue mentioned ("at Café Aroma", "at customer site") → pass \`location\` as the venue. Helper will mark in-person.
-- Otherwise OMIT \`location\` — handler stamps the right label.
-
-WHEN THE SIGNAL ALREADY EXISTS, ACT ON IT (this thread said video, said in person, named a venue) — reading the thread and people_memory is your job, not the owner's to repeat.
-
-Colleague-path (v2.3.2 + v2.6.5 + v2.6.6): when a colleague has confirmed slot + duration + subject in this DM with you, call this tool directly to book — the requester (1:1), multi-internal (everyone in the same workspace), or owner-only-pollable (requester + externals). Externals are fine; they get the calendar invite via Outlook. The handler enforces server-side: every attendee must have an email; rule-compliant slot (work hours, work days, travel buffers, floating blocks, no conflicts via findAvailableSlots); then auto shadow-DMs the owner so he sees it happen. If the slot fails the rule check, the tool returns { success: false, error: 'not_rule_compliant', message } — fall back to create_approval(kind=policy_exception). If an attendee has no email, the tool returns { success: false, error: 'attendee_missing_email' } — resolve it via find_slack_user (directory lookup); if it truly can't be resolved, raise create_approval(kind=freeform) so the owner supplies it. DO NOT punt with "go ahead and send him the calendar invite" — the colleague's invite won't have the owner's location prefs, won't get auto-categorized, and the owner gets no shadow record. YOU are the EA; YOU book it.
-
-REQUEST COMPLETION — if one request asks for a message or confirmation and a calendar entry, finish both when their fields are known and their tools are available. message_colleague completes only the message; create_meeting completes the calendar action. If the calendar tool is unavailable, fails, or has an unknown result, say that the calendar part remains incomplete.
-
-SUBJECT SOURCE — ground the subject in the explicit title or purpose and actual participants supported by the current request, attached image, and current thread. Ordinary text and images follow the same rule: retain a stated purpose in English (for example, "Positioning with Einav") and name exactly the participants included. A multi-person meeting names every participant explicitly included (for example, "Strategy with Anna and Ben"). If the source excludes someone or a group, the exclusion applies to both the attendee set and the subject.
-
-SUBJECT WHEN MISSING — with an EXTERNAL on the invite, ASK for a real subject BEFORE create_meeting, batched with other missing fields; a later rename sends a second notification. On the COLLEAGUE path, ask before booking instead of inventing a placeholder. For an internal booking on ${profile.user.name.split(' ')[0]}'s own path, use a working title naming actual attendees (for example, "Meeting with Anna"). Keep even a single-word supplied topic; follow the category convention when composing a title.
-
-FLOATING-BLOCK IMPACT — quote it, never re-derive it. When the result includes \`floating_block_impact\` (this booking overlapped a floating block like lunch or focus time), state it VERBATIM in the confirmation instead of computing "X min free will remain" yourself from the raw calendar — it's the real relocation-search answer, not an estimate. \`relocatable: false\` → say plainly that the block (name it) has nowhere to go that day. \`relocatable: true\` with \`newSlotLabel\` → state that as the plan (e.g. "I'll move lunch to 13:00–13:25").
-
-LANGUAGE: calendar invites are shared artifacts others read, so keep subject + body in English (translate if the owner instructs in Hebrew). The subject/body params restate this.`,
+        description: "Book a new meeting at the agreed time with its actual participants. For an existing invitation use move_meeting or update_meeting with its occurrence ID. Duplicate and create-versus-move checks run in the handler.\n\nComplete known booking details and call this tool. The handler chooses location and online mode from the configured day and roster. Omit is_online and location unless the conversation specifies them; ask a location question only if the handler returns one. Preserve a previously stated visit, online choice or venue. Use the explicit title or purpose and actual participants from the current request, attached image, and current thread. An exclusion applies to both the attendee set and the subject. Keep subject and any supplied body in English. For an internal meeting with no purpose, a title naming its actual participants suffices. An external invitation needs its real purpose and confirmed recipient address; gather genuinely missing details together. The invite body stays empty unless supplied or promised text belongs in it.\n\nThe owner's chosen time and accepted exceptions use the override fields documented below. A colleague can book a rule-compliant meeting directly. If the result requires an owner decision, create a tracked policy_exception from the returned reason and deferred action. Resolve an unknown internal address through the directory; ask the owner through the tracked process if only the owner can identify the person. Keep the scheduling work with the assistant.\n\nReport the actual receipt, including per-attendee status: relevant conflicts or unverified attendance. Use returned clocks and floating_block_impact rather than calculating them. A calendar booking and a separately requested message need their own successful operations. A failure remains incomplete; use its required correction or next decision instead of repeating unchanged arguments.",
         input_schema: {
           type: 'object',
           properties: {
-            subject: { type: 'string', description: 'Meeting subject — ENGLISH ONLY. Ground it in the explicit title or purpose and actual participants supported by the current request, attached image, and current thread. On a colleague request, or any external invite, a list of names supplies attendees only: if no topic was given, ask what to call the meeting and wait before using this tool. A title made solely from attendee names is allowed only for the owner booking an internal meeting.' },
+            subject: { type: 'string', description: "English title grounded in the explicit title or purpose and actual participants from the current request, attached image, and current thread. Respect stated exclusions. For an internal meeting without a topic, use a descriptive participant title; clarify a missing external purpose." },
             start: { type: 'string', description: 'ISO 8601 datetime — the clock time EXACTLY as the owner stated it, NOT converted. Say which zone that clock is in via `stated_zone`.' },
             end: { type: 'string', description: 'ISO 8601 datetime. Same zone basis as start.' },
-            stated_zone: { type: 'string', description: 'Which timezone the owner NAMED for this time. Set it WHENEVER he names ANY zone — INCLUDING his home zone (this is the #1 thing to get right while he travels). Values: "home" (he said "Israel time" / "my home time" / "IL time"), "local" (he said "my time" / "local", or named the place he is physically in), or an IANA zone like "America/New_York" (he named a specific OTHER zone, e.g. "ET"/"EST"/"PT"). OMIT ONLY when he names NO zone — then a bare time is read as where he physically is on a travel day, else his home zone. Example: travelling in Boston he says "6:30 PM Israel time" → start="...T18:30:00", stated_zone="home". Pass the clock as-stated; the tool does ALL timezone math — NEVER hand-convert.' },
+            stated_zone: { type: 'string', description: "Zone of the human-stated clock: an IANA zone, home for the configured home zone, or local for the owner’s dated travel zone. Omit for the dated owner zone. Supply the literal wall clock without converting it, or preserve an exact ISO offset returned by a tool. The handler performs timezone conversion." },
             intended_weekday: {
               type: 'integer',
               minimum: 1,
@@ -397,7 +307,7 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
               description: `The people ATTENDING the meeting, each as {name, email?}. Internal colleagues' emails resolve from the directory; pass their names. Supply an email for a genuinely external person at booking. Clarify ambiguous or unrecognized identities. Preserve all requested participants, including optional invitees. The colleague requester attends by default; requester_is_attending controls only their explicit nonattendance.`,
               items: {
                 type: 'object',
-                properties: { name: { type: 'string' }, email: { type: 'string', description: 'Only for a clearly EXTERNAL attendee — internal emails resolve automatically, so leave this off for colleagues on file.' } },
+                properties: { name: { type: 'string' }, email: { type: 'string', description: 'Only for a clearly EXTERNAL attendee — internal emails resolve automatically, so leave this off for colleagues on file.' }, optional: {type:'boolean',description:'True only when the human says this person is optional. They receive an optional invitation and need not be free.'} },
                 required: ['name'],
               },
             },
@@ -420,7 +330,7 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
             },
             is_online: {
               type: 'boolean',
-              description: 'OPTIONAL. Pass ONLY when conversation explicitly said online (Zoom/Teams/video/call) or in-person (at office/come over/meet). When no explicit signal, OMIT — the handler picks per day-type + party shape (internal+home=Huddle, internal+office=Office, external=Teams). Defaulting to true silently corrupts the location decision.',
+              description: "Omit for configured location defaults. Set true for an established online/video/call request; false for an established in-person visit. Reuse the conversation’s decision.",
             },
             location: { type: 'string' },
             category: categoryEnum ? { type: 'string', enum: categoryEnum } : { type: 'string' },
@@ -451,11 +361,11 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
             },
             relaxed: {
               type: 'boolean',
-              description: 'OPTIONAL (default false). Owner override path — see OWNER-PATH OVERRIDE rule in the MEETINGS SKILL section. Owner-only; ignored on colleague-path calls.',
+              description: "Owner only: true when the owner accepts a disclosed scheduling exception or specifically instructs an otherwise off-hours time. Keep the accepted meeting and participants. A new undisclosed attendee conflict still needs its own decision. False/omitted for an ordinary first attempt; colleague authority cannot grant an override.",
             },
             confirm_attendee_conflict: {
               type: 'boolean',
-              description: 'OPTIONAL (default false). Colleague-path only. On a colleague booking, create_meeting may refuse with error="attendee_conflict" (plus `_attendee_busy_note`) because one or more REQUIRED attendees — not the owner — are busy, outside working hours, or lack travel-time room around an adjacent commitment at this slot; the message is already phrased as "Just FYI — <reason>. Want me to book it anyway?" and NAMES EVERY blocked attendee, not just one — relay all of them to the requester, verbatim or close to it. ONLY once they say yes, re-call create_meeting with the SAME args plus confirm_attendee_conflict=true to book. This is the REQUESTER\'S call, not the owner\'s — never route it through create_approval, never ask the owner about it. The flag does NOT skip the attendee check — it re-runs the identical check and only stops it refusing, so the booking proceeds THROUGH exactly the conflicts that same call just named; every owner-rule check (work hours, category limits, travel buffers, etc.) still runs normally and can still refuse. Never set this on a first attempt to skip telling the requester — that books over someone\'s busy time silently.',
+              description: "Colleague only: true after the requester chooses to book over every disclosed attendee conflict for this interval. The handler rechecks the same people and reasons; a new conflict needs a new decision. This is not permission to waive unstated working hours or the owner’s rules.",
             },
             sensitivity: {
               type: 'string',
@@ -526,7 +436,7 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
             },
             relaxed: {
               type: 'boolean',
-              description: 'OPTIONAL (default false). Owner override path — see OWNER-PATH OVERRIDE rule in the MEETINGS SKILL section. Owner-only; ignored on colleague-path calls.',
+              description: 'Owner only: true for an accepted scheduling exception or an explicitly chosen otherwise off-hours time. Preserve the requested people and date. Annotate remaining conflicts; a new undisclosed conflict needs its own decision. This does not grant a colleague an override.',
             },
             category: {
               type: 'string',
@@ -591,7 +501,7 @@ ATTENDEES (v2.9.1):
       },
       {
         name: 'delete_meeting',
-        description: `Cancel one occurrence, or decline it when the owner is an attendee. An unambiguous owner instruction to cancel that occurrence IS confirmation; resolve an ambiguous target first (DELETE-MEETING PROTOCOL). Pass any supplied note as comment — Outlook delivers it to the organizer (decline) or attendees (cancel).`,
+        description: `Cancel one occurrence, or decline it when the owner is an attendee. An unambiguous owner instruction to cancel that occurrence IS confirmation; resolve an ambiguous target first (DELETE-MEETING PROTOCOL). For a colleague's explicit cancellation request, call this on the shared occurrence: the handler requires owner approval and supplies the stored action for create_approval(kind=policy_exception); it never cancels directly for a colleague. Pass any supplied note as comment — Outlook delivers it to the organizer (decline) or attendees (cancel).`,
         input_schema: {
           type: 'object',
           properties: {

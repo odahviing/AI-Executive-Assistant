@@ -72,7 +72,7 @@ import { getEffectiveWorkDayForInstant } from './workHours';
 export interface ResolveLocationInput {
   profile: UserProfile;
   startIso: string;
-  intent: 'new_booking' | 'move' | 'cancel';
+  intent: 'new_booking' | 'move' | 'attendee_update' | 'cancel';
 
   // Detected category (from detectCategory) — drives the no-stamp skip when
   // the category is flagged `no_default_location: true` (Logistic / floating
@@ -190,6 +190,28 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
   const hasOwnerHint =
     (input.ownerLocationHint && input.ownerLocationHint.trim().length > 0) ||
     input.ownerIsOnlineHint !== undefined;
+
+  // Changing a guest list does not reopen an already chosen venue. Preserve
+  // physical/hybrid/online arrangements; only supply missing remote access or
+  // grow the configured small office to its room when the party gets larger.
+  // Huddle is the internal-only default, so adding an external still follows
+  // the normal tree to obtain a real invitation join link.
+  if (input.intent === 'attendee_update' && !hasOwnerHint
+      && input.existingLocation !== undefined && input.existingIsOnline !== undefined
+      && (input.existingLocation.trim() !== '' || input.existingIsOnline)
+      && input.existingLocation.trim() !== HUDDLE_LABEL) {
+    let location=input.existingLocation;
+    const office=profile.meetings.office_location;
+    if (isOfficeDay && input.participantCount>=4 && office?.short_label
+        && location.trim().toLowerCase()===office.short_label.trim().toLowerCase()) {
+      location=office.meeting_room_label || 'Meeting Room';
+    }
+    return {kind:'resolved',location,
+      isOnline:input.existingIsOnline || (!isPhoneLocationString(location)
+        && (input.hasExternalAttendee || input.anyParticipantRemote===true || effectiveDay.isAway)),
+      ...(isConfiguredMeetingRoom(profile,location)?{addRoomEmail:true}:{}),
+      reasoning:'attendee edit preserves the chosen venue and existing join link; add remote access or room capacity when needed'};
+  }
 
   if (
     input.intent === 'move' &&

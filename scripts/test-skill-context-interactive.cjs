@@ -52,6 +52,8 @@ async function run(steps, extra = {}) {
     luxon: { DateTime },
     '../../utils/logger': logger,
     '../../utils/detectMessageLanguage': { detectMessageLanguage: () => 'English' },
+    './schedulingOptions': compile(read('src/core/orchestrator/schedulingOptions.ts'),{luxon:{DateTime}},'schedulingOptions'),
+    './schedulingFinish': {schedulingFinishTool:()=>({name:'finish_scheduling',description:'Return answer',input_schema:{type:'object',properties:{}}})},
     '../../skills/registry': {
       WRITE_TOOLS: new Set(['create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting']),
       executeSkillTool: async (name, args, context) => {

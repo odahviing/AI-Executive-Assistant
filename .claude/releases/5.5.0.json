@@ -1,0 +1,175 @@
+{
+  "version": "5.5.0",
+  "status": "validation-complete",
+  "previousMinor": {
+    "version": "5.4.0",
+    "sha": "b49b64b585963fa49f4d5d9ff43abeee80565ac6"
+  },
+  "previousLive": {
+    "version": "5.4.7",
+    "sha": "758e1d5ca4b90cd78cd2c2b045c2316cf2f60b3e"
+  },
+  "authorization": "Owner requested a foundational scheduling repair and live 5.5 minor wrap, explicitly allowed SOLO. Latest instruction prohibits further real-model simulations because of cost; finish queued repairs and approach release. No new model simulations were run after that instruction.",
+  "reviewMode": "Solo cumulative integration and Golden structural review plus isolated native regressions. No independent Bouncer review is claimed.",
+  "areas": [
+    {
+      "name": "Request continuity and appointment membership",
+      "root": "src/core/orchestrator/buildTurnContext.ts; src/core/social/classifyTurn.ts; src/db/conversations.ts",
+      "change": "Bind follow-ups to the selected request rather than the most recently mentioned meeting. Preserve membership, explicit contact bindings, date/duration choices and confirmed-event identity. Reconcile source-bound per-appointment groups instead of flattening separate appointments."
+    },
+    {
+      "name": "Recipient identity",
+      "root": "src/memory/resolveAttendeeEmails.ts; src/skills/meetings/bookingRequest.ts; src/core/requests/resolver.ts",
+      "change": "Carry human-supplied and approved mailboxes through planning and replay. Retain namesake/address ambiguity holds, missing-roster checks and authenticated requester identity. Explicitly labelled new participants can be added to an existing request without losing their address."
+    },
+    {
+      "name": "Approval and request lifecycle",
+      "root": "src/tasks/skill.ts; src/core/requests/resolver.ts; src/core/orchestrator/requesterMeetingState.ts; src/skills/meetings/ops/handlers/calendarReads.ts",
+      "change": "Keep the concrete owner question, executable action and original requester together. Separate approval from confirmed action and notification delivery. Withdraw only the selected request. A proven arranger may request cancellation through the existing owner-approval path even when not an attendee."
+    },
+    {
+      "name": "Scheduling evidence and clock authority",
+      "root": "src/skills/meetings/planMeeting.ts; src/skills/meetings/ops/handlers/findAvailableSlots.ts; src/utils/availabilityPreCheck.ts; src/utils/weTimeResolver.ts",
+      "change": "Preserve scoped availability, actual rejection reasons and incomplete-provider uncertainty. Search and mutation consumers share the existing scheduling spine. Preserve exact human clock frames and the same source-bound calendar date across search and required-day checks."
+    },
+    {
+      "name": "Holds and existing invitations",
+      "root": "src/core/social/bindOfferedDay.ts; src/core/orchestrator/index.ts; src/skills/meetings/ops/handlers/createMeeting.ts; src/utils/closeMeetingArtifacts.ts",
+      "change": "Select holds from the delivered offer and preserve holder/event/request identity. Existing invitation corrections retain the real event; successful retries remain idempotent. Confirm cancellation before closing related artifacts."
+    },
+    {
+      "name": "Concise answers with trustworthy receipts",
+      "root": "src/core/orchestrator/schedulingFinish.ts; src/core/orchestrator/schedulingOptions.ts; src/core/orchestrator/turnHelpers.ts; src/utils/guards/runOutputGates.ts; src/utils/claimChecker.ts",
+      "change": "The execution planner produces the final answer and verified option IDs. Render clocks, groups and durations from structured facts. Retain complete questions and earlier typed action receipts when later reads occur; pending, failed and unconfirmed outcomes remain distinct."
+    },
+    {
+      "name": "One interpretation and one answer writer",
+      "root": "src/core/social/classifyTurn.ts; src/core/orchestrator/index.ts",
+      "change": "Consolidate operation interpretation into the existing Haiku classification. Remove the additional Sonnet invitation interpreter, fallback scheduling writer and clock-choice judge from the candidate. Preserve the existing planner and output-gate tiers."
+    }
+  ],
+  "charter": {
+    "security": "Authenticated caller, private-calendar projections and Connection boundaries remain enforced in code.",
+    "scheduling": "Existing planMeeting/checkSlot spine, duration rules, owner approval, attendee-hours consent, duplicate-create and duplicate-move protections remain.",
+    "cost": "No additional runtime model tier or standalone model stage is shipped. No real-LLM verification after the owner's cost restriction.",
+    "privateProfile": "Read-only VM evidence confirms Wednesday 05:30–14:30 America/New_York and the requested Boston address. Other weekdays remain unchanged. No private config was written. The original wrong-city ref was reassessed as already-fixed; the historical full-profile review is not asserted current."
+  },
+  "conversationEvidence": {
+    "finalAcceptance": "Not established. No claim of 95% or of all 53 conversations being corrected.",
+    "retainedFullRun": {
+      "name": "request-selection-20261118",
+      "conversations": 53,
+      "wholeConversationPasses": 39,
+      "humanTurns": 257,
+      "passingTurns": 218,
+      "scope": "Earlier source, before final queued repairs and classifier/writer consolidation; raw automated judgments, not a final-source acceptance score."
+    },
+    "retainedHardSubset": {
+      "name": "decision-integrity-20261118",
+      "conversations": 10,
+      "wholeConversationPasses": 0,
+      "humanTurns": 140,
+      "passingTurns": 107,
+      "scope": "Earlier source; real conversational failures and some disputed judgments. Kept as negative evidence. Final local fixes address proven producer/consumer defects; no later LLM replay was authorized."
+    },
+    "limitation": "Native tests verify execution, context, privacy and rendering contracts with model responses isolated. They do not prove the model's conversational judgment, concision or real-world success rate."
+  },
+  "bookkeeping": {
+    "shippingIndependentlyReviewedRefs": [],
+    "manualReleaseEvidence": "Seven repair areas under the explicit SOLO instruction. Do not manufacture independently verified ledger rows.",
+    "nativeBookkeepingPlan": "Not applicable to the manual SOLO scope: native shipping-ref helper expects independently reviewed implementations. Preserve the existing stale private-YAML review rather than calling it current or editing evidence.",
+    "githubClosures": [],
+    "githubPartialComments": [
+      33,
+      155
+    ],
+    "nativeVerificationException": {
+      "ref": "nov13-boston-office-location",
+      "status": "blocked-independent-review",
+      "ownerOverride": "Explicit SOLO instruction; no independent Bouncer pass is manufactured.",
+      "configurationProof": "artifacts/workshop-verification/wrap-5.5.0/solo-review/vm-office-label.txt",
+      "disposition": "Original wrong-city field read directly from local and deployed YAML and reassessed as already-fixed. The native engine still requests an independent review for this historic implemented ref. This is retained, not reported green.",
+      "reportCheck": "artifacts/workshop-verification/wrap-5.5.0/solo-review/report-preflight-final.log"
+    }
+  },
+  "checks": {
+    "full": {
+      "status": "passed",
+      "suiteZoneExecutions": 354,
+      "assertions": 8512,
+      "typecheck": "passed",
+      "evidence": "artifacts/workshop-verification/wrap-5.5.0/service-full-checkpoint-16/report.json",
+      "sha256": "3243e8533a293de1bb7703554741ab6fadc1b15655865f19c225d756698b23c6"
+    },
+    "finalAffected": {
+      "status": "passed",
+      "suiteZoneExecutions": 35,
+      "assertions": 923,
+      "typecheck": "passed",
+      "evidence": "artifacts/workshop-verification/wrap-5.5.0/final-affected-checkpoint/report.json",
+      "sha256": "262989c1c38db2614f9b31ada65c8c53c091f6c72311a6c41de203cd5366b547"
+    },
+    "reconciliation": {
+      "changedAfterFull": [
+        "scripts/test-conversation-decision-context.cjs",
+        "scripts/test-orchestrator-health-vacuous-aggregation.cjs",
+        "src/core/orchestrator/buildTurnContext.ts",
+        "src/core/orchestrator/index.ts"
+      ],
+      "reason": "Three reproduced regressions: explicit attendee binding was accepted by classification but discarded by context; an ambiguous-clock continuation invoked an additional judge rather than the existing source-bound clock frame.",
+      "before": "conversations/final-bounded-before.log: 0 pass, 3 fail (56 unrelated tests skipped by test-name selection).",
+      "after": "conversations/final-bounded-after.log: 59 pass, no skips/failures.",
+      "dependencySelection": "33 affected suites selected from actual imports and fixture dependencies; 35 suite/zone executions. Unaffected full-checkpoint coverage retained.",
+      "finalScope": "Full source checkpoint plus bounded post-checkpoint repairs and a fresh whole-project typecheck. Not a second all-suites run on the final source.",
+      "afterExecutableChecks": {
+        "changed": [
+          "package-lock.json",
+          "package.json"
+        ],
+        "impact": "Only package version fields; dependency trees and executable source unchanged. Original snapshot reports retained; no fresh native executable pass claimed.",
+        "evidence": "artifacts/workshop-verification/wrap-5.5.0/solo-review/metadata-reconciliation.json"
+      },
+      "finalFormatting": [
+        {
+          "file": "scripts/test-cancellation-owner-approval.cjs",
+          "beforeSha256": "0b7ed049eb8517a11986d4dce883a39f528c12bf2a294f20b5fbc791f40e84d6",
+          "afterSha256": "e4374571511eb717fbabfc01a3388a03dbe27b4c854a6683dadd0984dd466f65",
+          "change": "Remove final empty line only; all non-trailing-whitespace bytes identical."
+        },
+        {
+          "file": "scripts/test-earlier-receipt-evidence.cjs",
+          "beforeSha256": "5b268b946816a21d603e3ea28a536abdfd1f80a40125b5b26f96fcc60b4d2201",
+          "afterSha256": "acdb863a6b756764b533ae4ea8ee56904b3e903ef095be8383f6f505f421a535",
+          "change": "Remove final empty line only; all non-trailing-whitespace bytes identical."
+        },
+        {
+          "file": "src/core/orchestrator/schedulingFinish.ts",
+          "beforeSha256": "dcfa0dd522d1e13b7b07a00bfbbf832664d391a3b8ba2cafe5d7c5951c7fd136",
+          "afterSha256": "751ecf665edf96429751dc6f48f3d7156463a06007c20b9ea59ef45e674428f2",
+          "change": "Remove final empty line only; all non-trailing-whitespace bytes identical."
+        }
+      ]
+    },
+    "golden": {
+      "mode": "SOLO structural paper review",
+      "items": 30,
+      "evidence": "artifacts/workshop-verification/wrap-5.5.0/solo-review/golden-report-release-formatted.json",
+      "limitation": "Semantic model behavior is explicitly untested; no independent reviewer."
+    }
+  },
+  "metadata": [
+    {
+      "file": "package.json",
+      "beforeSha256": "f7380676d955cc8b99258bb499fb1224cc8fbcbe72feaf94ad910f6a8db76cd8",
+      "afterSha256": "816f9af673f0b2b765e0980910660ba7f982c0a1a771d5178e190be09615ac32",
+      "change": "Version fields only, 5.4.7 to 5.5.0; dependencies unchanged."
+    },
+    {
+      "file": "package-lock.json",
+      "beforeSha256": "6f23fbda4d24071e76c9735052e3e90d5ff45557ef4217f0afb0fee06c8dea48",
+      "afterSha256": "ff8955a1fef10830b4e5960332de0ea38d17eb67dd8ebb7f284bf9dc92f3b1fc",
+      "change": "Version fields only, 5.4.7 to 5.5.0; dependencies unchanged."
+    }
+  ],
+  "sessionStarter": "Version remains derived from package.json by the canonical SESSION_STARTER.md command pointer; no copied stale literal."
+}

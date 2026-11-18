@@ -1011,7 +1011,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
                   ...hours,
                   note: hours.source === 'manual'
                     ? `Stated window — what slot searches clip to. It outranks any hours mentioned in notes or content (older prose); report THIS as ${row?.name ?? query}'s hours.`
-                    : `No hours stated for ${row?.name ?? query} yet — this recorded regular week was initialized from timezone defaults once; it stays until edited. Dated colleague exceptions are unsupported.`,
+                    : `No hours stated for ${row?.name ?? query} yet — these are the timezone defaults used by slot searches. Save explicit changes with working_hours_structured; preserve the other weekdays and window boundaries. Dated colleague exceptions are unsupported.`,
                 },
               }
             : {}),

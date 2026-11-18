@@ -95,6 +95,8 @@ for (const kind of ['create','move']) {
     const exactRequestClock = {clock:'19:00',zone:'Asia/Jerusalem',quote:'7pm Israel time'};
     const wrong = await h.normalizeHandler(kind,{[key]:'2026-11-09T19:00:00-05:00',stated_zone:'home'}, {exactRequestClock});
     assert.equal(wrong.reason,'requested_clock_mismatch');
+    assert.equal(wrong.error,'requested_clock_mismatch');
+    assert.deepEqual(Array.from(wrong.choices),[]);
     assert.ok(wrong.message.includes('19:00'));
     const correct = await h.normalizeHandler(kind,{[key]:'2026-11-09T12:00:00-05:00',stated_zone:'home'}, {exactRequestClock});
     assert.equal(correct.args[key],'2026-11-09T12:00:00-05:00');

@@ -7,7 +7,7 @@ const rev=process.argv.includes('--source-revision')?process.argv[process.argv.i
 const sourceAt=process.argv.indexOf('--source-root');const sourceRoot=sourceAt<0?null:process.argv[sourceAt+1];
 const source=p=>sourceRoot&&fs.existsSync(sourceRoot+'/'+p.split('/').pop())?fs.readFileSync(sourceRoot+'/'+p.split('/').pop(),'utf8'):rev?cp.execFileSync('git',['show',`${rev}:${p}`],{encoding:'utf8'}):fs.readFileSync(p,'utf8');
 const ctx={profile,result:{toolSummaries:[],bookingOccurred:false},history:[],userMessage:'yes',senderId:'UYAEL',channelId:'DYAEL',threadTs:'1',role:'colleague'};
-const hedge='That outcome is not confirmed.';
+const hedge="I don't have confirmed information about that.";
 const draft='There was a problem identifying the meeting at 09:00.';
 const receipt='[create_approval: kind=policy_exception] mutated=task notified=approval_owner';
 const pendingRow={owner_user_id:profile.user.slack_user_id,kind:'approval',state:'awaiting_owner',
@@ -41,6 +41,19 @@ test('other pending approvals carry their status without claiming a cancellation
  const reply=await pendingReply({rows:[{...pendingRow,details_json:'{}'}]});
  assert.match(reply,/request is awaiting/);assert.doesNotMatch(reply,/cancel/);
 });
+
+test('a pending booking claim repairs only the false clause and retains the necessary question',async()=>{
+ const original='I added Tal to the invitation. I updated the pending request. Whose is the second email?';
+ const repaired='I updated the pending request. Whose is the second email?';let rewrites=0;
+ const booking={...pendingRow,id:'booking',details_json:JSON.stringify({deferred_action:{tool:'create_meeting',args:{subject:'Rebranding'}}})};
+ const h=harness([verdict(true)],{'src/db/requests.ts':{getRequestsForThread:()=>[booking]},'src/utils/claimChecker.ts':{
+  checkReplyClaims:async()=>({claimed_action:true,action_type:'book',target_name:'Tal'}),
+  genericHonestHedge:()=>hedge,pendingApprovalNotice:()=> 'Your request is awaiting Idan.',
+  rewriteOwningTheMiss:async input=>{rewrites++;assert.equal(input.deletionOnly,true);assert.equal(input.draft,original);return repaired;}
+ }});
+ const output=await h.gates.runOutputGates(original,{...ctx,result:{bookingOccurred:false,notifiedApprovalId:'booking',toolSummaries:[receipt]}});
+ assert.equal(output,repaired);assert.equal(rewrites,1);
+});
 for(const [label,opts] of [
  ['resolved',{rows:[{...pendingRow,state:'resolved'}]}],['another requester',{rows:[{...pendingRow,requester_slack_id:'OTHER'}]}],
  ['other channel',{rows:[{...pendingRow,origin_channel:'DOTHER'}]}],['other thread',{rows:[{...pendingRow,origin_thread_ts:'other'}]}],
@@ -53,7 +66,7 @@ for(const [label,opts] of [
 for(const [name,reply,type] of [['failed-to-approval','Idan approved the meeting at 09:00.','permission_granted'],['pending-to-done','Moved the meeting at 09:00.','book'],['hebrew-approval','עידן אישר את הפגישה ב-09:00.','permission_granted'],['russian-completion','Встреча перенесена на 09:00.','book']]){
  for(const [surface,extra] of [['colleague',{}],['room',{channelId:'CROOM',senderId:'UOWNER',role:'colleague'}],['unknown',{role:undefined}]]) test(`${name}-${surface}`,async()=>{
  const seen=[];const h=harness([verdict(false,reply)],{
- 'src/utils/claimChecker.ts':{checkReplyClaims:async input=>{seen.push(input);return {claimed_action:input.reply===reply,action_type:type}},genericHonestHedge:()=>hedge},
+ 'src/utils/claimChecker.ts':{...checkerHarness('').checker,checkReplyClaims:async input=>{seen.push(input);return {claimed_action:input.reply===reply,action_type:type}},genericHonestHedge:()=>hedge},
  'src/db/requests.ts':{getLatestRequestForThread:()=>null,getRequestsForThread:()=>[{subject:'Meeting',state:'awaiting_owner',outcome_json:null}]}
  });
  assert.equal(await h.gates.runOutputGates(draft,{...ctx,...extra}),hedge);assert.ok(seen.some(x=>x.reply===reply));assert.equal(h.forbidden.length,0);
@@ -63,9 +76,9 @@ for(const [name,text,rows] of [['approved-recap','Idan approved; the move is sti
  const seen=[];const h=harness([verdict(true)],{'src/utils/claimChecker.ts':{checkReplyClaims:async x=>{seen.push(x);return {claimed_action:false}},genericHonestHedge:()=>hedge},'src/db/requests.ts':{getLatestRequestForThread:()=>null,getRequestsForThread:()=>rows}});
  assert.equal(await h.gates.runOutputGates(text,ctx),text);
  });
-for(const changed of [false,true]) test(`unknown-check-${changed?'rejects-rewrite':'preserves-original'}`,async()=>{
+for(const changed of [false,true]) test(`unknown-check-${changed?'restores-original':'preserves-original'}`,async()=>{
  const h=harness([changed?verdict(false,'Idan approved at 09:00.'):verdict(true)],{'src/utils/claimChecker.ts':{checkReplyClaims:async()=>({claimed_action:false,failed_open:true}),genericHonestHedge:()=>hedge},'src/db/requests.ts':{getLatestRequestForThread:()=>null,getRequestsForThread:()=>{throw Error('offline')}}});
- assert.equal(await h.gates.runOutputGates(draft,ctx),changed?hedge:draft);
+ assert.equal(await h.gates.runOutputGates(draft,ctx),draft);
 });
 function dates(pair,names){
  const stubs={'luxon':{DateTime},'../llm/client':{getAnthropicClient:()=>({messages:{create:async()=>({content:[{type:'text',text:JSON.stringify({pairs:[pair],weekdayNames:names})}]})}})},'../llm/models':{MODEL_HAIKU:'mock'},'./logger':{__esModule:true,default:{warn(){}}},'./effectiveToday':{getEffectiveToday:()=>DateTime.fromISO('2026-10-07')},'./extractJson':{parseFirstJsonObject:JSON.parse},'./usageLog':{logLlmUsage(){}}};
@@ -86,7 +99,7 @@ for(const [surface,extra] of [['owner',{senderId:'UOWNER',role:'owner'}],['email
 });
 // Actual semantic classifier module: fixtures prove prompt input/structured
 // verdict handling only. They do not assert production model obedience.
-function checkerHarness(response, language='English'){const calls=[];const deps={'@anthropic-ai/sdk':{},'../llm/client':{getAnthropicClient:()=>({messages:{create:async req=>{calls.push(req);if(response instanceof Error)throw response;return {content:[{type:'text',text:typeof response==='function'?response(req):response}]}}}})},'../llm/models':{MODEL_HAIKU:'fixture',MODEL_SONNET:'fixture',SONNET:{model:'fixture'}},'./logger':{__esModule:true,default:{warn(){},info(){},debug(){}}},'./usageLog':{logLlmUsage(){}},'./detectMessageLanguage':{detectMessageLanguage:()=>language},'./extractJson':{extractFirstJsonObject:s=>s}};
+function checkerHarness(response, language='English'){const calls=[];const deps={'@anthropic-ai/sdk':{},'../llm/client':{getAnthropicClient:()=>({messages:{create:async req=>{calls.push(req);if(response instanceof Error)throw response;if(req.tools?.[0]?.input_schema?.properties?.remove_clauses){const sentences=JSON.parse(req.messages[0].content.split('Original sentences: ')[1].split('\n')[0]);return {stop_reason:'tool_use',content:[{type:'tool_use',name:'verdict',input:{verdict:'rewrite',remove_clauses:sentences.map(s=>({sentence:s.index,quote:s.text})),removal_verified:true}}]};} let text=typeof response==='function'?response(req):response;try{text=JSON.stringify(require('./fixtures/action-claim-verdict.cjs')(JSON.parse(text),req))}catch{} return {content:[{type:'text',text}]}}}})},'../llm/models':{MODEL_HAIKU:'fixture',MODEL_SONNET:'fixture',SONNET:{model:'fixture'}},'./logger':{__esModule:true,default:{warn(){},info(){},debug(){}}},'./usageLog':{logLlmUsage(){}},'./detectMessageLanguage':{detectMessageLanguage:()=>language},'./extractJson':{extractFirstJsonObject:s=>s}};
  const m={exports:{}};const code=ts.transpileModule(source('src/utils/claimChecker.ts'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;
  vm.runInNewContext(`(function(require,module,exports){${code}\n})`,{Date,setTimeout,clearTimeout})(key=>{assert.ok(key in deps,key);return deps[key]},m,m.exports);return {checker:m.exports,calls};}
 test('actual-checker-final-outcome-contract',async()=>{const h=checkerHarness(JSON.stringify({claimed_action:false}));const context='Requests: [{"subject":"Meeting","approved":true,"replayed":false}]';await h.checker.checkReplyClaims({reply:'Idan approved, execution pending.',toolSummaries:[],bookingOccurred:false,ownerFirstName:'Idan',mode:'owner_fact',finalOutcomeContext:context});const p=h.calls[0].messages[0].content;assert.ok(p.includes(context));assert.ok(p.includes('approved=true is permission only, never completion'));assert.ok(p.includes('An earlier assistant assertion is never evidence'));});

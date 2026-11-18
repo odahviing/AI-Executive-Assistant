@@ -5,7 +5,7 @@ const before=process.argv.includes('--instructor-before');
 function fixtureFrom(file,source){const m={exports:{}};vm.runInNewContext('(function(require,module,exports,__dirname){'+source+'\n})',{console,process,Date,Map,Set,Buffer})(name=>name==='node:test'?{test(){}}:createRequire(path.join(__dirname,file))(name),m,m.exports,__dirname);return m.exports;}
 let context=fs.readFileSync(path.join(__dirname,'test-turn-context-boundaries.cjs'),'utf8');
 context=context.replace("const before = process.argv.includes('--before');",'const before = false;');
-context=context.replace('getAwaitingOwnerRequests: () => []','getAwaitingOwnerRequests: () => state.pending || []').replace('parseDetails: () => null','parseDetails: r => r.details || null');
+context=context.replace('parseDetails: row => row?.details_json ? JSON.parse(row.details_json) : null','parseDetails: row => row?.details_json ? JSON.parse(row.details_json) : row?.details ?? null');
 if(before)context=context.replace('fs.readFileSync(path.join(root, file)',"fs.readFileSync(path.join(root, file === 'src/core/orchestrator/systemPrompt.ts' ? 'artifacts/workshop-verification/minor-5.2.0/instructor/before/systemPrompt.ts' : file)");
 const {fixture}=fixtureFrom('test-turn-context-boundaries.cjs',context+'\nmodule.exports={fixture};');
 let meeting=fs.readFileSync(path.join(__dirname,'test-instructor-image-booking-grounding.cjs'),'utf8').split('const tool = loadCreateMeetingTool();')[0];

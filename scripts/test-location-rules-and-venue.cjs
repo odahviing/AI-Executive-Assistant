@@ -184,9 +184,10 @@ test('L2 · the search walker no longer clamps days itself and feeds the rule (s
 // ── L3 · create_meeting's Graph location is plan.location only ────────────
 const createFile = 'src/skills/meetings/ops/handlers/createMeeting.ts';
 function graphLocationFor(args, resolvedLocationParts) {
-  const prop = one(collect(source(createFile), n => ts.isPropertyAssignment(n) && n.name.getText() === 'location'
-    && n.initializer.getText().includes('resolvedLocationParts.join')), 'create location property');
-  return compile(`const location = ${prop.initializer.getText()};\nmodule.exports = { location };`,
+  const prop = one(collect(source(createFile), n => ts.isVariableDeclaration(n) && n.name.getText() === 'bookedLocation'), 'create location value');
+  const call=one(collect(source(createFile),n=>ts.isCallExpression(n)&&n.expression.getText()==='createMeeting'),'Graph create');
+  assert.match(call.arguments[0].getText(),/location: bookedLocation/);
+  return compile(`const location = ${prop.initializer.getText().replace('(await import(\'../../../../utils/textScrubber\'))','require(\'../../../../utils/textScrubber\')')};\nmodule.exports = { location };`,
     { args, resolvedLocationParts },
     name => { if (name.endsWith('utils/textScrubber')) return { scrubInternalLeakage: s => s }; throw Error(`FORBIDDEN module: ${name}`); }).location;
 }
@@ -349,6 +350,32 @@ const resolve = input => resolveLocationModule.resolveLocation({
 });
 const shape = v => ({ kind: v.kind, isOnline: v.isOnline, location: v.location, addRoomEmail: v.addRoomEmail });
 const OFFICE = '2026-10-04T10:00:00+03:00', HOME = '2026-10-05T10:00:00+03:00', AWAY = '2026-10-06T10:00:00+03:00';
+
+test('attendee edit keeps the chosen onsite venue and link after an external guest is removed',()=>{
+ const v=resolve({intent:'attendee_update',startIso:HOME,participantCount:3,hasExternalAttendee:false,existingLocation:'Reflectiz, 184 High Street, 6th Floor, Boston, MA',existingIsOnline:true});
+ assert.equal(v.location,'Reflectiz, 184 High Street, 6th Floor, Boston, MA');assert.equal(v.isOnline,true);
+});
+test('adding an external to an existing onsite meeting adds access without reopening venue choice',()=>{
+ const v=resolve({intent:'attendee_update',startIso:OFFICE,participantCount:3,hasExternalAttendee:true,existingLocation:'Customer Boardroom',existingIsOnline:false});
+ assert.equal(v.kind,'resolved');assert.equal(v.location,'Customer Boardroom');assert.equal(v.isOnline,true);
+});
+test('attendee edit can upgrade the configured small office to the meeting room',()=>{
+ const p=profile();p.meetings.room_email='room@reflectiz.com';p.meetings.office_location.meeting_room_label='Big meeting room';
+ const v=resolve({profile:p,intent:'attendee_update',startIso:OFFICE,participantCount:5,hasExternalAttendee:false,existingLocation:'Reflectiz Office',existingIsOnline:true});
+ assert.equal(v.location,'Big meeting room');assert.equal(v.addRoomEmail,true);
+});
+test('a Huddle gaining an external still obtains a real meeting link',()=>{
+ const v=resolve({intent:'attendee_update',startIso:HOME,participantCount:3,hasExternalAttendee:true,existingLocation:'Huddle',existingIsOnline:false});
+ assert.equal(v.kind,'resolved');assert.equal(v.isOnline,true);assert.notEqual(v.location,'Huddle');
+});
+test('removing a guest preserves the current online meeting',()=>{
+ const v=resolve({intent:'attendee_update',startIso:HOME,participantCount:2,hasExternalAttendee:false,existingLocation:'https://teams.microsoft.com/l/meetup-join/fixture',existingIsOnline:true});
+ assert.equal(v.isOnline,true);assert.match(v.location,/teams.microsoft.com/);
+});
+test('an explicit venue change still replaces the old venue',()=>{
+ const v=resolve({intent:'attendee_update',startIso:OFFICE,participantCount:2,hasExternalAttendee:true,existingLocation:'Customer Boardroom',existingIsOnline:true,ownerIsOnlineHint:true,initiatorRole:'owner'});
+ assert.equal(v.location,'');assert.equal(v.isOnline,true);
+});
 
 test('A · office day + external in a different zone + owner said in-person → office address WITH the link', () => {
   const v = resolve({ startIso: OFFICE, participantCount: 2, hasExternalAttendee: true, externalAttendeeInDifferentTz: true, ownerIsOnlineHint: false, initiatorRole: 'owner' });

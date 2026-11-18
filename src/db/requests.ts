@@ -28,6 +28,7 @@ export function findRefusedBookingApproval(booking: RefusedBooking): {approval_i
 }
 import type {
   CreateRequestInput,
+  ApprovalSubkind,
   NextCheckHandler,
   RequestPhase,
   RequestRow,
@@ -856,6 +857,8 @@ export function getOpenScannerItems(ownerUserId: string): RequestRow[] {
 
 export interface UpdateRequestPatch {
   state?: RequestState;
+  /** An undecided owner question can become its verified calendar action. */
+  subkind?: ApprovalSubkind;
   /**
    * v3.1 — kind-namespaced activity sub-state. Typed `RequestPhase | null`
    * (updateRequestPatch-phase-typed-string-not-RequestPhase, 2026-08-14) — the
@@ -900,6 +903,15 @@ export interface UpdateRequestPatch {
 export function updateRequest(id: string, patch: UpdateRequestPatch): void {
   const sets: string[] = [];
   const params: Record<string, unknown> = { id };
+
+  if (patch.subkind !== undefined) {
+    const row = getRequest(id);
+    if (row?.kind !== 'approval' || row.state !== 'awaiting_owner'
+      || !(APPROVAL_SUBKINDS as readonly string[]).includes(patch.subkind)) {
+      throw new Error('Only an undecided approval can change approval kind');
+    }
+    sets.push('subkind = @subkind'); params.subkind = patch.subkind;
+  }
 
   if (patch.state !== undefined) {
     sets.push(`state = @state`, `state_changed_at = datetime('now')`);

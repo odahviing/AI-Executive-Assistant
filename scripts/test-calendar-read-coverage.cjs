@@ -11,7 +11,7 @@ const { harness } = require('./test-timezone-owner-decisions.cjs');
 const sourceFile = 'src/connectors/graph/calendarReads.ts';
 const repo = path.resolve(__dirname, '..');
 const revisionIndex = process.argv.indexOf('--revision');
-const readSource = file => revisionIndex < 0 ? fs.readFileSync(path.join(repo, file), 'utf8')
+const readSource = file => process.env.CALENDAR_READ_BEFORE && file===sourceFile ? fs.readFileSync(process.env.CALENDAR_READ_BEFORE,'utf8') : revisionIndex < 0 ? fs.readFileSync(path.join(repo, file), 'utf8')
   : cp.execFileSync('git', ['show', process.argv[revisionIndex + 1] + ':' + file], { cwd: repo, encoding: 'utf8' });
 const source = readSource(sourceFile);
 const compiled = ts.transpileModule(source, { compilerOptions: {
@@ -54,6 +54,35 @@ function provider({ schedule, page } = {}) {
   }, mod, mod.exports);
   return { reads: mod.exports, posts, queries, warm, eventCache };
 }
+
+for(const [label,from,to,items,expected] of [
+ ['different day','2026-12-15T09:00:00Z','2026-12-15T09:25:00Z',[],[]],
+ ['different time','2026-12-11T11:00:00Z','2026-12-11T11:25:00Z',[],[]],
+ ['separate known clash','2026-12-11T11:00:00Z','2026-12-11T11:25:00Z',
+  [{start:{dateTime:'2026-12-11T11:00:00Z'},end:{dateTime:'2026-12-11T11:25:00Z'},status:'busy'}],['busy']],
+])test('a moving event with unavailable attendee identity leaves '+label+' independently checked',async()=>{
+ const moving={id:'old-occurrence',type:'occurrence',iCalUId:'known-uid',isCancelled:false,
+  start:{dateTime:late},end:{dateTime:lateEnd},attendees:[{emailAddress:{address:person}}]};
+ const p=provider({schedule:email=>({scheduleId:email,scheduleItems:items}),page:url=>{
+  if(url.includes('/events/old-occurrence'))return moving;
+  throw Error('participant event access unavailable');
+ }}),diag={};
+ const result=await p.reads.getFreeBusyForDecision(owner,[person],from,to,'UTC',diag,['old-occurrence']);
+ assert.deepEqual(result[person].map(slot=>slot.status),expected);
+ assert.deepEqual(diag.notChecked??[],[]);
+ assert.equal(p.queries.filter(query=>query.url.includes('/calendarView')).length,0);
+});
+
+test('overlapping unidentified moving occurrence remains unconfirmed',async()=>{
+ const moving={id:'old-occurrence',type:'occurrence',iCalUId:'known-uid',isCancelled:false,
+  start:{dateTime:late},end:{dateTime:lateEnd},attendees:[{emailAddress:{address:person}}]};
+ const p=provider({schedule:email=>({scheduleId:email,scheduleItems:[busyItem]}),page:url=>{
+  if(url.includes('/events/old-occurrence'))return moving;
+  throw Error('participant event access unavailable');
+ }}),diag={};
+ await p.reads.getFreeBusyForDecision(owner,[person],late,lateEnd,'UTC',diag,['old-occurrence']);
+ assert.deepEqual(diag.notChecked,[person]);
+});
 
 test('the last attendee clash in a long window reaches both search and the exact booking read', async () => {
   const p = provider(), h = harness({ ownerZone: 'UTC', travel: null });
@@ -139,7 +168,7 @@ test('an offset-bearing move reads the actual mailbox day before excluding its s
     start: { dateTime: from, timeZone: 'UTC' }, end: { dateTime: to, timeZone: 'UTC' },
     attendees: [{ emailAddress: { address: person } }] };
   const concurrent = { ...source, id: 'other', iCalUId: 'other-uid', showAs: 'busy' };
-  const p = provider({ page: (url, query) => url.includes('/events/') ? source
+  const p = provider({ schedule:email=>({scheduleId:email,scheduleItems:[{start:source.start,end:source.end,status:'busy'}]}),page: (url, query) => url.includes('/events/') ? source
     : { value: overlap(concurrent, query.startDateTime, query.endDateTime) ? [concurrent] : [] } });
   const diag = {};
   const busy = await p.reads.getFreeBusyForDecision(owner, [person], from, to, 'America/New_York', diag, ['source']);
@@ -165,11 +194,11 @@ test('the free/busy tool keeps a checked mailbox when another mailbox is incompl
 for (const problem of ['repeated cursor', 'invalid status', 'nonpositive duration', 'missing page', 'absent from event view']) {
   test('move preserves a disjoint known busy item: ' + problem, async () => {
     const source = { id: 'source', iCalUId: 'source-uid', isCancelled: false, type: 'singleInstance',
-      start: { dateTime: start }, end: { dateTime: '2026-10-01T09:25:00Z' },
+      start: { dateTime: '2026-12-11T08:00:00Z' }, end: { dateTime: '2026-12-11T08:25:00Z' },
       attendees: [{ emailAddress: { address: person } }] };
     const event = { ...source, id: 'other', iCalUId: 'other', start: busyItem.start, end: busyItem.end, showAs: 'busy' };
     let pages = 0;
-    const p = provider({ page: url => {
+    const p = provider({ schedule:email=>({scheduleId:email,scheduleItems:[{start:source.start,end:source.end,status:'busy'},busyItem]}),page: url => {
       if (url.includes('/events/')) return source;
       pages++;
       if (problem === 'repeated cursor' && pages <= 2) return { value: [], '@odata.nextLink': 'repeated' };
@@ -178,7 +207,7 @@ for (const problem of ['repeated cursor', 'invalid status', 'nonpositive duratio
       if (problem === 'missing page') return {};
       return { value: [] };
     } });
-    const diag = {}, data = await p.reads.getFreeBusyForDecision(owner, [person], late, lateEnd, 'UTC', diag, ['source']);
+    const diag = {}, data = await p.reads.getFreeBusyForDecision(owner, [person], '2026-12-11T07:00:00Z', '2026-12-11T10:00:00Z', 'UTC', diag, ['source']);
     assert.deepEqual(data[person].map(slot => slot.status), ['busy']);
     assert.deepEqual(diag.notChecked, problem === 'absent from event view' ? [] : [person]);
     if (problem === 'repeated cursor') assert.equal(pages, 2);

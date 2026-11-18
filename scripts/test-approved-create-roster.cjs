@@ -90,8 +90,9 @@ function harness({ ambiguous = false, postFails = false } = {}) {
   });
   const preflight = compile('module.exports = function(rawAttendees,context){const attendees=rawAttendees;\n'+
     approvedRosterGuard+'\n};', {}, {});
+  const venueValue=one(handler,n=>ts.isVariableDeclaration(n)&&n.name.getText()==='bookedLocation');
   const run = compile('module.exports = async function(args,context){const attendees=args.attendees; const attendeeEmailNotes=[]; const addressConflicts=[];\n' +
-    resolveBlock.getText() + '\n' + one(handler, n => ts.isIfStatement(n) && n.expression.getText() === 'addressConflicts.length').getText() + '\n' + missingBlock.getText() + '\nconst roomEmail=context.profile.meetings?.room_email;\n' + requestedRoom.getText() + '\nreturn ' + writeCall.getText() + ';};',
+    resolveBlock.getText() + '\n' + one(handler, n => ts.isIfStatement(n) && n.expression.getText() === 'addressConflicts.length').getText() + '\n' + missingBlock.getText() + '\nconst roomEmail=context.profile.meetings?.room_email;\n' + requestedRoom.getText() + '\nconst '+venueValue.getText()+';\nreturn ' + writeCall.getText() + ';};',
     { logger, createMeeting: graph.createMeeting, HANDLER_ERROR_CODE: { ATTENDEE_MISSING_EMAIL: 'attendee_missing_email' },
       timezone: 'UTC', userEmail: profile.user.email, skipLocationField: true, resolvedLocationParts: [], effectiveIsOnline: true },
     { '../../../../memory/resolveAttendeeEmails': contact, '../../bookingRequest': plan,
@@ -586,14 +587,45 @@ test('incorrect-approve-existing-attribution-with-verbatim-owner-rejection-canno
   const card=await approval.preview();
   const attributed={requestId:approval.row().id,requestDetailsJson:approval.row().details_json,
     action:approval.effectiveAction(),disposition:'approve_existing',sourceMessageIndex:0,
-    sourceQuote:card,instructionQuote:literal};
+    sourceQuote:card,instructionQuote:literal,preservesRecipients:true};
   const result=await approval.resolveTool({}, {threadTs:'owner.1',currentUserMessage:literal,typedUserMessage:literal,
     conversationHistory:[{role:'assistant',content:card}],contextualApprovalDecisions:[attributed]});
   checkHeld(result,booking,approval);
 });
 
+for (const changeTime of [false,true]) test('contextual-owner-decision-preserves-recipients-and-closes-the-original-request-'+changeTime,async()=>{
+  const booking=harness(),{approval}=ownerReplacement(booking,[], '',{prior:[{name:'Alex',email:named.Alex}]});
+  const literal=changeTime?'Book that meeting at 16:00 instead.':'Book the meeting despite the free-time impact.';
+  const card=await approval.preview(), action=approval.effectiveAction();
+  const attributed={requestId:approval.row().id,requestDetailsJson:approval.row().details_json,action,
+    disposition:changeTime?'amend_or_search':'approve_existing',preservesRecipients:true,
+    instructionQuote:literal,sourceMessageIndex:0,sourceQuote:card};
+  const input=changeTime?{data:{tool:'create_meeting',args:{start:'2026-11-18T16:00:00Z',end:'2026-11-18T16:40:00Z'}}}:{};
+  const result=await approval.resolveTool(input,{threadTs:'owner.1',currentUserMessage:literal,typedUserMessage:literal,
+    conversationHistory:[{role:'assistant',content:card}],contextualApprovalDecisions:[attributed]});
+  assert.equal(result.ok,true,JSON.stringify(result));
+  assert.deepEqual(booking.posts,[[named.Alex]]);
+  assert.equal(approval.row().state,'resolved');
+  assert.equal(approval.effects.executes.length,1);
+  if(changeTime)assert.equal(approval.effects.executes[0].args.start,'2026-11-18T16:00:00Z');
+});
+
 
 const chosenNamesake = { name:'Alex Levin', email:'alex@design.example' };
+
+for(const changedInbox of [false,true])test('bound timing replacement keeps recipient authority separate from execution flags '+changedInbox,async()=>{
+ const booking=harness(),{approval}=ownerReplacement(booking,[],'',{prior:[{name:'Alex',email:named.Alex}]});
+ const literal='Make that meeting after my other appointment.';
+ const card=await approval.preview(),action=approval.effectiveAction();
+ const attributed={requestId:approval.row().id,requestDetailsJson:approval.row().details_json,action,
+  disposition:'amend_or_search',preservesRecipients:true,instructionQuote:literal,sourceMessageIndex:0,sourceQuote:card};
+ const args={...action.args,start:'2026-11-18T16:00:00Z',end:'2026-11-18T16:40:00Z',start_is_explicit:true,confirm_attendee_conflict:true};
+ if(changedInbox)args.attendees=[{name:'Alex',email:'unapproved@outside.test'}];
+ const result=await approval.resolveTool({data:{tool:'create_meeting',args}}, {threadTs:'owner.1',currentUserMessage:literal,typedUserMessage:literal,
+  conversationHistory:[{role:'assistant',content:card}],contextualApprovalDecisions:[attributed]});
+ if(changedInbox)checkHeld(result,booking,approval);
+ else{assert.equal(result.ok,true,JSON.stringify(result));assert.deepEqual(booking.posts,[[named.Alex]]);}
+});
 const namedAnswer = '"Alex Levin" <'+chosenNamesake.email+'>';
 
 test('cold-identity-clarification-accepts-new-full-name-and-mailbox-without-another-callback', async () => {

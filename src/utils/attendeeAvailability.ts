@@ -533,13 +533,31 @@ export function presentationLocalFieldFor(
   ownerTz: string,
   ownerProfile?: import('../config/userProfile').UserProfile,
   endIso?: string,
-): { presentation_local?: string; clock_display?: string } {
+): { presentation_local?: string; clock_display?: string;
+  per_attendee_local?: Array<{email:string;local_iso:string;local_display:string}> } {
   const emails = attendeeEmails.filter((e): e is string => typeof e === 'string' && e.length > 0);
+  const entries=loadAttendeeAvailabilityForEmails(emails, ownerEmail, ownerTz) ?? [];
   const tz = singleAttendeePresentationZone(
-    loadAttendeeAvailabilityForEmails(emails, ownerEmail, ownerTz),
+    entries,
     ownerTz,
     DateTime.fromISO(startIso, { zone: ownerTz }).toISO()!,
   );
   const rendered = tz ? renderClockInZone(startIso, ownerTz, tz) : '';
-  return presentationClockFields(rendered, 'attendee', startIso, endIso, ownerProfile);
+  const fields=presentationClockFields(rendered, 'attendee', startIso, endIso, ownerProfile);
+  // One foreign zone can coexist with people on the owner's clock. A single
+  // "Attendee time" label wrongly implies they all share that foreign zone.
+  // Carry the same per-person clock evidence already used by slot searches.
+  const instant=DateTime.fromISO(startIso,{zone:ownerTz});
+  const zones=new Set(entries.map(entry=>attendeeTzForDay(entry,instant.toISO()!)));
+  if(zones.size>1 && instant.isValid) {
+    const per_attendee_local=entries.map(entry=>{
+      const local=instant.setZone(attendeeTzForDay(entry,instant.toISO()!));
+      return {email:entry.email,local_iso:local.toISO()!,local_display:local.toFormat('EEE d MMM HH:mm ZZZZ')};
+    });
+    const attributed=per_attendee_local.map(entry=>entry.email+': '+entry.local_display).join('; ');
+    return {...fields,clock_display:ownerProfile
+      ? presentationClockFields(attributed,'attendee',startIso,endIso,ownerProfile).clock_display
+      : attributed,per_attendee_local};
+  }
+  return fields;
 }

@@ -103,6 +103,11 @@ export class StatedTimeClarificationError extends Error {
         : `${wallClock} occurs twice in ${sourceZone} because the clocks move back. Which occurrence should I use (${choices.join(' or ')})?`);
   }
   toToolResult(): { success: false; error: string; reason: string; message: string; choices: string[] } {
+    // A conflicting tool argument is repair work for the assistant. It is not
+    // ambiguity in what the human said, and must not enter the DST/zone question
+    // path used by genuinely unresolved local times.
+    if(this.reason==='requested_clock_mismatch') return {success:false,error:'requested_clock_mismatch',reason:this.reason,
+      message:this.message+' The human clock and timezone are already settled. Retry using that clock in '+this.sourceZone+'. If the date is still unspecified, ask only which date; do not ask them to confirm a different timezone.',choices:[]};
     return { success: false, error: this.code, reason: this.reason, message: this.message, choices: this.choices };
   }
 }

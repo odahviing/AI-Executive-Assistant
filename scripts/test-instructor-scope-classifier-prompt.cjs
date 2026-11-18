@@ -68,42 +68,12 @@ before(async () => {
   }
 });
 
-test('scope selection is explicitly meaning-based across languages and scripts', () => {
-  assert.match(captured.system, /Classify by meaning in any language or script/i);
-  assert.match(captured.system, /not literal examples/i);
-});
-
-test('explicit attachment-origin calendar placement selects meetings', () => {
-  assert.match(captured.system, /put the referenced item on the calendar/i);
-  assert.match(captured.system, /\['meetings'\]/);
-  assert.match(captured.system, /details are in the attachment/i);
-});
-
-test('a non-calendar image request stays general', () => {
-  assert.match(captured.system, /An attachment alone adds no scope/i);
-  assert.match(captured.system, /summarize this image/i);
-  assert.match(captured.system, /\['general'\]/);
-});
-
-test('reminders stay in the tasks scope', () => {
-  assert.match(captured.system, /tasks\s+— task list \/ reminders \/ routines \/ briefing/i);
-  assert.match(captured.system, /"remind me at 4"/i);
-});
-
-test('ordinary direct booking remains meetings', () => {
-  assert.match(captured.system, /direct booking lives here/i);
-  assert.match(captured.system, /Book Mon 10:30 with Yael[^\n]+\['meetings'\]/i);
-});
-
-test('task-list and routine examples remain tasks', () => {
-  assert.match(captured.system, /"what's pending\?"/i);
-  assert.match(captured.system, /"show my tasks"/i);
-  assert.match(captured.system, /"set up a daily routine"/i);
-});
-
-test('multi-purpose turns retain union guidance', () => {
-  assert.match(captured.system, /Default to UNION when the message could touch multiple things/i);
-  assert.match(captured.system, /What's pending\? Also any conflicts next week[^\n]+\['tasks', 'meetings'\]/i);
+test('compact scope contract preserves multilingual union and attachment intent',()=>{
+ assert.match(captured.system,/meaning in any language or script/i);assert.match(captured.system,/all relevant scopes/i);
+ assert.match(captured.system,/An attachment alone adds no scope/);assert.match(captured.system,/put its referenced item on the calendar selects meetings/);
+ assert.match(captured.system,/tasks covers reminders, pending work, routines and briefings/);
+ assert.match(captured.system,/meetings includes scheduling, availability, moves, holds, cancellations and categorizing an event/);
+ assert.match(captured.system,/A short answer inherits the work it answers/);
 });
 
 test('the existing classifier call and scope schema remain unchanged', () => {

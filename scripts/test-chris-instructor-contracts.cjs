@@ -19,10 +19,10 @@ vm.runInNewContext(ts.transpileModule(`const APPROVAL_SUBKINDS=[]; class Capture
 test('approval tool contracts match canonical composition and contextual acceptance',()=>{
   const resolve=taskCtx.result.find(t=>t.name==='resolve_approval');
   const approval=taskCtx.result.find(t=>t.name==='create_approval');
-  assert.match(resolve.description,/attributed contextual decision accepting the existing action/);
-  assert.match(resolve.description,/omit `data` \(or pass \{\}\)/);
-  assert.match(resolve.description,/amend or search is not approval of the old action/);
-  assert.match(approval.description,/Concrete timed meeting asks render the structured reason and action clock/);
+  assert.match(resolve.description,/supplied contextual decision/);
+  assert.match(resolve.description,/accept the stored action with no data/);
+  assert.match(resolve.description,/search or amend does not approve the previous action/);
+  assert.match(approval.description,/verified reason and replayable deferred_action/);
 });
 test('exact accepted instant contract and generic after grid both reach create schema',()=>{
   assert.match(create.input_schema.properties.start_is_explicit.description,/independently accepted\/approved exact instant/);
@@ -36,6 +36,14 @@ test('CONTROL offered slot remains preserved and generic anchor grid remains for
 });
 for(const [label,input] of [['owner',{}],['colleague',{senderRole:'colleague',authority:'colleague',userId:'UACTIVE',surface:'colleague_dm'}],['email',{channel:'email'}]])test(`${label} actual prompt distinguishes work, future tracking and override heads-up`,async t=>{
   const r=await fixture(t).run({...input,userMessage:'Please check this.'});
+  if(label==='owner') {
+    assert.match(r.prompt,/Use available reads to recover information before asking the owner to repeat it/);
+    assert.match(r.prompt,/Perform an authorized action before claiming it happened/);
+    assert.match(r.prompt,/do not promise a background action that has no tracked job/);
+    assert.match(r.prompt,/pending decisions and completed actions as distinct/);
+    assert.match(r.prompt,/Use tool-rendered clocks and dates, retaining the stated timezone/);
+    return;
+  }
   assert.match(r.prompt,/For immediate checking or outreach, call the matching available tool this turn/);
   assert.match(r.prompt,/Promise future work only after a tool successfully records that work/);
   assert.match(r.prompt,/preference update or calendar mutation records only its own action/);

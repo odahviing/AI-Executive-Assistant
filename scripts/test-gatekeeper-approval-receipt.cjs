@@ -6,6 +6,11 @@ const {harness,ctx,profile}=fixture(),{harness:flagHarness}=fixture(true);
 const base={ok:true,state:'cancelled',effect:'rejected; linked work cancelled'};
 const summary=(h,r)=>h.turn.summarizeToolCall('resolve_approval',{approval_id:'req_fixture'},r,profile.user.timezone);
 const owner={senderId:'UOWNER',role:'owner'};
+test('approval history preserves request identity separately from uncertain completion',()=>{
+ const s=summary(harness(),{ok:false,state:'resolved',effect:'approve_replay_unconfirmed',request_context:{subject:'Weekly sync',requester:{slack_id:'UPAUL',name:'Paul Example',email:'paul@example.test'},action:{tool:'update_meeting',args:{meeting_id:'event-1'}}}});
+ assert.ok(s.includes('Paul Example')&&s.includes('paul@example.test')&&s.includes('event-1'),s);
+ assert.ok(s.includes('UNCONFIRMED'));assert.ok(!s.includes('mutated=book'));
+});
 for(const outcome of ['sent','failed','no_requester',undefined,'unexpected'])for(const kind of ['reject','replay','noop','unresolved','error','coordinated'])test(`receipt-${kind}-${String(outcome)}`,()=>{
  const h=harness(),r={...base,requester_notify_outcome:outcome,...({replay:{action_summary:'Moved the meeting.'},noop:{effect:'approved (no replay)'},unresolved:{ok:false,reason:'already terminal'},error:{ok:false,error:'unavailable'},coordinated:{outcomes:[],remaining:[]}}[kind]??{})},s=summary(h,r);
  const expected=outcome==='sent'?'sent — requester notified (relay confirmed)':outcome==='failed'?'failed — requester NOT notified':outcome==='no_requester'?'no_requester — no requester to notify':'unknown — requester delivery not confirmed';
@@ -17,7 +22,7 @@ for(const history of [false,true])for(const outcome of ['sent','failed','no_requ
  await h.gates.runOutputGates('The decision is recorded; this is the requester notification status.',ctx(s,extra));
  const prompts=h.calls.filter(c=>!c.tools).map(c=>c.messages[0].content);
  assert.ok(prompts.some(p=>p.includes((history?'(earlier turn) ':'')+'[resolve_approval requester notification:')),JSON.stringify(prompts));
- assert.ok(prompts.some(p=>p.includes('missing receipt do NOT confirm delivery')));
+ assert.ok(prompts.some(p=>p.includes('Failed, absent or unknown notification does not establish delivery')));
 });
 test('preserved-failed-delivery-is-notified-false',()=>{const s=summary(harness(),{...base,requester_notify_outcome:'failed'});assert.ok(s.includes('requester NOT notified'));assert.ok(!s.includes('mutated=message'));});
 test('preserved-noop-cannot-ground-calendar-write',()=>{const s=summary(harness(),{...base,effect:'approved (no replay)'});assert.ok(s.includes('NO calendar change'));assert.ok(!s.includes('mutated=book'));});

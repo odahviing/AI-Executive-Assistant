@@ -14,9 +14,9 @@
  *      now (the legacy approvals table is retired). Match order: tier-0
  *      fulfillingRequestId (skip — whichever caller stamped it owns that one
  *      request's close: a resolver-driven replay, or autoMove's own auto_move
- *      row), then outcome_external_event_id, details meeting_id, origin_thread_ts, and
- *      (v4.5.x) subject+start for an orphaned create_meeting approval that a
- *      direct tool call fulfilled with none of the above to go on.
+ *      row), then outcome_external_event_id, details meeting_id, and full
+ *      subject/start/end/roster identity for an orphaned create approval.
+ *      A shared conversation thread does not identify the fulfilled meeting.
  *      See step 5 for the full cascade.
  *
  *   2. Close reschedule outreach whose context_json references this meeting_id, by
@@ -100,7 +100,7 @@ export interface CloseMeetingArtifactsResult {
   /**
    * vanished-sweep-request-close-invisible (2026-08-31) — step 5's spine
    * request closures (closeMatchedRequestWithRelay, both the direct
-   * outcome_external_event_id tier and the details/thread/orphaned-approval
+   * outcome_external_event_id tier and the details/orphaned-approval
    * tier) never had a counter of their own, so a mutation whose ONLY effect
    * was closing a request — no task, no outreach, no calendar-issue row —
    * left every field above at 0. That made the closure invisible to this
@@ -122,15 +122,6 @@ export async function closeMeetingArtifacts(params: {
    * requester (falls back to the request's own subject). Optional.
    */
   subject?: string;
-  /**
-   * The Slack thread the booking happened in. Used to thread-match the booking
-   * to its originating colleague request via request.origin_thread_ts — far
-   * more robust than exact-subject equality, which broke when a meeting's final
-   * title differed from the request's working title (Dina: request "Gong call"
-   * vs booked "Gong <> Reflectiz" → never closed → false expiry tombstone).
-   * Optional; when absent, thread-match is skipped (only id matches run).
-   */
-  bookingThreadTs?: string;
   /**
    * v3.4.6 (spine collapse) — the HARD approve→book link. The caller that owns
    * this request's own close stamps its id here; this function then SKIPS
@@ -186,6 +177,9 @@ export async function closeMeetingArtifacts(params: {
    * separation. FAIL-SAFE: absent, step 5's orphan tier is a no-op.
    */
   bookingStartIso?: string;
+  bookingEndIso?: string;
+  bookingAttendeeEmails?: string[];
+  ownerEmail?: string;
   /**
    * requester-close-loop-never-notifies-cancelled-hold (2026-08-30) — TRUE when
    * the caller did not perform or observe this mutation but INFERRED it from the
@@ -397,10 +391,7 @@ export async function closeMeetingArtifacts(params: {
     //    (a) outcome_external_event_id directly matches (coord that already
     //        booked, request preserved the Graph id).
     //    (b) details_json references the meeting id under common keys.
-    //    (c) origin_thread_ts thread-match (single-candidate guard, below).
-    //    (d) (v4.5.x) orphaned-approval subject+start match (single-candidate
-    //        guard, below) — for a brand-new event neither (a)/(b) nor (c) can
-    //        ever fire; see findOrphanedApprovalMatch's own comment.
+    //    (c) one orphaned approval with matching subject, interval and roster.
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getRequestsByExternalEventId, getOpenRequestsForOwner } = require('../db/requests') as
@@ -440,67 +431,21 @@ export async function closeMeetingArtifacts(params: {
         result.requestsClosed++;
       }
 
-      // Fallback — sweep open top-level requests: match by meeting_id in
-      // details_json (catches coords still in-flight whose outcome was never
-      // stamped), or by origin_thread_ts thread-match (below). Bounded to open
-      // state so closed rows aren't disturbed. (v2.9.2 + v3.4.6 — the old exact-
-      // subject / subkind='in_flight_action' fallback tier was deleted in v3.4.6;
-      // the thread-match below replaced it. See the tier note in the loop.)
-      // closeMeetingArtifacts-fulfilling-request-not-excluded (2026-08-14) —
-      // exclude the tier-0 fulfilling request from the candidate pool itself,
-      // mirroring directMatches' own tier-0 skip (above) and the main loop's
-      // (below). Pre-fix it stayed IN `open`, so it could win the single-
-      // candidate slot in threadCandidates / findOrphanedApprovalMatch — it
-      // is trivially an exact subject+start match for its own booking — and
-      // when a genuinely different request also matched, the pair read as
-      // AMBIGUOUS (length > 1) and BOTH were left open, instead of the one
-      // real match closing. The main loop's own `continue` on this id only
-      // stopped it from closing itself; it never stopped it from crowding
-      // out someone else's match.
+      // Sweep only open requests, excluding the request whose caller owns
+      // completion. Match persisted event identity, or one exact creation
+      // identity (subject, interval and recipient set) for an orphaned approval.
       const open = getOpenRequestsForOwner(params.ownerUserId)
         .filter(r => !(params.fulfillingRequestId && r.id === params.fulfillingRequestId));
 
-      // Thread-match the booking to its originating colleague request. A
-      // request's origin_thread_ts is its "return address"; a booking made in
-      // that same thread is fulfilling that request. This is the robust signal
-      // that exact-subject equality lacked — it survives a meeting being titled
-      // differently from the request (Dina: "Gong call" vs "Gong <> Reflectiz").
-      // SINGLE-CANDIDATE GUARD: only auto-close when EXACTLY ONE open colleague
-      // request shares the booking thread. If a colleague has two open asks in
-      // one thread we don't guess (logged, left open) — never false-close.
-      let threadMatchId: string | null = null;
-      if (params.bookingThreadTs) {
-        const threadCandidates = open.filter(r =>
-          !directMatches.some(d => d.id === r.id)
-          && !!r.requester_slack_id
-          && r.requester_slack_id !== params.ownerUserId
-          && r.origin_thread_ts === params.bookingThreadTs,
-        );
-        if (threadCandidates.length === 1) {
-          threadMatchId = threadCandidates[0].id;
-        } else if (threadCandidates.length > 1) {
-          logger.info('closeMeetingArtifacts — multiple open colleague requests in booking thread, not auto-closing (ambiguous)', {
-            count: threadCandidates.length,
-            bookingThreadTs: params.bookingThreadTs,
-            requestIds: threadCandidates.map(c => c.id),
-          });
-        }
-      }
+      // A thread is a return address, not an appointment identity. In a batch,
+      // the only remaining approval can still belong to a different meeting.
+      // Close by event identity or the exact checked creation identity below.
 
-      // v4.5.x (colleague-approval-orphaned-after-replay-failure-direct-book) —
-      // catch an approval whose auto-replay THREW (resolver.ts leaves it
-      // `awaiting_owner` for retry) and was then executed by a direct tool call
-      // instead of a `resolve_approval` retry, so neither the id/details_json
-      // match above nor the thread-match below can ever find it: the event is
-      // brand new (no pre-existing meeting_id to match on) and, for a colleague-
-      // initiated approval, the owner's decision thread is never the colleague's
-      // own origin thread (R8) the way `bookingThreadTs` above assumes. Matches
-      // on subject + exact requested start, both read off the approval's OWN
-      // stored `deferred_action` — never re-derived. SINGLE-CANDIDATE GUARD, same
-      // discipline as the thread-match: ambiguous → log, leave open, never guess.
+      // A failed replay may later be fulfilled directly, producing a new event
+      // without a previously persisted event ID. Ambiguous matches stay open.
       const approvalMatchId = findOrphanedApprovalMatch(
         open.filter(r => !directMatches.some(d => d.id === r.id)),
-        { reason: params.reason, subject: params.subject, bookingStartIso: params.bookingStartIso },
+        { reason: params.reason, subject: params.subject, bookingStartIso: params.bookingStartIso, bookingEndIso:params.bookingEndIso, bookingAttendeeEmails:params.bookingAttendeeEmails, ownerEmail:params.ownerEmail },
       );
 
       for (const r of open) {
@@ -510,35 +455,6 @@ export async function closeMeetingArtifacts(params: {
         if (directMatches.some(d => d.id === r.id)) continue;
         let matched = payloadReferencesMeeting(r.details_json, params.meetingId, params.reason);
 
-        // Colleague linkage for NON-resolver bookings (direct create, or a
-        // booking that landed in a free turn): the request originated in the
-        // booking's thread and is the sole open colleague candidate there.
-        // Robust to the meeting being titled differently from the request
-        // (Dina: "Gong call" vs "Gong <> Reflectiz"). v3.4.6 — the fragile
-        // exact-subject tier that used to back this up is DELETED; tier-0
-        // (the stamping caller's own skip) + this thread-match cover the real
-        // cases, and a renamed meeting never false-matches a stale
-        // same-subject request.
-        if (!matched && threadMatchId && r.id === threadMatchId) {
-          // thread-match-tier-no-deferred-action-check (2026-08-31) — a thread
-          // match only proves this is the sole open colleague request in the
-          // booking thread, not that the mutation which just fired is the one
-          // this request's own pending deferred_action is waiting on. Same
-          // guard payloadReferencesMeeting's own deferred_action branch
-          // already applies for meeting-id-referencing candidates.
-          if (deferredActionSettledBy(params.reason, requestDeferredActionTool(r.details_json))) {
-            matched = true;
-            logger.info('closeMeetingArtifacts — colleague-request thread-match fired', {
-              requestId: r.id, subject: r.subject,
-              bookingThreadTs: params.bookingThreadTs, meetingId: params.meetingId,
-            });
-          } else {
-            logger.info('closeMeetingArtifacts — thread-match candidate has a pending deferred action this mutation does not settle, not auto-closing', {
-              requestId: r.id, subject: r.subject, reason: params.reason,
-              bookingThreadTs: params.bookingThreadTs, meetingId: params.meetingId,
-            });
-          }
-        }
         if (!matched && approvalMatchId && r.id === approvalMatchId) {
           matched = true;
           logger.info('closeMeetingArtifacts — orphaned-approval subject+start match fired', {
@@ -899,8 +815,7 @@ const TOOL_FOR_MUTATION_REASON: Partial<Record<MeetingArtifactReason, string>> =
 };
 
 /**
- * thread-match-tier-no-deferred-action-check (2026-08-31) — shared by every
- * tier that may auto-close a request carrying a pending `deferred_action`
+ * Shared by every identity match that may close a pending `deferred_action`
  * (the tool the resolver replays when an approval is decided): does the
  * mutation that just fired actually SETTLE that specific action, or is it an
  * unrelated mutation that merely happened to touch the same meeting? The
@@ -912,32 +827,11 @@ const TOOL_FOR_MUTATION_REASON: Partial<Record<MeetingArtifactReason, string>> =
  * pending) has nothing to gate on and is always considered settled — the
  * guard exists only to stop a pending DEVIATION from being silently overtaken
  * by an unrelated mutation.
- *
- * `payloadReferencesMeeting`'s own deferred_action branch already applied
- * this rule (delete-approval-resolved-by-unrelated-positive-mutation,
- * 2026-08-31) for candidates found by meeting-id reference. The thread-match
- * tier below found candidates a different way — same open request, same
- * booking thread — and set `matched = true` with no equivalent check, so a
- * colleague's still-pending cancel approval sitting alone in a thread got
- * silently closed 'resolved' ("locked in ... calendar invite is on its way")
- * the moment ANY other booking landed in that same thread, e.g. a move the
- * colleague asked for right after the still-undecided cancel ask — the
- * opposite outcome of what he asked for, with the owner never ruling on it.
  */
 function deferredActionSettledBy(reason: MeetingArtifactReason, tool: string | undefined): boolean {
   if (!tool) return true;
   if (reason === 'deleted') return true;
   return tool === TOOL_FOR_MUTATION_REASON[reason];
-}
-
-function requestDeferredActionTool(detailsJson: string | null | undefined): string | undefined {
-  if (!detailsJson) return undefined;
-  try {
-    const details = JSON.parse(detailsJson) as { deferred_action?: { tool?: string } };
-    return details.deferred_action?.tool;
-  } catch (_) {
-    return undefined;
-  }
 }
 
 function payloadReferencesMeeting(
@@ -948,6 +842,11 @@ function payloadReferencesMeeting(
   if (!payloadJson) return false;
   try {
     const payload = JSON.parse(payloadJson) as Record<string, unknown>;
+    // Identifying an existing invitation binds its pending calendar question,
+    // but renaming/updating that invitation does not settle a timing question.
+    // A confirmed move or deletion overtakes the question about the old slot.
+    if (reason==='updated' && typeof payload.meeting_request_id==='string'
+      && !payload.deferred_action && !(payload.callbacks as {on_approve?:unknown}|undefined)?.on_approve) return false;
     const candidateKeys = ['meeting_id', 'existing_event_id', 'event_id', 'external_event_id'];
     for (const key of candidateKeys) {
       if (payload[key] === meetingId) return true;
@@ -1103,7 +1002,7 @@ async function closeMatchedRequestWithRelay(
  * v4.5.x (colleague-approval-orphaned-after-replay-failure-direct-book) — find
  * the ONE open `create_meeting` approval this freshly-booked meeting fulfills,
  * when nothing stamped `_fulfilling_request_id` and there was no pre-existing
- * meeting_id or shared thread to match on (see the call site's comment for the
+ * meeting_id to match on (see the call site's comment for the
  * full scenario). Reads the approval's OWN stored `deferred_action` — the exact
  * tool + args the resolver would have replayed — never re-derives from subject
  * text alone (that fragile tier was deleted in v3.4.6 for good reason: a
@@ -1113,9 +1012,9 @@ async function closeMatchedRequestWithRelay(
  */
 function findOrphanedApprovalMatch(
   candidates: RequestRow[],
-  params: { reason: MeetingArtifactReason; subject?: string; bookingStartIso?: string },
+  params: { reason: MeetingArtifactReason; subject?: string; bookingStartIso?: string; bookingEndIso?:string; bookingAttendeeEmails?:string[]; ownerEmail?:string },
 ): string | null {
-  if (params.reason !== 'created' || !params.subject || !params.bookingStartIso) return null;
+  if (params.reason !== 'created' || !params.subject || !params.bookingStartIso || !params.bookingEndIso || !params.bookingAttendeeEmails) return null;
   const bookingMs = new Date(params.bookingStartIso).getTime();
   if (!Number.isFinite(bookingMs)) return null;
   const wantSubject = params.subject.trim().toLowerCase();
@@ -1127,13 +1026,19 @@ function findOrphanedApprovalMatch(
     if (!r.details_json) return false;
     try {
       const details = JSON.parse(r.details_json) as {
-        deferred_action?: { tool?: string; args?: { start?: string } };
+        deferred_action?: { tool?: string; args?: { start?: string; end?:string; attendees?:Array<{email?:string}> } };
       };
       if (details.deferred_action?.tool !== 'create_meeting') return false;
       const askedStart = details.deferred_action.args?.start;
       if (typeof askedStart !== 'string') return false;
       const askedMs = new Date(askedStart).getTime();
-      return Number.isFinite(askedMs) && askedMs === bookingMs;
+      const args=details.deferred_action.args;
+      const expectedEnd=Date.parse(args?.end ?? ''),actualEnd=Date.parse(params.bookingEndIso!);
+      const emails=(values:unknown[])=>[...new Set(values.filter((x):x is string=>typeof x==='string'&&x.includes('@')).map(x=>x.toLowerCase()).filter(x=>x!==params.ownerEmail?.toLowerCase()))].sort();
+      if(!Array.isArray(args?.attendees)||args.attendees.some(x=>typeof x?.email!=='string'))return false;
+      const expected=emails(args.attendees.map(x=>x.email)),actual=emails(params.bookingAttendeeEmails!);
+      return Number.isFinite(askedMs) && askedMs === bookingMs && Number.isFinite(expectedEnd) && expectedEnd===actualEnd
+        && expected.length===actual.length && expected.every((email,i)=>email===actual[i]);
     } catch (_) {
       return false;
     }

@@ -72,7 +72,7 @@ export function buildSystemPromptParts(
   // Authenticated speakers and explicit mentions observed in this Slack thread,
   // never the whole room roster.
   threadParticipantIds?: string[],
-): { static: string; dynamic: string; audienceRules: string } {
+): { static: string; dynamic: string; audienceRules: string; ownerPreferences:string } {
   const { user, assistant } = profile;
   const firstName = user.name.split(' ')[0];
   const companyRef = user.company ? ` and a full member of the ${user.company} team` : '';
@@ -212,6 +212,9 @@ Next week: ${nextWeekStart.toFormat('EEE d MMM')} – ${nextWeekEnd.toFormat('EE
           const createdRel = createdAt.isValid ? createdAt.toRelative({ base: DateTime.now() }) : '';
           const expLine = expiresAt ? ` · expires ${expiresAt.toFormat("EEE HH:mm")}` : '';
           const subject = r.subject ? ` "${r.subject}"` : '';
+          const requester = r.requester_slack_id ? getPersonMemory(r.requester_slack_id) : undefined;
+          const requesterIdentity = r.requester_slack_id ? ' · requester='+JSON.stringify({slack_id:r.requester_slack_id,
+            name:requester?.name ?? r.requester_name,email:requester?.email}) : '';
           const slotsArr = Array.isArray(det.slots) ? (det.slots as any[]) : [];
           const winningSlot = typeof det.winning_slot === 'string' ? det.winning_slot : null;
           const slotsPreview = slotsArr.length > 0
@@ -245,7 +248,7 @@ Next week: ${nextWeekStart.toFormat('EEE d MMM')} – ${nextWeekEnd.toFormat('EE
           // getRequest returned null, resolver early-returned silently, the
           // approval stayed `awaiting_owner` for hours until closeLoopOnOwnerHandled
           // scanner cleaned it up. Bare id → no ambiguity.
-          return `  - ${r.id} · kind=${kindLabel}${subject}${slotsPreview}${question} · asked ${createdRel}${expLine}${threadBoundMarker}`;
+          return `  - ${r.id} · kind=${kindLabel}${subject}${requesterIdentity}${slotsPreview}${question} · asked ${createdRel}${expLine}${threadBoundMarker}`;
         });
         return `
 PENDING APPROVALS (${pendingRequests.length} — waiting on ${firstName}):
@@ -1030,14 +1033,13 @@ ${weekMap}
 
 WEEK BOUNDARIES (critical — use these when interpreting "this week" / "next week"):
 ${weekBoundaries}
-"Next Sunday" = ${nextWeekStart.toFormat('EEE d MMM')} (${nextWeekStart.toFormat('yyyy-MM-dd')})
 When fetching "next week's calendar" use the date range listed above for Next week.
 ${!isOwnerTyping ? `
 
 AUTHORSHIP — you represent ${firstName} under the owner's settings and independently frame your assessment and decision question for the owner. The requester controls their request: facts and corrections, changes or withdrawal, and review of a message they explicitly authored. Keep their wording attributed to them; your owner-facing assessment remains yours to raise directly, including after a prior draft or an invitation to edit it.` : ''}
 ${ownerContextSection}${colleagueThreadApprovalsSection}${threadRequestStatusSection}${threadPeopleSection}${speakerMemorySection}${verifiedSenderSection}${emailReplySection}`;
 
-  return { static: staticContent, dynamic: dynamicContent, audienceRules: authLine };
+  return { static: staticContent, dynamic: dynamicContent, audienceRules: authLine, ownerPreferences:ownerPreferenceBlocks };
 }
 
 /**

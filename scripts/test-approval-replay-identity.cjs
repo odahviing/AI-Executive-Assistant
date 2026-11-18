@@ -104,11 +104,21 @@ function harness(options = {}) {
     create: (payload = {}, ctx = {}, args = {}) => new skill.TasksSkill().executeToolCall('create_approval', { kind: 'unknown_person', payload: typeof payload === 'string' ? payload : { missing_fields: ['email'], ...payload }, ask_text: 'Review a person request', expires_in_hours: 1, ...args }, context(ctx)),
     createDirect: ctx => skill.createApprovalRequest({ kind: 'unknown_person', payload: { missing_fields: ['email'] }, ask_text: 'Review a person request', expires_in_hours: 1 }, context(ctx)),
     accept: (userId, data) => new skill.TasksSkill().executeToolCall('resolve_approval', { approval_id: row.id, verdict: 'approve', ...(data ? { data } : {}) }, context({ userId, threadTs: 'owner.1' })),
+    ownerAccept: () => new skill.TasksSkill().executeToolCall('resolve_approval', {approval_id:row.id,verdict:'approve'}, context({userId:'UOWNER',authority:'owner',senderRole:'owner',surface:'owner_dm',channelId:'DOWNER',threadTs:'owner.1'})),
     flush: async () => { for (const callback of pending.splice(0)) await callback(); },
   };
   harnesses.push(h); return h;
 }
 afterEach(() => { for (const h of harnesses.splice(0)) assert.deepEqual(h.unexpected, [], 'all dependencies explicitly isolated, including swallowed exceptions'); });
+
+test('owner resolution retains the stored requester and requested action after uncertain execution',async()=>{
+ const h=harness({row:{owner_dm_channel:'DOWNER',terminal_dm_msg_ts:'owner.1'},toolResult:{error:'unknown'}});
+ const r=await h.ownerAccept();
+ assert.equal(r.request_context.requester.slack_id,'UPAUL');
+ assert.equal(r.request_context.requester.name,'Paul');
+ assert.equal(r.request_context.subject,'Approved sync');
+ assert.equal(r.request_context.action.tool,'create_meeting');
+});
 test('owner counter open-conflict anchor cannot invent a time on bare approval',async()=>{
  const h=harness({tool:'move_meeting',details:{deferred_action:{tool:'move_meeting',args:{meeting_id:'event-1',meeting_subject:'Planning'}},callbacks:{on_amend:{mode:'run_with_amend'}}}});
  const r=await h.resolve({verdict:'approve'});assert.equal(r.ok,false);assert.equal(h.row().state,'awaiting_owner');assert.equal(h.effects.executes.length,0);
@@ -317,6 +327,21 @@ test('one calendar request retains its approval identity when the title changes'
   assert.equal(JSON.parse(h.row().details_json).meeting_request_id,id);
   assert.equal(h.effects.ownerPosts.length,1);
 });
+
+test('correcting create to move refreshes the same undecided request and asks the owner again',async()=>{
+ const id='same-booking-request';const h=harness({semanticRepeat:true,details:{meeting_request_id:id}});
+ const action={tool:'move_meeting',args:{meeting_id:'actual-meeting',meeting_subject:'Approved sync',new_start:'2026-09-20T12:00:00Z',new_end:'2026-09-20T12:25:00Z'}};
+ const r=await h.create({subject:'Approved sync',start:action.args.new_start,end:action.args.new_end,attendees:[{email:'paul@example.test'}],rule:'Needs owner decision',context:'Move the existing meeting, as requested',deferred_action:action},{meetingRequestId:id},{kind:'policy_exception'});
+ assert.equal(r.reused_existing,true,JSON.stringify(r));assert.equal(h.effects.creates.length,0);assert.equal(h.effects.judges.length,0);
+ assert.equal(JSON.parse(h.row().details_json).deferred_action.tool,'move_meeting');assert.equal(h.effects.ownerPosts.length,1);assert.equal(h.effects.executes.length,0);
+});
+
+test('a different request cannot replace an undecided creation with a move',async()=>{
+ const h=harness({semanticRepeat:true,details:{meeting_request_id:'previous-request'}});
+ const action={tool:'move_meeting',args:{meeting_id:'another-meeting',meeting_subject:'Another meeting',new_start:'2026-09-20T12:00:00Z',new_end:'2026-09-20T12:25:00Z'}};
+ const r=await h.create({subject:'Another meeting',start:action.args.new_start,end:action.args.new_end,attendees:[{email:'paul@example.test'}],rule:'Needs owner decision',context:'Separate move',deferred_action:action},{meetingRequestId:'different-request'},{kind:'policy_exception'});
+ assert.equal(r.created,true);assert.equal(h.effects.creates.length,1);assert.equal(h.effects.executes.length,0);
+});
 test('a distinct calendar request cannot merge with a prior identified request through prose dedup',async()=>{
   const h=harness({semanticRepeat:true,details:{meeting_request_id:'old-request'}});
   const action={tool:'create_meeting',args:{subject:'Another meeting',start:'2026-09-21T12:00:00Z',end:'2026-09-21T12:25:00Z'}};
@@ -330,4 +355,32 @@ test('a model-provided meeting request identity is removed without authenticated
   const h=harness();
   await h.create({subject:'Another question',meeting_request_id:'forged'});
   assert.equal(JSON.parse(h.row().details_json).meeting_request_id,undefined);
+});
+
+test('an undecided calendar question retains its request identity as details change',async()=>{
+ const id='calendar-question';const h=harness({semanticRepeat:true,row:{subkind:'freeform'},details:{meeting_request_id:id,deferred_action:undefined,question:'Could we meet for 25 minutes?'}});
+ const r=await h.create({subject:'Corrected booking question',question:'Could we meet for 40 minutes with Paul?',context:'Same requested meeting'},{meetingRequestId:id},{kind:'freeform',ask_text:'Paul asks for 40 minutes, not 25.'});
+ assert.equal(r.reused_existing,true,JSON.stringify(r));assert.equal(h.effects.creates.length,0);assert.equal(h.effects.judges.length,0);
+ assert.equal(JSON.parse(h.row().details_json).meeting_request_id,id);assert.equal(JSON.parse(h.row().details_json).question,'Could we meet for 40 minutes with Paul?');
+ assert.equal(h.effects.ownerPosts.length,1);assert.equal(h.effects.executes.length,0);
+});
+
+test('a calendar question follows the verified event once the existing meeting is identified',async()=>{
+ const id='calendar-question';const h=harness({semanticRepeat:true,row:{subkind:'freeform'},details:{meeting_request_id:id,deferred_action:undefined,question:'Can the current time move?'}});
+ await h.create({question:'Could the weekly move to Tuesday?',subject:'Weekly'},{meetingRequestId:id,requestMovingEventId:'verified-event'},{kind:'freeform'});
+ assert.equal(JSON.parse(h.row().details_json).meeting_id,'verified-event');assert.equal(h.effects.creates.length,0);assert.equal(h.effects.executes.length,0);
+});
+
+test('a bound calendar question becomes the checked action without creating a second decision',async()=>{
+ const id='calendar-question';const h=harness({semanticRepeat:true,row:{subkind:'freeform'},details:{meeting_request_id:id,deferred_action:undefined,question:'Which time?'}});
+ const action={tool:'create_meeting',args:{subject:'Approved sync',start:'2026-09-20T12:00:00Z',end:'2026-09-20T12:40:00Z',attendees:[{email:'paul@example.test'}]}};
+ const r=await h.create({...action.args,rule:'Owner decision',context:'Same meeting, now checked',deferred_action:action},{meetingRequestId:id},{kind:'policy_exception'});
+ assert.equal(r.reused_existing,true,JSON.stringify(r));assert.equal(h.effects.creates.length,0);assert.equal(h.effects.judges.length,0);assert.equal(h.row().subkind,'policy_exception');
+ assert.deepEqual(JSON.parse(h.row().details_json).deferred_action,action);assert.equal(h.effects.ownerPosts.length,1);assert.equal(h.effects.executes.length,0);
+});
+
+test('a separate calendar question cannot absorb another pending action',async()=>{
+ const h=harness({semanticRepeat:true,details:{meeting_request_id:'first-request'}});
+ const r=await h.create({question:'Could we meet?',subject:'Another meeting'},{meetingRequestId:'second-request'},{kind:'freeform'});
+ assert.equal(r.created,true);assert.equal(h.effects.creates.length,1);assert.equal(h.effects.judges.length,0);assert.equal(h.effects.executes.length,0);
 });

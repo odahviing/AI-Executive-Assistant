@@ -108,7 +108,7 @@ function asAttendeePrefix(kind: string | undefined): (typeof ATTENDEE_REASON_PRE
  * DROPPED (2026-09-07): grepped, it had no producer left anywhere in the
  * codebase, so removing it changes nothing reachable (W5).
  */
-export function humanizeViolationLabel(reason: SearchRejectReason | undefined, ownerFirst: string, oofUntilDisplay?: string): string {
+export function humanizeViolationLabel(reason: SearchRejectReason | undefined, ownerFirst: string, oofUntilDisplay?: string, viewerEmail?:string|null): string {
   // The walker tags per-attendee rejections as `<reason>:<email>` so day_summary
   // can attribute blame. Strip the suffix (structured string, not natural
   // language) — otherwise every attendee-blamed reason humanized to "unknown",
@@ -117,7 +117,18 @@ export function humanizeViolationLabel(reason: SearchRejectReason | undefined, o
   const searchLabel = asSearchRejectLabel(kind);
   if (searchLabel) return SEARCH_REJECT_PHRASES[searchLabel](ownerFirst, oofUntilDisplay);
   const attendeePrefix = asAttendeePrefix(kind);
-  if (attendeePrefix) return ATTENDEE_REJECT_PHRASES[attendeePrefix](oofUntilDisplay);
+  if (attendeePrefix) {
+    const email = reason?.slice(reason.indexOf(':')+1);
+    if(reason?.includes(':') && email?.includes('@')) {
+      const conflictReason = attendeePrefix==='attendee_busy_collision' ? 'busy'
+        : attendeePrefix==='outside_attendee_work_hours' ? 'off_hours'
+        : attendeePrefix==='attendee_out_of_office' ? 'out_of_office' : undefined;
+      if(conflictReason==='out_of_office' && oofUntilDisplay) return email.toLowerCase()===viewerEmail?.toLowerCase()
+        ? `you're out of office through ${oofUntilDisplay}` : `${attendeeFirstName(email)} is out of office through ${oofUntilDisplay}`;
+      if(conflictReason)return attendeeConflictLine({email,reason:conflictReason},viewerEmail);
+    }
+    return ATTENDEE_REJECT_PHRASES[attendeePrefix](oofUntilDisplay);
+  }
   return 'unknown';
 }
 
@@ -255,6 +266,7 @@ export interface AttendeeConflictRefusal {
   /** v3.2.5 end-of-turn coda guard (orchestrator/index.ts) — a question is
    *  open this turn; don't let a social line ride on top of it. */
   needs_confirmation: true;
+  attendee_conflicts: AttendeeConflictTag[];
   broken_rule: 'attendee_unavailable';
   _attendee_busy_note: string;
   message: string;
@@ -273,11 +285,23 @@ export function attendeeConflictRefusal(
     success: false,
     error: 'attendee_conflict',
     needs_confirmation: true,
+    attendee_conflicts: conflicts,
     broken_rule: 'attendee_unavailable',
     _attendee_busy_note: humanReason,
     message: `Just FYI — ${humanReason}. Want me to ${action} it anyway?`,
     _note: `This is the REQUESTER's call, not the owner's — do NOT call create_approval for this. Tell them plainly${conflicts.length > 1 ? `, naming ALL ${conflicts.length} people above` : ''}, and if they say to ${action} it anyway, re-call ${tool} with the SAME args plus confirm_attendee_conflict:true. SAME args matters: the confirm ${action}s through exactly the conflicts this call just named.`,
   };
+}
+
+/** Consent to one checked conflict cannot cover a new person, reason or instant. */
+export function conflictsPreviouslyDisclosed(
+  prior: import('../../../db/conversations').MeetingRequestState['conflictOptions'],
+  start:string,end:string,conflicts:AttendeeConflictTag[],
+):boolean {
+  const begin=Date.parse(start),finish=Date.parse(end);
+  if(!Number.isFinite(begin)||!Number.isFinite(finish)||finish<=begin)return false;
+  return !!prior?.some(option=>Date.parse(option.start)===begin&&Date.parse(option.end)>=finish
+    && conflicts.every(person=>option.conflicts.some(known=>known.email.toLowerCase()===person.email.toLowerCase()&&known.reason===person.reason)));
 }
 
 /**

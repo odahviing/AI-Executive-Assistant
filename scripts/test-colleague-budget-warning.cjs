@@ -38,7 +38,7 @@ async function fixture(options = {}) {
   const start = source.indexOf('      // ── RATE LIMIT: colleague tool calls');
   const end = source.indexOf('      // v2.4.3 (A1)', start);
   assert.ok(start > 0 && end > start);
-  const wrapped = 'exports.run = async function(input, profile, toolUse) { const threadTs=input.threadTs; const toolResults=[]; const toolCallSummaries=[]; let executed=0; for(const once of [1]) {' + source.slice(start, end) + 'executed++; } return {toolResults,toolCallSummaries,executed}; };';
+  const wrapped = 'exports.run = async function(input, profile, toolUse) { const threadTs=input.threadTs; const priorMeetingState=input.priorMeetingState; const toolResults=[]; const toolCallSummaries=[]; let executed=0,turnToolBudgetExhausted=false; for(const once of [1]) {' + source.slice(start, end) + 'executed++; } return {toolResults,toolCallSummaries,executed}; };';
   const code = ts.transpileModule(wrapped, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const exports = {};
   const deps = { '../../utils/rateLimit': limiter, '../../utils/shadowNotify': shadow, '../../utils/toolStatusText': labels };
@@ -54,7 +54,7 @@ async function check(name, fn) { try { await fn(); console.log('PASS '+name); pa
   await check('readable blocked meeting reaches owner through scrubber', async () => { const h=await fixture(); await h.fill(); const r=await h.run(); assert.equal(r.executed,0); assert.match(h.sent[0].text,/Blocked action: "Setting up the meeting" \(not executed\)/); assert.doesNotMatch(h.sent[0].text,/create_meeting/); assert.equal(h.sent[0].channel,'DOWNER'); });
   await check('unmapped action has readable fallback', async () => { const h=await fixture({tool:'unknown_internal_tool'}); await h.fill(); await h.run(); assert.match(h.sent[0].text,/Blocked action: "Requested action"/); });
   await check('approval action uses owner label', async () => { const h=await fixture({tool:'create_approval'}); await h.fill(); await h.run(); assert.match(h.sent[0].text,/Blocked action: "Checking with Idan"/); });
-  await check('ten calls accepted eleventh refused with failed summary', async () => { const h=await fixture(); await h.fill(); const r=await h.run(); assert.equal(r.executed,0); assert.match(r.toolCallSummaries[0],/FAILED/); assert.equal(JSON.parse(r.toolResults[0].content)._status,'deferred_to_owner'); });
+  await check('ten calls accepted eleventh refused without claiming an approval', async () => { const h=await fixture(); await h.fill(); const r=await h.run(); assert.equal(r.executed,0); assert.match(r.toolCallSummaries[0],/FAILED/); const result=JSON.parse(r.toolResults[0].content);assert.equal(result.error,'tool_budget_exhausted');assert.equal(result.approval_created,false); });
   await check('owner bypass preserves legitimate execution', async () => { const h=await fixture({input:{senderRole:'owner'}}); await h.fill(); assert.equal((await h.run()).executed,1); assert.equal(h.sent.length,0); });
   await check('owner present room bypass preserved', async () => { const h=await fixture({input:{isOwnerInGroup:true,channelId:'ROOM'}}); await h.fill(); assert.equal((await h.run()).executed,1); assert.equal(h.sent.length,0); });
   await check('colleague room warning routes only to owner', async () => { const h=await fixture({input:{channelId:'ROOM'}}); await h.fill(); await h.run(); assert.equal(h.sent[0].channel,'DOWNER'); });

@@ -3,6 +3,12 @@
 const fs=require('node:fs'),path=require('node:path'),Module=require('node:module'),assert=require('node:assert/strict'),{test}=require('node:test');
 function fixture(transform=x=>x){const file=path.resolve('scripts/test-gatekeeper-join-summary-action.cjs'),m=new Module(file,module);m.filename=file;m.paths=Module._nodeModulePaths(path.dirname(file));m._compile(transform(fs.readFileSync(file,'utf8').split('for(const [id,extra]')[0])+'\nmodule.exports={harness,ctx,profile};',file);return m.exports;}
 const {harness,ctx,profile}=fixture();
+test('search receipts retain the person belonging to each converted clock',()=>{
+ const h=harness(),result={slots:[{start:'2026-12-03T09:45:00-05:00',end:'2026-12-03T10:10:00-05:00',presentation_local:'Thu 3 Dec 16:45 GMT+2',
+  per_attendee_local:[{email:'isaac@example.test',local_display:'Thu 3 Dec 16:45'}]}]};
+ const text=h.turn.summarizeToolCall('find_available_slots',{duration_minutes:25},result,'America/New_York');
+ assert.match(text,/isaac@example\.test: Thu 3 Dec 16:45/);assert.doesNotMatch(text,/\[local:/);
+});
 const {harness:privacyHarness}=fixture(s=>s.replace("return {turn:load(","return {scrub:load('src/utils/textScrubber.ts').scrubInternalLeakage,turn:load("));
 const {harness:flagHarness}=fixture(s=>s.replace("if(human){", "if(req.tools?.[0]?.input_schema?.properties?.verdict){return {stop_reason:'tool_use',content:[{type:'tool_use',name:'verdict',input:{verdict:'keep'}}]};}if(human){").replace("{claimed_action:false,action_type:null,action_summary:null,target_name:null}","{claimed_action:true,action_type:'book',claim_specifics_mismatch:options.mismatch===true,action_summary:'Fixture claim requires verification',target_name:null}"));
 const targets=[{meeting_id:'AAMk'+ 'a'.repeat(100),new_start:'2026-10-15T13:30:00+03:00',new_end:'2026-10-15T14:10:00+03:00'},{meeting_id:'AAMk'+'b'.repeat(100),new_start:'2026-10-15T14:15:00+03:00',new_end:'2026-10-15T14:55:00+03:00'}];
@@ -41,3 +47,9 @@ for(const flag of [false,true])test('prior-observed-state-reaches-'+(flag?'rewri
 test('stale-success-cannot-shield-current-unknown-attempt',async()=>{const h=flagHarness(),prior=summary(h,'move_meeting',moved(0)),s=summary(h,'move_meeting',unknown(0));await h.gates.runOutputGates('I moved it again.',ctx(s,{...surfaces.owner,history:[{role:'assistant',content:prior+'\nIt moved earlier.'}]}));const calls=h.calls.filter(c=>c.tools?.[0]?.input_schema?.properties?.verdict);assert.ok(calls.length);assert.ok(calls.some(c=>c.messages[0].content.includes(s)&&c.messages[0].content.includes('(earlier turn) [move_meeting OK')));});
 test('preserved-prior-confirmed-recap-keeps-shield',async()=>{const h=flagHarness(),prior=summary(h,'move_meeting',moved(0)),draft='Yes, Elinor moved to 13:30 earlier.';assert.equal(await h.gates.runOutputGates(draft,ctx('',{...surfaces.owner,result:{toolSummaries:[]},history:[{role:'assistant',content:prior+'\nIt moved earlier.'}]})),draft);assert.ok(!h.calls.some(c=>c.tools?.[0]?.input_schema?.properties?.verdict));});
 test('preserved-unrelated-current-task-does-not-erase-calendar-recap',async()=>{const h=flagHarness(),prior=summary(h,'move_meeting',moved(0)),current=summary(h,'create_task',{success:true}),draft='Elinor moved earlier, and the task is recorded.';assert.equal(await h.gates.runOutputGates(draft,ctx(current,{...surfaces.owner,history:[{role:'assistant',content:prior+'\nIt moved earlier.'}]})),draft);assert.ok(!h.calls.some(c=>c.tools?.[0]?.input_schema?.properties?.verdict));});
+
+test('owner approval and unconfirmed execution remain distinct in the durable receipt',()=>{
+ const h=harness();const s=summary(h,'resolve_approval',{ok:false,state:'resolved',effect:'approve_replay_unconfirmed',requester_notify_outcome:'sent'},{approval_id:'r1'});
+ assert.match(s,/owner approval recorded/);assert.match(s,/completion UNCONFIRMED/);assert.doesNotMatch(s,/not resolved|replayed the approved action/);
+ assert.match(s,/requester notified/);
+});

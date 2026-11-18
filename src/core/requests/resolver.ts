@@ -117,6 +117,9 @@ export interface ResolveContext {
   /** A whole-message affirmative from the bound owner's existing classifier.
    * The caller supplies the classified request snapshot for the lock check. */
   confirmedStandaloneApproval?: boolean;
+  /** Contextual decision preserves this request's recipients. Valid only with
+   * the authenticated owner's exact request snapshot checked under the lock. */
+  confirmedContextualRecipients?: boolean;
   /** Set only by the authenticated reaction handler for this bound approval. */
   confirmedApprovalReaction?: boolean;
   app?: App;
@@ -185,7 +188,7 @@ export interface ResolveResult {
   booked?: boolean;
   start?: string;
   action_summary?: string;
-  requester_notice?: 'action_unconfirmed' | 'coordinated_incomplete';
+  requester_notice?: 'action_unconfirmed' | 'coordinated_incomplete' | 'message_pending';
   outcomes?: Array<Record<string, unknown>>;
   remaining?: Array<Record<string, unknown>>;
   /**
@@ -1009,6 +1012,15 @@ function confirmedShownBooking(ctx: ResolveContext, row: RequestRow): boolean {
         && !!ctx.resolvingUserId && ctx.resolvingUserId === row.requester_slack_id);
   }
   if (ctx.confirmedStandaloneApproval === true) return true;
+  if (ctx.confirmedContextualRecipients === true && ctx.resolvingUserId === row.owner_user_id
+    && typeof ctx.expectedOwnerDecisionDetails === 'string'
+    && ctx.expectedOwnerDecisionDetails === row.details_json) {
+    const action = extractCallbacks(parseDetails<Record<string, unknown>>(row) ?? {}).on_approve;
+    // Contextual wording cannot settle a known namesake/address ambiguity.
+    // The ordinary exact displayed assent or explicit correction still can.
+    const roster = action?.tool === 'create_meeting' && action.args.attendees;
+    return Array.isArray(roster) && !ambiguousBookingNames(roster.map(bookingContact));
+  }
   const answer = ctx.ownerDecisionMessage.trim().toLowerCase().replace(/[.!]+$/u, '');
   return answer === 'yes' || answer === 'כן';
 }
@@ -1513,6 +1525,7 @@ async function runApproveCallback(
     ...(executed.end ? { end: executed.end } : {}),
     ...(replaySummary ? { action_summary: replaySummary } : {}),
     ...(coordinated && !ctx.wasAwaitingColleague ? { outcomes: replayResult?.outcomes as Array<Record<string, unknown>> } : {}),
+    ...(messageScheduled && requesterNotified === 'sent' ? {requester_notice:'message_pending' as const} : {}),
     requester_notify_outcome: requesterNotified,
   };
 }
@@ -1854,15 +1867,17 @@ export async function notifyRequesterOfDecision(
   // machine-labelled part (pure owner prose — already human words, nothing to
   // relabel) and a question-shaped counter (his question must travel verbatim).
   const composeAmend = verdict === 'amend' && amendPinned.length > 0;
-  // A completed calendar action already has a localized receipt. Reusing the
-  // old ask in another composition can reintroduce superseded times or lengths.
-  const completedCalendarReceipt = verdict === 'approve' && executed && !executed.tracked && !executed.coordinated
-    && ['create_meeting','move_meeting','update_meeting','delete_meeting','book_floating_block'].includes(executed.tool)
+  // These execution states already have localized receipts. Reinterpreting
+  // the original ask can change a completed booking or turn queued delivery
+  // back into a decision still awaiting the owner.
+  const renderedExecutionReceipt = verdict === 'approve' && executed && !executed.coordinated
+    && ((executed.tracked && executed.tool === 'message_colleague')
+      || (!executed.tracked && ['create_meeting','move_meeting','update_meeting','delete_meeting','book_floating_block'].includes(executed.tool)))
     && (requesterLang === 'he' || requesterLang === 'en');
   let requiresComposedLanguage = (verdict === 'approve' || verdict === 'reject' || verdict === 'closed_by_owner' || composeAmend)
     && requesterLang !== 'en' && requesterLang !== 'he';
   let composedSuccessfully = false;
-  if (!completedCalendarReceipt && (verdict === 'approve' || verdict === 'reject' || verdict === 'closed_by_owner' || composeAmend)) {
+  if (!renderedExecutionReceipt && (verdict === 'approve' || verdict === 'reject' || verdict === 'closed_by_owner' || composeAmend)) {
     try {
       const rawAsk =
         (typeof details.question === 'string' && details.question.trim() ? details.question.trim() : '') ||

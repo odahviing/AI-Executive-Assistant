@@ -167,9 +167,13 @@ function mutationDomain(toolName: string, result: unknown): MutationDomain | nul
     return mutationOutcome(result).changed ? 'book' : null;
   }
   if (toolName === 'update_my_preferences' && r.mode === 'read') return null;
+  if (toolName === 'update_person_profile' && r.updated !== true) return null;
   // A singular explicit negative carries no confirmed mutation.
   if (typeof r.error === 'string') return null;
   if (r.ok === false || r.success === false) return null;
+  // The resolver emits booked only after a confirmed creation replay. A
+  // resolved decision or an attempted replay alone has no calendar receipt.
+  if (toolName === 'resolve_approval' && r.booked === true) return 'book';
   // An exact original-request lookup confirms an earlier delivery, not a new send.
   if (toolName === 'message_colleague' && r.already_sent === true) return null;
   // Calendar mutations carry a rich outcome (needs_confirmation / needs_owner_approval
@@ -367,11 +371,27 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>, res
   if (toolName === 'resolve_approval') {
     const outcome = result && typeof result === 'object'
       ? (result as { requester_notify_outcome?: unknown }).requester_notify_outcome : undefined;
-    const receipt = outcome === 'sent' ? 'sent — requester notified (relay confirmed)'
+    const notice = result && typeof result === 'object'
+      ? (result as {requester_notice?:unknown}).requester_notice : undefined;
+    const receipt = outcome === 'sent' ? notice === 'message_pending'
+      ? 'sent — requester told the message is awaiting delivery; the scheduled message has NOT been delivered'
+      : 'sent — requester notified (relay confirmed)'
       : outcome === 'failed' ? 'failed — requester NOT notified (relay DM failed)'
       : outcome === 'no_requester' ? 'no_requester — no requester to notify; no notification sent'
       : 'unknown — requester delivery not confirmed';
     summary += ` [resolve_approval requester notification: ${receipt}]`;
+    const request = result && typeof result === 'object' ? (result as {request_context?:Record<string,unknown>}).request_context : undefined;
+    if (request && typeof request === 'object') {
+      const action=request.action as {tool?:string;args?:Record<string,unknown>}|undefined;
+      // Keep identities and calendar targets, not private callback bodies or
+      // arbitrary executable arguments, in the durable conversational receipt.
+      const args=action?.args;
+      const identity={subject:request.subject,requester:request.requester,action:action && {
+        tool:action.tool,args:args && Object.fromEntries(['meeting_id','subject','meeting_subject','start','end','new_start','new_end','attendees']
+          .filter(key=>args[key]!==undefined).map(key=>[key,args[key]])),
+      }};
+      summary += ' [approval request identity (not completion): '+JSON.stringify(identity)+']';
+    }
   }
   const domain = mutationDomain(toolName, result);
   // Stamped OUTSIDE the tool's bracket on purpose: MUTATION_OK_RE below lifts the
@@ -445,7 +465,10 @@ function summarizeInternalAction(tool: string, viaTool: string, detail?: string)
  * second thing for them to know. Absent or non-string → empty: an attendee
  * with no stored zone is a legal case, and the checkers keep on it.
  */
-function localSuffix(presentationLocal: unknown): string {
+function localSuffix(presentationLocal: unknown, perAttendeeLocal?: unknown): string {
+  const individual = Array.isArray(perAttendeeLocal) ? perAttendeeLocal.filter(item=>
+    typeof item?.email==='string' && typeof item.local_display==='string') : [];
+  if(individual.length) return ' [attendee local: '+individual.map(item=>item.email+': '+item.local_display).join('; ')+']';
   return typeof presentationLocal === 'string' && presentationLocal.trim().length > 0
     ? ` [local: ${presentationLocal.trim()}]`
     : '';
@@ -570,7 +593,13 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
     }
     if (result && typeof result === 'object' && typeof (result as { error?: unknown }).error === 'string') {
       const reason = String((result as { error: string }).error).replace(/\s+/g, ' ').trim().slice(0, 80);
-      return `[${toolName} FAILED: ${reason}]`;
+      const refusal=result as Record<string,unknown>;
+      // This generic branch runs before the mutation-specific cases. Carry
+      // the handler's caller-scoped reason here so later turns and the final
+      // fact checker do not lose the actual conflict behind an error code.
+      const labels=[...new Set([refusal.broken_rule_label,refusal.violation_label,refusal._attendee_busy_note]
+        .filter((value):value is string=>typeof value==='string' && !!value.trim()).map(value=>value.trim()))];
+      return `[${toolName} FAILED: ${reason}${labels.length ? ' — '+labels.join('; ') : ''}]`;
     }
     switch (toolName) {
       case 'analyze_calendar': {
@@ -613,7 +642,9 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         const events = Array.isArray(result) ? result
           : (result && typeof result === 'object' && Array.isArray((result as any).events)) ? (result as any).events
           : [];
-        return `[get_calendar ${input.start_date}→${input.end_date}: ${events.length} events]`;
+        const scope = (result as {_colleague_view?:unknown} | null)?._colleague_view === true
+          ? ' scope=shared_with_requester_only not_owner_availability' : '';
+        return `[get_calendar ${input.start_date}→${input.end_date}: ${events.length} events${scope}]`;
       }
       case 'find_available_slots': {
         const scope = (result as {availability_scope?:unknown} | null)?.availability_scope;
@@ -653,13 +684,13 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // in another zone read a bare "17:15" as their OWN clock, relayed it
         // externally, and Maelle retracted the real 16:15 CET slot next turn
         // — the draft was correct; the missing label made it unverifiable.
-        const fmt = (s: { start?: string; end?: string; presentation_local?: unknown }) => {
+        const fmt = (s: { start?: string; end?: string; presentation_local?: unknown; per_attendee_local?:unknown }) => {
           if (!s.start) return '?';
           const start = DateTime.fromISO(s.start, {zone:ownerTz});
           if (!start.isValid) return '?';
           const end = s.end && DateTime.fromISO(s.end, {zone:ownerTz});
           const base = start.toFormat('yyyy-MM-dd HH:mm') + (end && end.isValid ? '-' + end.toFormat('HH:mm') : '');
-          return `${base} ${ownerTz}${localSuffix(s.presentation_local)}`;
+          return `${base} ${ownerTz}${localSuffix(s.presentation_local,s.per_attendee_local)}`;
         };
         // check-claimed-that-never-ran (2026-09-06, bounce) — `broken_rule_label`
         // is the HUMANIZED phrase, and for the two attendee-scoped reasons it is
@@ -675,10 +706,13 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           typeof v.broken_rule === 'string' && v.broken_rule.includes(':')
             ? v.broken_rule.slice(v.broken_rule.indexOf(':') + 1).slice(0, 60)
             : '';
-        const verdictWord = (v: { available?: boolean; broken_rule?: string; broken_rule_label?: string }) =>
-          v.available
-            ? 'available'
-            : `unavailable${v.broken_rule_label ? ` (${v.broken_rule_label}${blamedParty(v) ? `: ${blamedParty(v)}` : ''})` : ''}`;
+        const verdictWord = (v: { available?: boolean; broken_rule?: string; broken_rule_label?: string; broken_rule_labels?:string[] }) => {
+          if (v.available) return 'available';
+          // A candidate can conflict with both owner and attendees. Keeping only
+          // its primary label made the verifier delete the other true reasons.
+          const labels = [...new Set([v.broken_rule_label,...(v.broken_rule_labels ?? [])].filter((s):s is string=>typeof s==='string' && !!s))];
+          return `unavailable${labels.length ? ` (${labels.join('; ')}${blamedParty(v) ? `: ${blamedParty(v)}` : ''})` : ''}`;
+        };
 
         // bounce-fix finding 1 (2026-08-24) — candidate_validation is a
         // SEPARATE shape with no `slots` key at all (findAvailableSlots.ts's
@@ -695,7 +729,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           const results: Array<{ start?: string; end?: string; available?: boolean; owner_available?:boolean; broken_rule?: string; broken_rule_label?: string }> =
             Array.isArray((result as any).results) ? (result as any).results : [];
           const durCV = (result as any).duration_minutes ?? (input as any).duration_minutes;
-          const parts = results.map(r => `${fmt(r)} ${verdictWord(r)}${typeof r.owner_available==='boolean' ? ' owner_available='+r.owner_available : ''}`);
+          const parts = results.map(r => `${fmt(r)} ${verdictWord(r)}${typeof r.owner_available==='boolean' ? ' owner_available='+r.owner_available : ''}${r.owner_available && r.broken_rule?.startsWith('attendee_busy_collision:') ? ' attendee_conflict_can_be_accepted_by_booker (booking handler checks remaining rules)' : ''}`);
           return `[find_available_slots candidate_validation dur=${durCV}m: ${parts.join(', ')}${scopeNote}]`;
         }
 
@@ -731,8 +765,9 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         const lengths = new Set(slots.map(slot => (Date.parse(slot.end ?? '') - Date.parse(slot.start ?? '')) / 60000));
         const measured = lengths.size === 1 ? [...lengths][0] : undefined;
         const dur = measured && Number.isSafeInteger(measured) && measured > 0 ? measured : (input as any).duration_minutes;
-        const from = (input as any).search_from;
-        const to = (input as any).search_to;
+        const checkedWindow = (result as {search_outcome?:{from?:string;to?:string}})?.search_outcome;
+        const from = checkedWindow?.from ?? (input as any).search_from;
+        const to = checkedWindow?.to ?? (input as any).search_to;
         const window = from && to ? ` ${String(from).slice(0, 16)}→${String(to).slice(0, 16)}` : '';
         // bounce-fix finding 2 (2026-08-24) — `preferred_slot_status` is a
         // tool-confirmed available (or unavailable, with its real reason)
@@ -759,7 +794,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // (skills/meetings/ops/handlers/findAvailableSlots.ts:2185, alongside
         // the zero-slot returns at :1529/:1596/:1630), so read it once here for
         // both branches.
-        const daySummary: Array<{ date?: string; accepted?: number; top_reasons?: string[]; oof_until_display?: string; attendee_partial_conflicts?: Array<{ email?: string; slots_blocked?: number }>; blocked_by?: Array<{ email?: string; slots_blocked?: number }> }> =
+        const daySummary: Array<{ date?: string; accepted?: number; top_reasons?: string[]; owner_all_day_busy?:boolean; oof_until_display?: string; attendee_partial_conflicts?: Array<{ email?: string; slots_blocked?: number }>; blocked_by?: Array<{ email?: string; slots_blocked?: number }> }> =
           (result && typeof result === 'object' && Array.isArray((result as any).day_summary))
             ? (result as any).day_summary
             : [];
@@ -812,6 +847,8 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
             return `${d.date}(${byAttendee(d.blocked_by ?? [])}${kinds.length ? `,${kinds.join('+')}` : ''})`;
           });
         const attendeeBlockedPart = attendeeBlockedParts.length ? ` attendee_blocked=${attendeeBlockedParts.join(',')}` : '';
+        const fullBusyDays = daySummary.filter(day=>day.owner_all_day_busy === true && typeof day.date === 'string').map(day=>day.date);
+        const ownerBusyPart = fullBusyDays.length ? ` owner_all_day_busy=${fullBusyDays.join(',')}` : '';
         // invented-no-access-to-a-named-attendees-calendar (2026-09-14) — the
         // three renders above all describe a PROBLEM the search found
         // (off days, partial conflicts, a blocked day). None of them says the
@@ -864,15 +901,16 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
             const topReason = [...reasonCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
             if (topReason) {
               reasonPart = ` reason=${topReason}${oofUntil ? ` (until ${oofUntil})` : ''}`;
+              if (reasonCounts.size>1) reasonPart += ` mixed_reasons=${[...reasonCounts.keys()].join('+')} (different candidates fail for different reasons; no single reason rules out the whole window)`;
             }
           }
           const decisionPart = pending.length
             ? ' owner_decision_required (unapproved): ' + pending.map(slot => formatSlot(slot, true)).join(', ')
             : '';
-          return `[find_available_slots${window} dur=${dur}m: 0 slots${scopeNote}${reasonPart}${offDaysPart}${preferredPart}${attendeesReadPart}${decisionPart}]`;
+          return `[find_available_slots${window} dur=${dur}m: 0 slots${scopeNote}${reasonPart}${offDaysPart}${ownerBusyPart}${attendeeBlockedPart}${preferredPart}${attendeesReadPart}${decisionPart}]`;
         }
         const recovery = recoveryResult ? '; strict=0; relaxed_recovery' : '';
-        return `[find_available_slots${window} dur=${dur}m → ${slots.length} slots: ${slotList}; owner_calendar=checked selection=non_exhaustive${scopeNote}${recovery}${offDaysPart}${attendeePartialPart}${attendeeBlockedPart}${attendeesReadPart}${preferredPart}]`;
+        return `[find_available_slots${window} dur=${dur}m → ${slots.length} slots: ${slotList}; owner_calendar=checked selection=non_exhaustive${scopeNote}${recovery}${offDaysPart}${ownerBusyPart}${attendeePartialPart}${attendeeBlockedPart}${attendeesReadPart}${preferredPart}]`;
       }
       case 'check_join_availability': {
         // proposed-slot-not-grounded-in-search-result (2026-08-24) — this tool
@@ -967,7 +1005,8 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // correct "10:00am Boston" into "12:00pm Boston" (Sharon Duret,
         // 2026-09-08T20:28:14Z). Nesting a bracket on this line is fine:
         // extractActionTape below lifts the span balanced, not with `[^\]]*`.
-        const localPart = localSuffix((result as { presentation_local?: unknown }).presentation_local);
+        const localPart = localSuffix((result as {presentation_local?:unknown}).presentation_local,
+          (result as {per_attendee_local?:unknown}).per_attendee_local);
         const movedBlocksPart = toolName === 'create_meeting' || toolName === 'move_meeting'
           ? blockMovesSuffix(result, (result as { booked_start?: unknown; new_start?: unknown }).booked_start
             ?? (result as { new_start?: unknown }).new_start, ownerTz) : '';
@@ -1074,6 +1113,9 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         //
         // summarizeToolCall carries the separate requester delivery receipt.
         const r = result as { ok?: boolean; state?: string; effect?: string; action_summary?: string; booked?: boolean; reason?: string };
+        if (r.state === 'resolved' && r.effect === 'approve_replay_unconfirmed') {
+          return '[resolve_approval — owner approval recorded; action attempted, completion UNCONFIRMED; no further action or check scheduled]';
+        }
         if (r.ok === false) {
           return `[resolve_approval — not resolved${typeof r.reason === 'string' ? `: ${r.reason.slice(0, 60)}` : ''}]`;
         }
@@ -1089,6 +1131,16 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           return `[resolve_approval OK — decision recorded, NO calendar change]`;
         }
         return `[resolve_approval OK — ${r.effect ?? r.state ?? 'resolved'}]`;
+      }
+      case 'update_person_profile': {
+        const r = result as {updated?:boolean;name?:string;scheduling_hours?:unknown;not_saved?:unknown;already_set?:unknown};
+        // Carry the handler's stored outcome, not requested input. The final
+        // truth check otherwise sees only a person's name and erases genuine
+        // confirmations of saved hours as if no write had been verified.
+        const details = Object.fromEntries(['scheduling_hours','not_saved','already_set']
+          .filter(key=>(r as Record<string,unknown>)[key]!==undefined)
+          .map(key=>[key,(r as Record<string,unknown>)[key]]));
+        return `[update_person_profile updated=${r.updated === true} person=${JSON.stringify(r.name ?? input.colleague_name ?? '')} result=${JSON.stringify(details)}]`;
       }
       case 'set_work_schedule_override': {
         // gh#200 (200b) — before this case, the generic `default` below rendered

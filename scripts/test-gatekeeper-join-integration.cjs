@@ -6,7 +6,21 @@ const {run}=fixture('scripts/test-join-availability-clock.cjs','for(const kind o
 const {tool}=fixture('scripts/test-instructor-join-schema.cjs',"test('join schema",'\nmodule.exports={tool};');
 const args={meeting_start:'2026-10-01T17:45:00',present_in_timezone:'America/New_York'};
 test('joint actual schema exposes requested presentation zone',()=>assert.equal(tool.input_schema.properties.present_in_timezone.type,'string'));
-for(const kind of ['free','partial','busy','allday','rule','rearrange'])test('joint '+kind+' actual handler through summary and ordered gates',async()=>{const r=await run(kind,args);const h=harness(),s=h.turn.summarizeToolCall('check_join_availability',args,r,profile.user.timezone);assert.match(s,/17:45:00\.000\+03:00 Asia\/Jerusalem \[local: Thu 1 Oct 10:45 EDT\]/);assert.ok(s.includes('can_join='+r.can_join));assert.ok(!s.includes('mutated='));const draft='10:45 AM ET on 2026-10-01 is the time checked; please forward the invite if confirmed.';assert.equal(await h.gates.runOutputGates(draft,ctx(s)),draft);assert.ok(h.calls.some(c=>c.messages[0].content.includes(s)));assert.ok(h.events.indexOf('claim')<h.events.indexOf('human'));const prompt=h.calls.find(c=>c.tools?.some(t=>t.name==='verdict')).system;assert.match(prompt,/calendar handoff is NOT inherently abdication/);});
+for(const kind of ['free','partial','busy','allday','rule','rearrange'])test('joint '+kind+' actual handler through summary and ordered gates',async()=>{
+ const r=await run(kind,args),h=harness(),s=h.turn.summarizeToolCall('check_join_availability',args,r,profile.user.timezone);
+ assert.match(s,/17:45:00\.000\+03:00 Asia\/Jerusalem \[local: Thu 1 Oct 10:45 EDT\]/);
+ assert.ok(s.includes('can_join='+r.can_join));assert.ok(!s.includes('mutated='));
+ const draft='10:45 AM ET on 2026-10-01 is the time checked; please forward the invite if confirmed.';
+ assert.equal(await h.gates.runOutputGates(draft,ctx(s)),draft);
+ // Calendar truth now checks the answer after every prose writer, so a
+ // style rewrite cannot introduce a calendar claim after verification.
+ const checks=h.calls.filter(c=>c.messages[0].content.includes('REAL AVAILABILITY RESULTS'));
+ assert.equal(checks.length,1);assert.ok(checks[0].messages[0].content.includes(s));
+ assert.equal(h.calls.at(-1),checks[0]);
+ const human=h.calls.find(c=>c.tools?.some(t=>t.name==='verdict'));
+ assert.ok(h.calls.indexOf(human)<h.calls.indexOf(checks[0]));
+ assert.match(human.system,/calendar handoff is NOT inherently abdication/);
+});
 for(const [id,extra,surface] of [['owner',{senderId:'UOWNER',role:'owner'},'owner'],['colleague',{},'colleague'],['room',{isChannel:true,channelId:'CROOM'},'room']])test('joint surface '+id,async()=>{const r=await run('free',args,surface),h=harness(),s=h.turn.summarizeToolCall('check_join_availability',args,r,profile.user.timezone);await h.gates.runOutputGates('10:45 AM ET on 2026-10-01 works; forward him the invite.',ctx(s,extra));assert.ok(h.calls.some(c=>c.messages[0].content.includes('[local: Thu 1 Oct 10:45 EDT]')));});
 for(const [id,bad] of [['zone',{...args,present_in_timezone:'Invalid/Zone'}],['instant',{...args,meeting_start:'bad'}]])test('joint invalid '+id+' remains failed',async()=>{const r=await run('free',bad),h=harness(),s=h.turn.summarizeToolCall('check_join_availability',bad,r,profile.user.timezone);assert.match(s,/FAILED/);assert.ok(!s.includes('can_join=true'));});
 test('joint unavailable producer never invents a result',async()=>assert.rejects(run('offline',args),/offline/));

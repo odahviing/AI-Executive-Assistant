@@ -8,7 +8,7 @@ import { DateTime } from 'luxon';
 import { isConfiguredMeetingRoom } from '../../../../utils/resolveLocation';
 
 import { formatIsoTime, computeVacatedSlot, openQuestionsField, alternativesNote, recordProposedAlternatives, subjectsPlausiblyMatch, resolveActivityTargetIdentity, HANDLER_ERROR_CODE } from '../../ops/helpers';
-import { humanizeViolationLabel, attendeeConflictRefusal, bookedOverAttendeesNote } from '../../ops/violationLabels';
+import { humanizeViolationLabel, attendeeConflictRefusal, conflictsPreviouslyDisclosed, bookedOverAttendeesNote } from '../../ops/violationLabels';
 import {
   getCalendarEvents,
   findSameSubjectSiblings,
@@ -396,7 +396,7 @@ async function checkSameSubjectCollision(
       error: 'ambiguous_meeting_subject',
       meeting_subject: args.meeting_subject,
       candidates: candidates.map(c => ({ meeting_id: c.id, when: fmt(c) })),
-      message: `There's more than one meeting called "${args.meeting_subject}" — one on ${candidates.map(fmt).join(', another on ')}. Ask which one they mean before ${opts.actionPhrase}; don't guess.`,
+      message: `There are separate meetings called "${args.meeting_subject}" on ${candidates.map(fmt).join(' and ')}. Use the source date already established in this conversation to read that day with get_calendar, then retry ${opts.toolName} with the returned occurrence. If the conversation does not identify the source date, ask which occurrence. This request changes an existing invitation; creating another meeting does not resolve the ambiguity.`,
     };
   } catch (err) {
     logger.warn(`${opts.toolName} — same-subject collision check threw, proceeding with given meeting_id`, { err: String(err).slice(0, 160) });
@@ -1154,15 +1154,9 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
                 newCategoryFromShape = newCategory;
               }
 
-              // Attendee-shape change re-evaluation: intent='new_booking'
-              // (NOT 'move') and omit priorStartIso so resolveLocation
-              // doesn't take the preserve_existing path. With intent='move' +
-              // priorStartIso and an unchanged day-type, resolveLocation
-              // would short-circuit to preserve_existing and the location
-              // would never be re-stamped — which lost Teams URLs on
-              // home-day internal→has-external transitions. Existing-state
-              // fields stay populated for downstream callers but don't
-              // gate the verdict.
+              // A roster edit preserves the chosen venue while allowing
+              // remote access / room-capacity upgrades. Explicit venue changes
+              // use the ordinary location decision tree.
               //
               // Skipped on a bare explicit-`location` edit (`rePlaceVenue`
               // false): the string itself is the venue that ships
@@ -1188,7 +1182,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
                   return resolveLocation({
                     profile: context.profile,
                     startIso: existing.startIso!,
-                    intent: 'new_booking',
+                    intent: venueChangeRequested ? 'new_booking' : 'attendee_update',
                     category: newCategory ?? oldCategory ?? undefined,
                     participantCount: newCount,
                     hasExternalAttendee: signals.hasExternalAttendee,
@@ -1419,9 +1413,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           ownerUserId: context.profile.user.slack_user_id,
           meetingId: args.meeting_id as string,
           reason: 'updated',
-          subject: (args.new_subject as string | undefined) ?? (args.meeting_subject as string | undefined),
-          bookingThreadTs: context.threadTs,
-          fulfillingRequestId: args._fulfilling_request_id as string | undefined,
+          subject: (args.new_subject as string | undefined) ?? (args.meeting_subject as string | undefined),          fulfillingRequestId: args._fulfilling_request_id as string | undefined,
         });
         auditLog({
           ownerUserId: context.profile.user.slack_user_id,
@@ -2003,13 +1995,14 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 const attendeeConflicts = matched?.attendee_conflicts ?? [];
                 if (matched && attendeeConflicts.length > 0) {
                   if (args.require_attendee_availability === true) return { success: false, error: 'attendee_condition_unmet', message: 'The requested time does not work for every attendee. The meeting was left unchanged. Choose another time, or specify the meeting, time and conflict you want to accept.' };
-                  if (!attendeeConflictConfirmed) {
+                  if (!attendeeConflictConfirmed || (context.channel==='slack' && !conflictsPreviouslyDisclosed(context.disclosedAttendeeConflicts, newStart, newEnd, attendeeConflicts))) {
                     logger.info('move_meeting colleague-path — attendee conflict surfaced to requester, no owner escalation', {
                       meetingId: args.meeting_id, newStart, newEnd, requester: context.userId,
                       blocked: attendeeConflicts.map(c => `${c.email}:${c.reason}`),
                     });
                     return {
                       ...attendeeConflictRefusal(attendeeConflicts, viewerEmailFor(context), 'move'),
+                      owner_available:true,
                       meeting_subject: args.meeting_subject,
                       requested_start: newStart,
                       requested_end: newEnd,
@@ -2307,9 +2300,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                   ownerUserId: context.profile.user.slack_user_id,
                   meetingId: args.meeting_id as string,
                   reason: 'moved',
-                  subject: args.meeting_subject as string | undefined,
-                  bookingThreadTs: context.threadTs,
-                  fulfillingRequestId: args._fulfilling_request_id as string | undefined,
+                  subject: args.meeting_subject as string | undefined,                  fulfillingRequestId: args._fulfilling_request_id as string | undefined,
                   newStartIso: effectiveStart,
                   newEndIso: effectiveEnd,
                 });
@@ -2832,9 +2823,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           ownerUserId: context.profile.user.slack_user_id,
           meetingId: args.meeting_id as string,
           reason: 'moved',
-          subject: args.meeting_subject as string | undefined,
-          bookingThreadTs: context.threadTs,
-          fulfillingRequestId: args._fulfilling_request_id as string | undefined,
+          subject: args.meeting_subject as string | undefined,          fulfillingRequestId: args._fulfilling_request_id as string | undefined,
           // v4.2.x (option C) — the instant this move ACTUALLY landed on, which is
           // the only kind of time a correction to a human may quote. `effectiveStart`
           // is post-snap (grid alignment + floating-block realignment above, not the

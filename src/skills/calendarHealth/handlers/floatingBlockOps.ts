@@ -51,13 +51,32 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
         if (blocks.length === 0) {
           return { error: 'no_floating_blocks', message: 'No floating blocks configured in profile.' };
         }
-        const block = blockName ? blocks.find(b => b.name === blockName) : undefined;
-        if (!block) {
+        const configuredBlock = blockName ? blocks.find(b => b.name === blockName) : undefined;
+        if (!configuredBlock) {
           return {
             error: 'unknown_block',
             message: `Unknown block_name "${blockName ?? ''}". Configured blocks: ${blocks.map(b => b.name).join(', ')}.`,
           };
         }
+        const requestedDuration=args.duration_minutes;
+        if(requestedDuration!==undefined && (!Number.isInteger(requestedDuration)
+          || (requestedDuration as number)<1 || (requestedDuration as number)>480)) {
+          return {error:'invalid_block_duration',message:'The requested block length must be a whole number of minutes from 1 to 480. Nothing was booked.'};
+        }
+        if(requestedDuration!==undefined && (context.senderRole!=='owner' || context.userId!==profile.user.slack_user_id)) {
+          return {error:'owner_duration_required',message:'Changing the configured block length requires the owner’s instruction. Nothing was booked.'};
+        }
+        // Keep the profile immutable. Every placement/validation branch below
+        // receives the same occurrence length rather than silently substituting
+        // the default after the owner asked for a longer lunch or focus block.
+        const block=requestedDuration===undefined ? configuredBlock
+          : {...configuredBlock,duration_minutes:requestedDuration as number};
+        const durationMismatch=(event:CalendarEvent,start:DateTime,end:DateTime) => requestedDuration!==undefined
+          && end.diff(start,'minutes').minutes!==requestedDuration ? {
+            error:'existing_block_duration_differs',event_id:event.id,subject:event.subject,
+            existing_start:start.toISO(),existing_end:end.toISO(),requested_duration_minutes:requestedDuration,
+            message:'This block already exists with a different length. Nothing was created or resized. Use move_meeting on this event with the owner’s requested start and end to change this occurrence; do not create another block.',
+          } : undefined;
 
         const blockLabel = block.default_subject ?? (block.name.charAt(0).toUpperCase() + block.name.slice(1).replace(/_/g, ' '));
         const dayName = DateTime.fromISO(date, { zone: timezone }).toFormat('EEEE');
@@ -147,6 +166,7 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
           if (existingNearby) {
             const eStart = parseGraphDt(existingNearby.start.dateTime, existingNearby.start.timeZone, timezone);
             const eEnd = parseGraphDt(existingNearby.end.dateTime, existingNearby.end.timeZone, timezone);
+            const mismatch=durationMismatch(existingNearby,eStart,eEnd);if(mismatch)return mismatch;
             return {
               ok: true, created: false, already_existed: true,
               event_id: existingNearby.id, subject: existingNearby.subject,
@@ -313,6 +333,7 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
         if (existingEvent) {
           const eStart = parseGraphDt(existingEvent.start.dateTime, existingEvent.start.timeZone, timezone);
           const eEnd = parseGraphDt(existingEvent.end.dateTime, existingEvent.end.timeZone, timezone);
+          const mismatch=durationMismatch(existingEvent,eStart,eEnd);if(mismatch)return mismatch;
           return {
             ok: true,
             created: false,

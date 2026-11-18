@@ -123,8 +123,8 @@ test('R4 tag mode: a kept slot on an oof day is tagged out_of_office, not busy',
 
 test('R5 labels: the reject phrase names the span end, the tag line names the person, both name-safe', () => {
   const labels = walkerHarness(weekOof).load('src/skills/meetings/ops/violationLabels.ts');
-  assert.equal(labels.humanizeViolationLabel(`attendee_out_of_office:${DINA}`, 'Owner', 'Friday 25 Sep'), 'an attendee is out of office through Friday 25 Sep');
-  assert.equal(labels.humanizeViolationLabel(`attendee_out_of_office:${DINA}`, 'Owner'), 'an attendee is out of office that day');
+  assert.equal(labels.humanizeViolationLabel(`attendee_out_of_office:${DINA}`, 'Owner', 'Friday 25 Sep'), 'Dina is out of office through Friday 25 Sep');
+  assert.equal(labels.humanizeViolationLabel(`attendee_out_of_office:${DINA}`, 'Owner'), 'Dina is out of office that day');
   assert.equal(labels.attendeeConflictLine({ email: DINA, reason: 'out_of_office' }, null), 'Dina is out of office that day');
   assert.equal(labels.attendeeConflictLine({ email: DINA, reason: 'out_of_office' }, DINA), "you're out of office that day");
 });
@@ -157,7 +157,7 @@ test('P2 preserved: a plain busy block rejects as attendee_busy_collision and it
   const { diagnosticsOut } = await h.find();
   assert.ok(reasonsOf(diagnosticsOut).includes(`attendee_busy_collision:${DINA}`));
   const labels = h.load('src/skills/meetings/ops/violationLabels.ts');
-  assert.equal(labels.humanizeViolationLabel(`attendee_busy_collision:${DINA}`, 'Owner'), 'an attendee is already booked then');
+  assert.equal(labels.humanizeViolationLabel(`attendee_busy_collision:${DINA}`, 'Owner'), "Dina's busy then");
   assert.equal(labels.attendeeConflictLine({ email: DINA, reason: 'busy' }, null), "Dina's busy then");
   // Probe the named conflict itself: a broad offering search can correctly
   // spend its bounded candidate budget on clean times before busy ones.

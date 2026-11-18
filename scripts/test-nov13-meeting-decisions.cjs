@@ -98,7 +98,7 @@ function createAdapter() {
     ts.forEachChild(n,visit);
   }
   visit(parsed); assert.equal(matches.length,1);
-  return new Function('planInputFromBookingRequest','bookingRequest','context','return '+matches[0]);
+  return new Function('planInputFromBookingRequest','bookingRequest','context','args = {}','return '+matches[0]);
 }
 const buildCreateInput=createAdapter();
 const title='Customer success with Ayalla', people=['elinor@example.test','ayalla@example.test'];

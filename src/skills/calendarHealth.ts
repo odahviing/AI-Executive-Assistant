@@ -65,7 +65,7 @@ Use this proactively when the owner asks about their schedule, or when they ask 
 
 Pick \`block_name\` from the FLOATING BLOCKS section of your system prompt — these are the blocks the owner has configured. The handler finds an aligned + buffered slot inside the block's preferred window and creates the event with the block's default subject.
 
-Use this when: the owner explicitly asks to book one (e.g. "block 30 min for lunch tomorrow", "add a coffee break Thursday"), OR check_calendar_health surfaces a missing block on a workday.
+Use this when: the owner explicitly asks to book one (e.g. "block 30 min for lunch tomorrow", "add a coffee break Thursday"), OR check_calendar_health surfaces a missing block on a workday. Pass an explicitly requested length in duration_minutes; otherwise use the configured default. This changes this occurrence only.
 
 POSITIONAL PREFERENCE — express the owner's intent semantically, don't compute the time yourself:
 - Default (no \`prefer_position\` arg) → earliest aligned slot in the window. Use this when the owner just says "book lunch" without a time preference.
@@ -100,6 +100,10 @@ When the owner explicitly says to book a floating block at a time OUTSIDE its pr
               type: 'string',
               enum: ['earliest', 'latest_in_window', 'abut_before', 'abut_after'],
               description: 'OPTIONAL. Where in the block window to place this booking. Default: earliest. Use abut_before / abut_after with anchor_event_id when the owner says "before X" / "after X".',
+            },
+            duration_minutes: {
+              type:'integer',minimum:1,maximum:480,
+              description:'Optional explicit owner-requested length for this occurrence, in minutes. Omit when no different duration was requested; the configured block duration then applies. This does not edit the recurring block configuration.',
             },
             anchor_event_id: {
               type: 'string',

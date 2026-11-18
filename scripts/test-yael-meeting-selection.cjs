@@ -20,7 +20,7 @@ function createMoveHarness(opts={}){
  const getCalendarEvents=async()=>events;
  const finder=compile(declaration('src/connectors/graph/calendarReads.ts','findSameSubjectSiblings'),()=>{}, {DateTime,getCalendarEvents}).findSameSubjectSiblings;
  const profile=opts.profile??{user:{name:'Idan Cohen',email:'owner@example.test',slack_user_id:'OWNER',timezone:'Asia/Jerusalem'},meetings:{},categories:[],scheduling:{}};
- const ctx={context:{profile,userId:opts.owner?'OWNER':'YAEL',authority:opts.owner?'owner':'colleague',senderRole:opts.owner?'owner':'colleague',surface:opts.room?'room':opts.owner?'owner_dm':'colleague_dm',threadTs:'thread',channelId:'channel',channel:'slack'},userEmail:profile.user.email,timezone:profile.user.timezone};
+ const ctx={context:{profile,userId:opts.owner?'OWNER':'YAEL',authority:opts.owner?'owner':'colleague',senderRole:opts.owner?'owner':'colleague',surface:opts.room?'room':opts.owner?'owner_dm':'colleague_dm',threadTs:'thread',channelId:'channel',channel:'slack',disclosedAttendeeConflicts:opts.disclosedConflicts},userEmail:profile.user.email,timezone:profile.user.timezone};
  const args={meeting_id:selectedId,meeting_subject:subject,new_start:'2026-10-13T09:00:00+03:00',new_end:'2026-10-13T09:40:00+03:00',start_is_explicit:true,...opts.args};
  const noop=()=>undefined;
  class CalendarOfflineError extends Error{}
@@ -40,6 +40,7 @@ function createMoveHarness(opts={}){
   findAvailableSlots:async p=>{state.slotChecks.push(p);if(opts.offline)throw new CalendarOfflineError('offline');if(opts.ruleViolation){p.diagnosticsOut.rejectedCounts={category_per_day:1};return [];}return [{start:p.searchFrom,attendee_conflicts:opts.attendeeBusy?[{email:'other@example.test',reason:'busy'}]:[]}];},
   firstRejectReason:()=> 'category_per_day',humanizeViolationLabel:()=> 'category limit',HANDLER_ERROR_CODE:{NOT_RULE_COMPLIANT:'not_rule_compliant',MEETING_ROOM_UNAVAILABLE_LARGE_MEETING:'meeting_room_unavailable_large_meeting'},
   attendeeConflictRefusal:()=>({success:false,error:'attendee_conflict'}),bookedOverAttendeesNote:()=> 'other is busy',
+  ...compile(declaration('src/skills/meetings/ops/violationLabels.ts','conflictsPreviouslyDisclosed'),()=>assert.fail('pure consent helper dependency')),
   checkIntendedWeekday:()=>({ok:true}),wasOfferedSlot:()=>false,getFloatingBlocks:()=>opts.block?[opts.block]:[],isFloatingBlockEvent:()=>!!opts.block,blockSizedToEvent:b=>b,windowMsForDay:(date,time,zone)=>DateTime.fromISO(date+'T'+time,{zone}).toMillis(),formatIsoTime:(s)=>s,hasOtherHumanAttendee:()=>roster.length>0,openQuestionsField:()=>({}),
   grantRelaxed:(a,c)=>({relaxed:c.authority==='owner'&&(!opts.respectRelaxed||a.relaxed===true),relaxedReason:undefined}),
   planMeeting:async p=>{state.plans.push(p);if(opts.planFailure)throw Error('planner unavailable');if(opts.plan)return opts.plan(p);return {action:opts.roomUnavailable?'room_unavailable_large':'book',preserveExisting:true};},
@@ -84,7 +85,11 @@ if(require.main===module){let passed=0,failed=0;const outcomes=[];async function
    ['room-unavailable',{roomUnavailable:true},'meeting_room_unavailable_large_meeting'],
   ])await check(id,'preserved',async()=>{const h=createMoveHarness({...options,sameSeries:true});const r=await h.run();assert.equal(r.error??r.reason,expected);assert.equal(h.state.writes.length,0);if(r._deferred_action_hint)assert.equal(r._deferred_action_hint.args.meeting_id,selectedId);});
   await check('colleague-room-selection','regression',async()=>assert.equal((await createMoveHarness({room:true}).run()).success,true));
-  await check('confirmed-attendee-conflict','preserved',async()=>assert.equal((await createMoveHarness({sameSeries:true,attendeeBusy:true,args:{confirm_attendee_conflict:true}}).run()).success,true));
+  const disclosed=[{start:'2026-10-13T09:00:00+03:00',end:'2026-10-13T09:40:00+03:00',conflicts:[{email:'other@example.test',reason:'busy'}]}];
+  await check('confirmed-attendee-conflict','preserved',async()=>assert.equal((await createMoveHarness({sameSeries:true,attendeeBusy:true,disclosedConflicts:disclosed,args:{confirm_attendee_conflict:true}}).run()).success,true));
+  for(const [id,prior] of [['undisclosed',undefined],['another-person',[{...disclosed[0],conflicts:[{email:'someone-else@example.test',reason:'busy'}]}]],['different-interval',[{...disclosed[0],end:'2026-10-13T09:25:00+03:00'}]]])await check('confirmed-conflict-'+id+'-no-write','regression',async()=>{
+    const h=createMoveHarness({sameSeries:true,attendeeBusy:true,disclosedConflicts:prior,args:{confirm_attendee_conflict:true}});assert.equal((await h.run()).error,'attendee_conflict');assert.equal(h.state.writes.length,0);
+  });
   for(const [id,opt] of [['planner-unavailable','planFailure'],['calendar-offline','offline']])await check(id,'preserved',async()=>{const h=createMoveHarness({sameSeries:true,[opt]:true});await assert.rejects(h.run());assert.equal(h.state.closed.length,0);assert.equal(h.state.writes.length,0);});
   await check('patch-failed-reconciles-before-return','preserved',async()=>{const h=createMoveHarness({sameSeries:true,patchFailure:true});assert.equal((await h.run()).error,'move_did_not_land');assert.equal(h.state.closed.length,0);assert.equal(h.state.writes.length,0);});
   await check('unknown-patch-does-not-close','preserved',async()=>{const h=createMoveHarness({sameSeries:true,unconfirmed:true});assert.equal((await h.run()).error,'moved_but_missing');assert.equal(h.state.writes.length,1);assert.equal(h.state.closed.length,0);assert.equal(h.state.audits.length,0);});

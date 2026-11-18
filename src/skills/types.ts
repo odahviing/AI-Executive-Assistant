@@ -102,10 +102,13 @@ export interface SkillContext {
   /** Null for a human turn which did not specify how many times to offer. */
   requestedOptionCount?: number|null;
   requestDurationMinutes?: number;
+  requestMovingEventId?: string;
+  requestExistingMeeting?: boolean;
   requiredMeetingDay?: {date:string; zone:string; quote:string};
   requestZone?: string;
   /** Explicit current human start clock, extracted independently of tool arguments. */
   exactRequestClock?: {clock:string; zone:string; quote:string};
+  requireAttendeeAvailability?: boolean;
   requestedSearchWindow?: RequestedSearchWindow;
   /** Turn-level ban on incidental calendar mutations, including during availability reads. */
   calendarReadOnly?: boolean;
@@ -119,6 +122,8 @@ export interface SkillContext {
     instructionQuote: string;
     sourceMessageIndex: number;
     sourceQuote: string;
+    /** Current semantic classification preserves the pending request's roster. */
+    preservesRecipients?: boolean;
   }>;
   /** Whole sender-authored assent to the one pending create in this private
    * owner thread. The resolver rechecks the observed row before replay. */
@@ -188,6 +193,8 @@ export interface SkillContext {
    * turns and when nothing resolved.
    */
   resolvedMeetingAttendees?: string[];
+  resolvedOptionalAttendees?: string[];
+  disclosedAttendeeConflicts?: import('../db/conversations').MeetingRequestState['conflictOptions'];
   /** A distinct newly requested booking must check its attendees. This signal grants no exception. */
   ordinaryCreateAfterOtherMeeting?: { subject: string; attendeeEmails: readonly string[] };
   /** Meeting-scoped partition of the resolved roster. Undefined: legacy flat

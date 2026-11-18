@@ -59,6 +59,7 @@ export interface BookingParticipant {
   name?: string;
   slack_id?: string;
   isOwner: boolean;       // exactly one participant has this set true (the owner)
+  optional?: boolean;
   just_invite?: boolean;  // coord-imported FYI attendee (no slot polling)
 }
 
@@ -126,6 +127,7 @@ export interface BookingRequest {
      */
     surface: SkillContext['surface'];
     channel: SkillContext['channel'];
+    exactRequestClock?: SkillContext['exactRequestClock'];
   };
 
   // Diagnostic-only — never used as logic. Original Sonnet args + tool name
@@ -162,7 +164,7 @@ export async function normalizeBookingRequest(
   const intent: BookingIntent = options.intent ?? inferIntentFromTool(toolName);
 
   // ── Participants — auto-fill emails, recover from threadAttendees, inject owner ──
-  const rawAttendees = (args.attendees as Array<{ name?: string; email?: string; slack_id?: string; just_invite?: boolean }> | undefined) ?? [];
+  const rawAttendees = (args.attendees as Array<{ name?: string; email?: string; slack_id?: string; optional?: boolean; just_invite?: boolean }> | undefined) ?? [];
   const participants = await buildParticipants(rawAttendees, ownerEmail, context);
 
   // ── Slot — snap duration to allowed_durations, recompute endIso ──
@@ -275,7 +277,7 @@ export function requestSearchAddresses(request: {original:string; updates:string
 }
 
 async function buildParticipants(
-  raw: Array<{ name?: string; email?: string; slack_id?: string; just_invite?: boolean }>,
+  raw: Array<{ name?: string; email?: string; slack_id?: string; optional?: boolean; just_invite?: boolean }>,
   ownerEmail: string,
   context: SkillContext,
 ): Promise<BookingParticipant[]> {
@@ -332,6 +334,7 @@ async function buildParticipants(
       slack_id: slackId,
       isOwner: email === ownerLower,
       just_invite: a.just_invite === true,
+      optional:a.optional===true,
     });
   }
 
@@ -573,5 +576,10 @@ function buildContext(
     // initiator/isMpim.
     surface: context.surface,
     channel: context.channel,
+    // This is the source-bound human clock, not start_is_explicit supplied by
+    // the planner. A clamped room or forwarded fragment cannot grant it.
+    exactRequestClock: context.senderRole === 'owner' && context.surface === 'owner_dm'
+      && context.exactRequestClock?.quote === context.typedUserMessage
+      ? context.exactRequestClock : undefined,
   };
 }

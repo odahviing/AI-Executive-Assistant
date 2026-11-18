@@ -61,6 +61,7 @@ export interface PlanParticipant {
   name?: string;
   slack_id?: string;
   just_invite?: boolean;
+  optional?: boolean;
   isOwner?: boolean;     // v2.9 — set true by normalizeBookingRequest for owner row
 }
 
@@ -117,6 +118,8 @@ export interface PlanMeetingInput {
   // directly from `args.relaxed`. The normalizer's `relaxed` post-gate value
   // is the authoritative input.
   allowRelaxed?: boolean;
+  /** Source-bound clock from the authenticated owner's current instruction. */
+  exactRequestClock?: BookingRequest['context']['exactRequestClock'];
   /** The owner conditioned this move on confirmed attendee availability. */
   requireAttendeeAvailability?: boolean;
   ordinaryCreateAfterOtherMeeting?: IndependentCreate;
@@ -171,7 +174,7 @@ export interface PlanMeetingInput {
 export function planInputFromBookingRequest(
   req: BookingRequest,
   profile: UserProfile,
-  extra?: { preloadedEvents?: CalendarEvent[]; ordinaryCreateAfterOtherMeeting?: IndependentCreate },
+  extra?: { preloadedEvents?: CalendarEvent[]; ordinaryCreateAfterOtherMeeting?: IndependentCreate; requireAttendeeAvailability?: boolean },
 ): PlanMeetingInput {
   return {
     profile,
@@ -188,6 +191,7 @@ export function planInputFromBookingRequest(
       name: p.name,
       slack_id: p.slack_id,
       just_invite: p.just_invite,
+      optional:p.optional,
       isOwner: p.isOwner,
     })),
     locationHint: req.locationHint,
@@ -195,11 +199,13 @@ export function planInputFromBookingRequest(
     categoryHint: req.category ?? null,
     existingEventId: req.existingEventId,
     allowRelaxed: req.relaxed,
+    exactRequestClock: req.context.exactRequestClock,
     // v4.4.x (#154) — see the field doc on PlanMeetingInput.ownerRoomBend.
     ownerRoomBend: req.relaxedReason === 'owner_room_bend',
     isFloatingBlock: req.isFloatingBlock,
     preloadedEvents: extra?.preloadedEvents,
     ordinaryCreateAfterOtherMeeting: extra?.ordinaryCreateAfterOtherMeeting,
+    requireAttendeeAvailability: extra?.requireAttendeeAvailability,
     // o#218 — delegates to the ONE canonical predicate instead of a sixth
     // hand-rolled duplicate (the exact duplication gh#154 hoisted the others
     // away from). The old `initiator === 'owner' && !isMpim` check drifted
@@ -1113,15 +1119,23 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
             const newCreateNeedsDecision = intent === 'new_booking' && independent && independent.subject.trim() !== ''
               && independent.subject.trim().toLowerCase() === input.subject?.trim().toLowerCase()
               && independentRoster.size === attendeeEmails.length && attendeeEmails.every(email => independentRoster.has(email));
-            if (!input.requireAttendeeAvailability && !newCreateNeedsDecision && (input.allowRelaxed || intent === 'move')) {
+            // M17: choosing a particular clock permits its off-hours booking.
+            // A model-generated start does not. Keep a newly discovered busy
+            // commitment as a separate decision (M16), and retain conditional
+            // availability and independent-meeting authority boundaries.
+            const clock = input.exactRequestClock;
+            const namedHoursOverride = initiator === 'owner' && hoursBlockedEmails.length > 0
+              && busyAttendees.length === 0 && !!clock
+              && slotStart.setZone(clock.zone).toFormat('HH:mm') === clock.clock;
+            if (!input.requireAttendeeAvailability && !newCreateNeedsDecision && (input.allowRelaxed || intent === 'move' || namedHoursOverride)) {
               // An unconditional move or override proceeds with a notice.
               // #A (2026-07-19) — an unconditional MOVE never blocks on an attendee conflict (owner's
               // rule: "book me 5 double meetings, but FLAG it"). A colleague-requested
               // move can re-land on a time that attendee is busy ("Intro with Maya");
               // surface it as a heads-up, don't cost a confirm. Fresh BOOKS still confirm
               // once below.
-              attendeeConflictDisposition = input.allowRelaxed ? 'accepted_override' : 'move_notice';
-              attendeeBusyNotice = input.allowRelaxed ? `Accepted conflict override: ${label}` : label;
+              attendeeConflictDisposition = input.allowRelaxed || namedHoursOverride ? 'accepted_override' : 'move_notice';
+              attendeeBusyNotice = input.allowRelaxed || namedHoursOverride ? `Accepted conflict override: ${label}` : label;
             } else {
               // First-pass BOOK — flag ONCE; owner's "book anyway" comes back relaxed.
               // M3 — recorded as a gate, so if the location question is also open

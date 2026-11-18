@@ -349,9 +349,7 @@ export async function executeInternalAutoMove(params: {
     ownerUserId,
     meetingId: movable.id,
     reason: 'moved',
-    subject: subj,
-    bookingThreadTs: context.threadTs,
-    autoMoveRequestId: autoMoveReq.id,
+    subject: subj,    autoMoveRequestId: autoMoveReq.id,
     newStartIso,
     newEndIso,
     // This caller owns auto_move_executed closure, including if its closure

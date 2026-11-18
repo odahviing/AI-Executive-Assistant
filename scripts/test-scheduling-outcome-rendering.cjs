@@ -27,44 +27,36 @@ const evidence = [{ tool: 'find_available_slots', slots: [
 ] }];
 const { options } = rendering.schedulingOptions(evidence, 'America/New_York', false);
 
-function compose(content, readTools = []) {
-  const composer = load('src/core/orchestrator/composeSchedulingOutcome.ts', {
-    luxon: require('luxon'), '../../llm/models': require('./load-test-models.cjs'),
-    './turnHelpers': {callClaude: async () => ({stop_reason:'tool_use',content})},
-    './schedulingOptions': rendering,
-    '../../db/slotHolds': {MAX_HOLDS_PER_HOLDER:3,MAX_HOLDS_PER_MEETING:2},
-  });
-  return composer.composeSchedulingOutcome({message:'Find a time with Chris and move Yael as suggested.',
-    history:[],receipts:[],draft:'Draft',evidence,readTools,remainingTools:[],owner:'Idan',
-    ownerZone:'America/New_York',isOwner:false,offeredSlotCount:8,allowedDurations:[10,25,40,55]});
-}
-
-test('options and the status of another requested task both reach the human', async () => {
-  const result = await compose([
-    {type:'tool_use',name:'offer_times',input:{parts:[{text:'Chris has these openings.',options:[1,2]}]}},
-    {type:'tool_use',name:'finish_turn',input:{reply:'I need the title of the Yael meeting to locate it.'}},
-  ]);
-  assert.equal(result.reply,'Chris has these openings.\nThu 19 Nov (GMT+2) · 17:15, 17:45\nI need the title of the Yael meeting to locate it.');
+test('an options heading without its actual choices is incomplete',()=>{
+ assert.equal(rendering.renderSchedulingParts([{kind:'options',text:'These times work.',options:[]}],options),undefined);
+ assert.match(rendering.renderSchedulingParts([{kind:'options',text:'These times work.',options:[1,2]},
+  {kind:'blocked',text:'I could not identify the lunch event. Which day is it?',options:[]}],options),/17:15, 17:45 · 25 min\nI could not identify/);
+});
+test('owner choices use one owner clock unless the owner requested another zone',()=>{
+ const own=rendering.schedulingOptions(evidence,'America/New_York',true);
+ const text=rendering.renderSchedulingParts([{options:[1,2]}],own.options);
+ assert.match(text,/10:15/);assert.doesNotMatch(text,/17:15|GMT\+2/);assert.match(text,/25 min/);
+ const requested=rendering.schedulingOptions(evidence,'America/New_York',true,'Asia/Jerusalem');
+ assert.match(rendering.renderSchedulingParts([{options:[1,2]}],requested.options),/17:15/);
 });
 
-test('every authorized read in a composed response remains executable', async () => {
-  const reads = [
-    {type:'tool_use',name:'get_calendar',input:{start_date:'2026-11-19',end_date:'2026-11-19'}},
-    {type:'tool_use',name:'get_person_memory',input:{person:'Yael'}},
-  ];
-  const result = await compose(reads,reads.map(block=>({name:block.name,input_schema:{type:'object'}})));
-  assert.deepEqual(JSON.parse(JSON.stringify(result.reads)),reads);
-  assert.equal(result.reply,undefined);
+test('a selected opening does not silently add another time from the same search', () => {
+  assert.equal(rendering.renderSchedulingParts([{ text: 'This 25-minute opening works.', options: [1] }], options),
+    'This 25-minute opening works.\nThu 19 Nov (GMT+2) · 17:15 · 25 min');
 });
 
-test('a schema-valid introduction and options in one part retains the compact answer', () => {
-  assert.equal(rendering.renderSchedulingParts([{ text: 'Two 25-minute openings.', options: [1] }], options),
-    'Two 25-minute openings.\nThu 19 Nov (GMT+2) · 17:15, 17:45');
+test('a vacation day omitted from the answer stays omitted despite identical calendar qualifications', () => {
+  const {options: choices} = rendering.schedulingOptions([{tool:'find_available_slots',slots:[
+    {start:'2026-11-24T09:15:00-05:00',end:'2026-11-24T09:40:00-05:00',attendees:[{email:'requester@example.test',status:'busy'}]},
+    {start:'2026-11-25T09:15:00-05:00',end:'2026-11-25T09:40:00-05:00',attendees:[{email:'requester@example.test',status:'busy'}]},
+  ]}], 'America/New_York', false);
+  assert.equal(rendering.renderSchedulingParts([{text:'Tuesday works if you can move your other meeting.',options:[1]}], choices),
+    'Tuesday works if you can move your other meeting.\nTue 24 Nov (EST) · 09:15 · 25 min');
 });
 
 test('separate text and options retain the existing format', () => {
   assert.equal(rendering.renderSchedulingParts([{ text: 'אפשר ב־' }, { options: [1, 2] }], options),
-    'אפשר ב־\nThu 19 Nov (GMT+2) · 17:15, 17:45');
+    'אפשר ב־\nThu 19 Nov (GMT+2) · 17:15, 17:45 · 25 min');
 });
 
 test('invalid option identities and malformed fields produce no partially valid reply', () => {
@@ -79,31 +71,43 @@ test('model day groups retain each verified option once without duplicate date h
     { text: 'Thu 19 Nov (GMT+2)' },
     { options: [2] },
   ], options);
-  assert.equal(result, 'Two openings.\nThu 19 Nov (GMT+2) · 17:15, 17:45');
+  assert.equal(result, 'Two openings.\nThu 19 Nov (GMT+2) · 17:15, 17:45 · 25 min');
 });
 
-test('reply composition accepts the actual combined text and options response', async () => {
-  let request;
-  const composer = load('src/core/orchestrator/composeSchedulingOutcome.ts', {
-    luxon: require('luxon'),
-    '../../llm/models': require('./load-test-models.cjs'),
-    './turnHelpers': { callClaude: async value => {
-      request = value;
-      return { stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'offer_times',
-        input: { parts: [{ text: 'Choose a 25-minute opening.', options: [1, 2] }] } }] };
-    } },
-    './schedulingOptions': rendering,
-    '../../db/slotHolds': { MAX_HOLDS_PER_HOLDER: 3, MAX_HOLDS_PER_MEETING: 2 },
-  });
-  const result = await composer.composeSchedulingOutcome({
-    message: 'What times are available?', history: [], receipts: [], draft: 'Long preliminary response.',
-    evidence, readTools: [], remainingTools: [], availableOperations: ['find_available_slots'],
-    supportedOperations: ['find_available_slots', 'create_meeting'], owner: 'Idan', ownerZone: 'America/New_York',
-    isOwner: false, offeredSlotCount: 8, allowedDurations: [10, 25, 40, 55],
-  });
-  assert.equal(result.reply, 'Choose a 25-minute opening.\nThu 19 Nov (GMT+2) · 17:15, 17:45');
-  assert.deepEqual(Array.from(request.tools, tool => tool.name), ['finish_turn', 'offer_times']);
-  const data = JSON.parse(request.messages[0].content);
-  assert.deepEqual(data.supportedOperations, ['find_available_slots', 'create_meeting']);
-  assert.deepEqual(data.availableOperations, ['find_available_slots']);
+test('calendar overlap facts distinguish a real conflict from a five-minute gap',()=>{
+ const entries=[{tool:'get_calendar',events:[
+  {subject:'Chris',date:'2026-11-12',start:'12:30',end:'13:10',durationMinutes:40},
+  {subject:'Lunch',date:'2026-11-12',start:'13:00',end:'13:25',durationMinutes:25},
+  {subject:'Scott',date:'2026-11-12',start:'13:30',end:'13:55',durationMinutes:25},
+ ]}];
+ const result=rendering.calendarOverlapEvidence(entries,'America/New_York');
+ assert.deepEqual(JSON.parse(JSON.stringify(result[0].computedOverlaps)),[{first:'Chris',second:'Lunch',date:'2026-11-12',minutes:10}]);
+});
+
+test('an empty optional list preserves the concise answer instead of reviving the planner draft',()=>{
+ assert.equal(rendering.renderSchedulingParts([{text:'You are already included.',options:[]},{text:'Which time works?'}],options),'You are already included.\nWhich time works?');
+ assert.equal(rendering.renderSchedulingParts([{text:'Book it?',options:[99]}],options),undefined);
+});
+
+test('calendar gaps merge overlapping events and remain observations rather than validated slots',()=>{
+ const events=[['Standup','09:00','09:30'],['Review','11:00','11:55'],['Lunch','12:30','14:00'],['Michal','14:00','14:40'],['Duplicate','14:00','14:40'],['Lori','15:00','15:40']]
+  .map(([subject,start,end])=>({subject,date:'2026-11-16',start,end,status:'busy'}));
+ const result=rendering.calendarOverlapEvidence([{tool:'get_calendar',scope:'owner_calendar',events}], 'America/New_York')[0];
+ assert.deepEqual(JSON.parse(JSON.stringify(result.computedGaps)).map(x=>[x.start.slice(11,16),x.end.slice(11,16),x.minutes]),[['09:30','11:00',90],['11:55','12:30',35],['14:40','15:00',20]]);
+ assert.match(result.gapScope,/not validated meeting slots/);
+});
+for(const scope of ['shared_with_requester_only','owner_calendar'])test('partial views and all-day busy entries cannot manufacture owner openings: '+scope,()=>{
+ const events=[{date:'2026-11-16',start:'09:00',end:'09:30'},{date:'2026-11-16',start:'12:00',end:'13:00'},
+ ...(scope==='owner_calendar'?[{date:'2026-11-16',allDay:true,status:'busy'}]:[])];
+ const result=rendering.calendarOverlapEvidence([{tool:'get_calendar',scope,events}], 'America/New_York')[0];
+ assert.equal(result.computedGaps?.length??0,0);
+});
+
+// The planner's finish schema is pure: loading it requires no model or I/O dependency.
+test('the scheduling finish contract renders in the existing planner turn',()=>{
+ const module=load('src/core/orchestrator/schedulingFinish.ts',{});
+ const tool=module.schedulingFinishTool();
+ assert.equal(tool.name,'finish_scheduling');
+ assert.ok(tool.input_schema.required.includes('parts'));
+ assert.equal(Object.keys(module).length,1);
 });

@@ -34,15 +34,15 @@ const contextFixture = fixtureFactory('scripts/test-turn-context-boundaries.cjs'
   ['`${prefix}/before/buildTurnContext.ts`', '`${prefix}/before/src/core/orchestrator/buildTurnContext.ts`'],
   ['skills: { summary: true }', 'skills: { summary: true, social: true }'],
   ["fs.readFileSync(path.join(root, file), 'utf8')", 'readProduct(file)'],
-  ['getOfferedSlots: () => []', 'getOfferedSlots: () => state.offers ?? []'],
+  ['getOfferedSlots: () => state.offeredSlots ?? []', 'getOfferedSlots: () => state.offers ?? []'],
   ['({ ran: false, verdicts: [] })', '({ ran: false, verdicts: [], toolSummaryLines: [] })'],
   ['return { scope: { scopes: state.scopes }', "if (state.throwClassifier) throw new Error('classifier unavailable'); if (state.classifier) return state.classifier(input); return { intent: state.intent, meetingAction: state.meetingAction, selectedHoldCandidateIndices:state.holdIndices, scope: { scopes: state.scopes }"],
   ['loadAttendeeAvailabilityForPerson: async () => ({})', 'loadAttendeeAvailabilityForPerson: () => state.requesterZone ? {timezone:state.requesterZone} : undefined, attendeeKnownTimezoneForDay: entry => entry.timezone'],
-  ["noDirective: () => ({ mode: 'none' })", "chooseSocialDirective: () => ({ mode: 'none' }), noDirective: () => ({ mode: 'none' })"],
-  ["return [{ name: 'update_my_preferences' }];", `return ['hold_slot','move_meeting','update_meeting','delete_meeting','create_meeting','resolve_approval','create_approval','message_colleague','find_available_slots','get_calendar','list_pending_approvals']
+  ["return (state.toolNames??['update_my_preferences']).map(name=>({name}));", `return ['hold_slot','move_meeting','update_meeting','delete_meeting','create_meeting','resolve_approval','create_approval','message_colleague','find_available_slots','get_calendar','list_pending_approvals']
+    .concat(['update_person_profile','create_task'])
     .filter(name => !(state.omitHold && name === 'hold_slot'))
     .map(name => ({ name, input_schema: { type:'object', properties:{action:{type:'string',enum:['hold','release']},start_iso:{type:'string'}}, required:['action'] } }));`],
-  ["WRITE_TOOLS: new Set(['update_my_preferences'])", "WRITE_TOOLS: new Set(['hold_slot','move_meeting','update_meeting','delete_meeting','create_meeting','resolve_approval','create_approval','message_colleague'])"],
+  ["WRITE_TOOLS: new Set(['update_my_preferences','message_colleague','manage_calendar_issue','create_meeting','resolve_approval'])", "WRITE_TOOLS: new Set(['hold_slot','move_meeting','update_meeting','delete_meeting','create_meeting','resolve_approval','create_approval','message_colleague','update_person_profile','create_task'])"],
   ['const state = { classified:', "const state = { intent: { kind: 'task', conversation_state: 'open' }, classified:"],
 ]);
 const loopFixture = fixtureFactory('scripts/test-tool-cache-scope.cjs', '\nfor (const [label, overrides]', [
@@ -72,6 +72,36 @@ async function assertBlocked(t, options = {}) {
   return r;
 }
 test('negative reaction after nonwriting promise withholds writes', async t => { await assertBlocked(t); });
+test('calendar exploration does not block requested contact hours or task writes', async t => {
+  const f=contextFixture(t); f.state.meetingAction='explore';
+  const r=await f.run({userMessage:'Extend her working hours on Tuesday and check when we can meet.'});
+  assert.ok(names(r).includes('update_person_profile'));
+  assert.ok(names(r).includes('create_task'));
+  assert.ok(!names(r).includes('create_meeting'));
+  assert.ok(!r.blockedWriteTools.has('update_person_profile'));
+  assert.ok(r.blockedWriteTools.has('move_meeting'));
+});
+
+test('a question about an existing invitation uses the scheduling workflow without inventing a new request',async t=>{
+ const f=contextFixture(t),message='Did the owner approve our existing invitation?';
+ f.state.classifier=async()=>({scope:{scopes:['general']},intent:{kind:'task',conversation_state:'open'},meetingAction:'explore',
+  existingStatusQuote:message,meetingPeople:[]});
+ const result=await f.run({userMessage:message,rawUserMessage:message,typedUserMessage:message,userId:'UACTIVE',
+  senderRole:'colleague',authority:'colleague',surface:'colleague_dm'});
+ assert.equal(result.meetingRequest,undefined);
+ assert.match(result.prompt,/An existing meeting must match the person/);
+ assert.ok(result.tools.some(t=>t.name==='create_approval'),'the owner can answer a question about this existing event');
+ assert.ok(!result.tools.some(t=>t.name==='create_meeting'),'a status question grants no new invitation');
+});
+for(const [label,input,intent] of [
+  ['prose retry',{proseOnly:true},{kind:'task'}],
+  ['negative reaction',{},negative],
+])test(`${label} still blocks non-calendar writes`,async t=>{
+  const f=contextFixture(t); f.state.intent=intent; f.state.meetingAction='explore';
+  const r=await f.run(input);
+  assert.ok(!names(r).includes('update_person_profile'));
+  assert.ok(!names(r).includes('create_task'));
+});
 test('latest assistant proposal and trailing promise reach existing classifier in full', async t => {
   const f = contextFixture(t);
   const content = 'Explanation. '.repeat(100) + 'I will present the real options before moving anything.';
@@ -210,6 +240,19 @@ test('representative existing-call prompt size is measured without live model us
   t.diagnostic(JSON.stringify({ instrument: 'Buffer.byteLength on actual classifier request with fixture profile/context', systemCharacters: request.system.length, systemUtf8Bytes: Buffer.byteLength(request.system), toolsUtf8Bytes: Buffer.byteLength(JSON.stringify(request.tools)), maxOutputTokens: request.max_tokens, inputTokens: 'unavailable', latency: 'unavailable (mocked provider)', dollars: 'unavailable (no paid call)' }));
 });
 const colleague = { userId: 'UACTIVE', senderRole: 'colleague', authority: 'colleague', surface: 'colleague_dm' };
+
+for(const [label,extra,allowed] of [['private request',{},true],['prose retry',{proseOnly:true},false],['shared room',{surface:'room',isMpim:true},false]])
+test('an unresolved meeting question retains tracked owner consultation only on its authorized surface: '+label,async t=>{
+ const f=contextFixture(t);
+ f.state.classifier=async()=>({scope:{scopes:['meetings']},intent:{kind:'task',conversation_state:'open'},meetingAction:'explore',
+  meetingPeople:[],requestUpdate:{relation:'new'},meetingContinuation:false});
+ const text='Can anything internal be moved to make room for this meeting?';
+ const r=await f.run({...colleague,...extra,userMessage:text,typedUserMessage:text});
+ assert.equal(names(r).includes('create_approval'),allowed);
+ assert.equal(names(r).includes('resolve_approval'),false);
+ assert.equal(names(r).includes('move_meeting'),false);
+ assert.equal(names(r).includes('create_meeting'),false);
+});
 const selectedStart = '2026-11-19T17:15:00+02:00';
 const selectedEnd = '2026-11-19T17:40:00+02:00';
 const offered = [
@@ -670,4 +713,41 @@ test('a scheduling follow-up keeps only the same requester’s active duration',
   assert.deepEqual(Array.from(same.meetingRequest.updates),[next]);
   assert.equal((await follow({conversationHistory:[{...history[0],meetingRequest:{...initial.meetingRequest,requesterId:'UOTHER'}}]})).meetingRequest?.duration,undefined);
   assert.equal((await follow({channelId:'DOTHER'})).meetingRequest?.duration,undefined);
+});
+
+test('a same-roster follow-up retains the requester in an established pair', async t => {
+  const context=contextFixture(t),first='Find a meeting for me and Idan',next='Tuesday at 17:00';
+  context.state.classifier=async input=>({intent:{kind:'task',conversation_state:'open'},scope:{scopes:['meetings']},
+    meetingAction:'explore',meetingPeople:[],requestUpdate:{relation:input.message===first?'new':'continue'},
+    requesterPair:input.message===first,participantsUnchanged:input.message===next,meetingContinuation:input.message===next});
+  const initial=await context.run({...colleague,userMessage:first,typedUserMessage:first});
+  assert.equal(initial.meetingRequest.requesterPair,true);
+  initial.meetingRequest.existingMeeting={eventId:'verified-existing'};
+  const history=[{role:'assistant',content:'Which day?',toolSummaries:[],meetingRequest:initial.meetingRequest}];
+  const nextTurn=extra=>context.run({...colleague,userMessage:next,typedUserMessage:next,conversationHistory:history,...extra});
+  assert.equal((await nextTurn({})).meetingRequest.requesterPair,true);
+  assert.equal((await nextTurn({})).meetingRequest.existingMeeting?.eventId,'verified-existing');
+  assert.notEqual((await nextTurn({channelId:'DOTHER'})).meetingRequest?.requesterPair,true);
+  assert.equal((await nextTurn({channelId:'DOTHER'})).meetingRequest?.existingMeeting,undefined);
+  context.state.classifier=async()=>({intent:{kind:'task',conversation_state:'open'},scope:{scopes:['meetings']},
+    meetingAction:'explore',meetingPeople:[],requestUpdate:{relation:'continue'},requesterPair:false,participantsUnchanged:false,meetingContinuation:true});
+  assert.equal((await nextTurn({})).meetingRequest.requesterPair,false);
+  assert.equal((await nextTurn({})).meetingRequest.existingMeeting,undefined);
+});
+
+for (const [label,operations,allowed] of [
+  ['rejected proposal',[],[]],
+  ['move only',[{operation:'move',quote:'Move Elinor later'}],['move_meeting']],
+  ['book only',[{operation:'create',quote:'Book Michal at noon'}],['create_meeting']],
+  ['separate changes',[{operation:'move',quote:'Move Elinor later'},{operation:'create',quote:'Book Michal at noon'}],['move_meeting','create_meeting']],
+  ['fabricated quote',[{operation:'create',quote:'not in the human message'}],[]],
+])test('owner operation scope '+label,async t=>{
+  const f=contextFixture(t),message=label==='rejected proposal'?'No, that is too early.':'Move Elinor later. Book Michal at noon.';
+  f.state.classifier=({anthropic,...input})=>classifier({kind:'task',meeting_action:'execute',meeting_people:[],calendar_operations:operations}).run(input);
+  const r=await f.run({userMessage:message,typedUserMessage:message});
+  for(const tool of ['create_meeting','move_meeting','update_meeting','delete_meeting']) {
+    assert.equal(names(r).includes(tool),allowed.includes(tool),tool);
+    if(!allowed.includes(tool))assert.ok(r.blockedWriteTools.has(tool));
+  }
+  assert.ok(names(r).includes('find_available_slots'));
 });

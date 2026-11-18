@@ -207,7 +207,7 @@ async function classifyFreeformCalendarChange(
       max_tokens: 20,
       system: `Classify an owner-approval request by whether it concerns a CALENDAR CHANGE to a meeting — booking a new meeting, moving/rescheduling an existing meeting, adding/removing attendees, or cancelling a meeting.
 - 'calendar' — it clearly IS one of those.
-- 'not_calendar' — it clearly is NOT (posting content, sharing info, flagging an out-of-scope request for the owner, a general non-scheduling yes/no). A decision on whether an organizer should SEND THEIR OWN EXISTING invitation to the owner is also not_calendar: the decision is relayed to the organizer. Contrast an instruction for this assistant to add someone to an event, which is calendar.
+- 'not_calendar' — a question/judgment without an executable calendar change: posting content, sharing info, identifying an invitation the assistant cannot access, or asking which commitment could be adjusted before a replacement can be proposed. A decision on whether an organizer should SEND THEIR OWN EXISTING invitation is also not_calendar. These questions can mention a meeting; approval answers the question and does not perform a calendar change. A definite request to book/move/change/cancel an identified meeting is calendar, even if its replacement time still needs searching.
 - 'unsure' — genuinely ambiguous, or not enough to tell.
 Judge by meaning, in any language. Bias to 'unsure' rather than guessing 'not_calendar' on a maybe — an unsure verdict just asks; a wrong 'not_calendar' silently drops a real change. Answer via the classify tool only.`,
       tools: [{
@@ -614,9 +614,14 @@ export async function createApprovalRequest(
         // above, before dedup, persistence and requester-dependent lookups.
         const requesterSlackId = typeof payload.requester_slack_id === 'string' ? payload.requester_slack_id : undefined;
         const meetingRequestId = context.surface === 'colleague_dm' && context.authority === 'colleague'
-          && requesterSlackId === context.userId && context.meetingRequestId && approvalAction
+          && requesterSlackId === context.userId && context.meetingRequestId && (approvalAction || subkind === 'freeform')
           ? context.meetingRequestId : undefined;
         if (meetingRequestId) payload.meeting_request_id = meetingRequestId;
+        // A verified move search supplies the actual existing occurrence.
+        // Link its still-open question so a later successful move retires the
+        // obsolete old-time decision through the ordinary artifact cascade.
+        if (meetingRequestId && subkind==='freeform' && context.requestMovingEventId)
+          payload.meeting_id = context.requestMovingEventId;
         // v2.9.4 (#107d) — when Sonnet doesn't pass requester_name, auto-populate
         // it from people_memory using requester_slack_id. Pre-fix the row stored
         // requester_name=null, and `notifyRequesterOfDecision` rendered "Hey"
@@ -948,15 +953,31 @@ export async function createApprovalRequest(
           return { pending_booking: { start, end, minutes } };
         };
         const sameApprovalOperation = (row: RequestRow): boolean => {
-          if (row.kind !== 'approval' || row.subkind !== subkind) return false;
-          const previous = parseDetails(row)?.deferred_action as {tool?:unknown} | undefined;
+          if (row.kind !== 'approval') return false;
+          const priorDetails = parseDetails(row);
+          const sameUndecidedRequest = !!meetingRequestId && row.state==='awaiting_owner'
+            && row.owner_user_id===ownerUserId && row.requester_slack_id===requesterSlackId
+            && row.origin_channel===channelId && (row.origin_thread_ts??'')===(threadTs??'')
+            && priorDetails?.meeting_request_id===meetingRequestId;
+          if (row.subkind !== subkind) {
+            // Once the missing facts arrive, retain the same pending decision
+            // while replacing the question by its checked calendar action.
+            return sameUndecidedRequest && row.subkind==='freeform' && subkind==='policy_exception'
+              && !!approvalAction && !extractCallbacks(priorDetails ?? {}).on_approve;
+          }
+          const previous = priorDetails?.deferred_action as {tool?:unknown} | undefined;
           const proposed = payload.deferred_action as {tool?:unknown} | undefined;
-          return !(previous?.tool && proposed?.tool && previous.tool !== proposed.tool);
+          if (!(previous?.tool && proposed?.tool && previous.tool !== proposed.tool)) return true;
+          // A correction to the same authenticated request may change create
+          // into move (or another calendar operation). Refresh its undecided
+          // approval instead of opening a second one and hitting the pending
+          // cap. Unbound prose matches and already decided actions stay separate.
+          return sameUndecidedRequest;
         };
         const keyForApproval = (): string => {
           const parts = {ownerUserId, requesterSlackId: requesterSlackId ?? null, subject};
           if (meetingRequestId) return buildIdempotencyKey({...parts,subject:meetingRequestId,
-            kind:'approval:' + subkind + ':' + approvalAction!.tool + ':' + channelId + ':' + (threadTs ?? '')});
+            kind:'approval:' + subkind + ':' + (approvalAction?.tool ?? 'question') + ':' + channelId + ':' + (threadTs ?? '')});
           const legacyKey = buildIdempotencyKey({...parts, kind:'approval'});
           const legacy = getRequestByIdempotencyKey(legacyKey);
           if (legacy && sameApprovalOperation(legacy)) return legacyKey;
@@ -1141,11 +1162,15 @@ export async function createApprovalRequest(
           // "still waiting" nudge — it's a different ask he hasn't seen).
           const matchedProseUnchanged = unchangedProseSnapshot?.subject === row.subject
             && unchangedProseSnapshot?.description === row.description;
-          const changed = (!matchedProseUnchanged && (row.subject !== subject || (row.description ?? '') !== askText))
+          const changed = row.subkind !== subkind || (!matchedProseUnchanged && (row.subject !== subject || (row.description ?? '') !== askText))
             || !isDeepStrictEqual(JSON.parse(JSON.stringify(priorDetails.deferred_action ?? null)), JSON.parse(JSON.stringify(payload.deferred_action ?? null)))
             || !isDeepStrictEqual(JSON.parse(JSON.stringify(priorDetails.callbacks ?? null)), JSON.parse(JSON.stringify(payload.callbacks ?? null)));
 
           const mergedDetails: Record<string, unknown> = { ...priorDetails, ...payload };
+          if (row.subkind === 'freeform' && subkind === 'policy_exception') {
+            delete mergedDetails.question;
+            delete mergedDetails.organizer_invitation;
+          }
           if (payload.rule === 'freeform_needs_clarification') {
             delete mergedDetails.deferred_action;
             delete mergedDetails.callbacks;
@@ -1185,6 +1210,7 @@ export async function createApprovalRequest(
 
           const refreshedExpiry = boundApprovalExpiry(changed ? expiresAt : row.expires_at ?? expiresAt, mergedDetails, profile);
           updateRequest(row.id, { subject, description: askText, details: mergedDetails, expiresAt: refreshedExpiry,
+            ...(row.subkind !== subkind ? {subkind} : {}),
             ...(changed ? { ownerDmChannel: null, ownerDmThreadTs: null, terminalDmMsgTs: null,
               nextCheckAt: new Date(Math.min(Date.now() + 5 * 60000, Date.parse(refreshedExpiry))).toISOString(), nextCheckHandler: 'approval_reminder' as const }
               : row.next_check_at && Date.parse(row.next_check_at) > Date.parse(refreshedExpiry)
@@ -1634,40 +1660,7 @@ ALSO CHECK ROUTINES when the owner asks about recurring activities ("did you do 
       },
       {
         name: 'create_approval',
-        description: `Ask the owner for a decision. ALWAYS use this when you need the owner to decide something instead of just DMing them a question. The owner is the only one who can bypass scheduling rules — colleagues asking for something that breaks the rules MUST go through this tool. Maelle never overrides on her own.
-
-AUTHORITY MODEL:
-- If the owner tells Maelle directly to do something (even when it breaks a rule), that IS the approval — just do it, no approval needed.
-- If a colleague asks for something that breaks a rule or needs an owner-only judgment, create_approval — the owner must decide.
-- RELAY IT AS AN APPROVAL IN FLIGHT, NOT A DEAD END, AND NEVER AS DONE. When you raise this for a colleague, tell the requester plainly that you've SENT it to the owner (by name) to decide — nothing is confirmed yet, so never open with completion language ("you're all set", "done", "sorted", "added") that reads as if the change already happened. If a colleague who did NOT request this meeting asks to be added to it, say so plainly ("I've sent your request to join the meeting to ${ownerFirstName} to decide — I'll let you know as soon as he does"), not "you can join — I've sent it to the owner to approve" and never "you're all set, added you to the ask I've sent ${ownerFirstName}" (unclear what "the ask" refers to and reads as already-confirmed). NEVER frame it as "the owner must make the change themselves" or "you can't change this."
-
-Kinds:
-- duration_override: approve a non-standard meeting length. Payload: { subject, duration_min, reason }.
-- policy_exception: override a scheduling rule (back-to-back, off-hours, no-lunch, protected meeting, floating-block out-of-window move). Payload: { rule, context, subject, start, end, attendees, category?, is_online?, location?, body?, requester_slack_id, requester_name }. ALL the create_meeting required fields (subject, start, end, attendees) must be present in payload — the handler validates and refuses with \`missing_required_field\` if any are missing. RUN THE ACTION'S TOOL FIRST: the handler refuses with \`no_verified_deviation\` unless the action rode in from a tool that actually blocked it, because with nothing blocked there is nothing to override and nothing to replay on approve. So call create_meeting / move_meeting / update_meeting / book_floating_block for the real time and attendees — it either just happens (allowed, and the owner is never interrupted) or it comes back refused WITH the exact reason and the action attached for this approval. If you don't have a required field yet (most commonly: duration → start/end), ask the requester BEFORE running anything. HONESTY: write ask_text plainly. If the booked time hits a meeting already on the owner's calendar, NAME it ("you already have 'X' at 13:00 — book over it?") — a hard double-book is his call, but state it AS one; NEVER dress it as a soft free-time / buffer / focus-time rule. (The handler re-derives the real reason from the live calendar and leads the DM with it, so don't guess the reason from aggregate rejection lists.)
-- unknown_person: book with someone we don't have full contact info for. Payload: { name, known_fields, missing_fields }.
-- freeform: a NON-CALENDAR yes/no/amend ask ONLY — flag an out-of-scope request for the owner, content review, a private judgment call ("OK to share my number with X?"). Payload: { question, context, subject }. NEVER for a CALENDAR CHANGE — booking, moving/rescheduling, adding/removing attendees, or CANCELLING a meeting (a cancel is a calendar change too). The handler REFUSES a calendar-shaped freeform (\`freeform_calendar_change\`): it carries no action, so on approve NOTHING would happen and the change silently dies. Any calendar change goes through its tool FIRST — create_meeting / move_meeting / update_meeting / delete_meeting (any attendee count); if it needs sign-off the colleague-path gate raises a policy_exception with a replayable deferred_action (subject + attendees + time preserved). policy_exception is the ONLY kind whose deferred_action auto-attaches and replays — NEVER meeting_reschedule / meeting_change for a create_approval.
-
-DEFERRED ACTION (auto-execute on approve) — v2.8.6:
-When the approval is asking permission for a SPECIFIC tool call (e.g. "should I cancel Dirk's meeting?", "OK to book this off-hours?"), include payload.deferred_action so the resolver fires the action when the owner approves — instead of you having to call the tool yourself in a follow-up turn. Without this, "approved but never executed" turns happen (root of the 2026-05-18 Dirk incident).
-
-Shape: \`payload.deferred_action = { tool: "<tool-name>", args: <full-tool-args> }\`.
-Supported tools: \`create_meeting\`, \`move_meeting\`, \`update_meeting\`, \`book_floating_block\`, \`delete_meeting\`.
-For an agreed joint move, preserve the complete \`coordinated_moves\` array (specific occurrence IDs and exact targets) in \`deferred_action.args\`. Replay retains confirmed progress and resumes only remaining necessary work. A singular time counter cannot silently replace a pair; a changed pair needs the complete exact replacement plan. Report per-event outcomes rather than treating a recorded approval as completed moves.
-
-Cancellations: a cancel is a CALENDAR change, so raise create_approval(kind=policy_exception) — NOT freeform — with an explicit:
-  payload.deferred_action = { tool: "delete_meeting", args: { meeting_id, meeting_subject } }
-The handler skips the booking-field check for a delete deferred_action; the resolver calls delete_meeting the instant the owner ✅'s the DM — no second turn needed.
-
-For policy_exception approvals raised after a rule_violation on create_meeting / move_meeting / book_floating_block, the orchestrator auto-stamps deferred_action from the prior rule_violation's hint — you don't need to set it yourself. Only a cancellation (policy_exception + a delete_meeting deferred_action, which doesn't go through rule_violation) needs you to pass deferred_action explicitly.
-
-Open calendar conflict (no time chosen yet): when a colleague raises a conflict on an EXISTING meeting and offers OPTIONS but leaves the pick to the owner (no single new time named), raise create_approval(kind=policy_exception) with payload.meeting_id + payload.subject (the meeting's name) + payload.open_options (their options, in their own words) + payload.context (the conflict itself) and NO start/end — the handler stamps a time-less move anchor and tracks the ask as open; the owner's eventual pick executes and the requester hears the outcome automatically (see resolve_approval). If the colleague DID name a concrete new time, skip this shape — that's an ordinary policy_exception with a real move_meeting deferred_action.
-
-EVERY kind must say WHY it needs him, in its own payload field (policy_exception: rule + context · duration_override: reason · unknown_person: missing_fields · freeform: question + context). No reason → refused with \`missing_reason\`, and rightly: if you can't state why this needs HIM, either the action is already allowed (do it) or you don't yet know what's blocking it (find out first).
-
-Behavior:
-- DMs the owner immediately. Concrete timed meeting asks render the structured reason and action clock; other asks retain ask_text. Dedup against open requests for this (owner, requester) returns the existing logical ask.
-- Default expiry is 2 owner-workdays (Fri/Sat skipped for this profile). Owner-silent past expiry → request closes as expired + owner gets a tombstone DM.
-- When approval has a colleague-originated context, include requester_slack_id in the payload so the resolver can DM the requester back with the owner's decision.`,
+        description: "Send a tracked question to the owner and retain the request until its decision is handled. Use it when a colleague needs an owner-only decision; the owner's direct instruction already supplies their authority. The returned receipt distinguishes created, already pending, delivered, and delivery failure. Tell the requester what is actually pending and keep responsibility for following up.\n\nKinds and payloads:\npolicy_exception: a calendar action requiring the owner's permission. Run the actual create/move/update/delete/book_floating_block handler first; a permitted action completes directly, a blocked action provides the verified reason and replayable deferred_action. Carry that action as payload.deferred_action={tool,args}; retain the exact occurrence, participants, time, mode and complete coordinated_moves when present. Timed creates need subject,start,end,attendees plus rule/context. A delete action needs its actual meeting_id and meeting_subject, not booking fields. The previous blocked action may auto-attach, but an explicit complete action is preferable for several requests. A search candidate alone is not a completed booking.\nFor an existing meeting whose new time the owner must choose, use policy_exception with meeting_id,subject,open_options,context and no start/end. This tracks the unresolved choice; the owner's chosen time must be supplied before execution.\nfreeform: an owner question or judgment without an executable action, such as identifying an inaccessible invitation or deciding whether its organizer should invite the owner. Supply question,context,subject. A ready calendar change belongs in policy_exception: freeform carries no calendar operation and approval alone cannot complete it.\nunknown_person: supply name,known_fields,missing_fields for contact information only the owner can provide.\nduration_override: supply subject,duration_min,reason for a nonstandard length.\n\nEvery question must stand alone: requester, requested decision, known meeting details, actual obstacle, and any uncertainty. Use the actual calendar reason; a busy commitment is different from a spacing preference. Include requester_slack_id when the decision must return to that person. Deduplication retains an existing logical ask. Default expiry is two configured owner workdays.",
         input_schema: {
           type: 'object',
           properties: {
@@ -1682,20 +1675,7 @@ Behavior:
       },
       {
         name: 'resolve_approval',
-        description: `Record the owner's decision on a pending approval. Call this when the owner replies to an approval ask in DM.
-
-Owner short-acks ("yes", "go", "no", "kill it") in a thread bound to a pending approval are auto-resolved BEFORE the orchestrator runs (Module D). Call this tool only when:
-- the owner AMENDED ("not as asked, but try X"),
-- the owner referenced a specific approval id token,
-- or you need to act on an approval from a different thread.
-
-Verdicts:
-- approve: execute the stored decision. For an owner-chosen replacement action, pass \`data={"tool":"<existing tool>","args":{...exact decided arguments}}\`; this may change the action entirely (cancel → message, book → move). For an owner-authorized recovery, pass the returned recovery fields in \`data\` (for example is_online, location, fresh_meeting_id or confirmed_gone). A colleague accepts the stored counter with approve and no data; proposed changes use amend and need the owner's decision. Report the returned outcome: completed, tracked for later, refused before acting, or attempted/unconfirmed. An unconfirmed attempt is not permission to repeat it.
-- reject: owner said a genuine NO / cancel it. This CANCELS the request AND auto-DMs the requester a decline ("<owner> can't make that work"). Use ONLY for a real no. NEVER use reject to relay a question, defer, or pass a message to the requester — reject sends them a decline and kills the whole coordination (incl. any pending booking). If the owner is still negotiating, or wants to ask the requester something, that's amend.
-- amend: owner is countering, deferring, or wants to RELAY A QUESTION / MESSAGE to the requester and keep the ask alive — "no, but 13:30 would work", "tell him I'm on vacation, ask if it has to be him or someone else can cover next week", "come back to me once you check with them". Put every explicitly changed term in \`counter\` (time, \`is_online\`, \`location\`, attendees), plus any question/message; omitted terms retain the stored decision. This flips the request to awaiting_colleague, DMs the requester the counter (a question renders as "<owner> asked: …"), and keeps it OPEN + tracked so their reply reconnects. Use amend WHENEVER the instruction is relay-a-question / ask-them / defer — NOT reject.
-  - OPEN calendar-conflict ask (create_approval's open_options shape — no time was chosen when raised): once the owner picks one, resolve with verdict='amend' and \`counter={"new_start":"<ISO>"}\` (add \`new_end\` only to change the duration). A bare approve has nothing to execute and is refused — the time must ride in the counter. If the owner wants the meeting left as-is, use reject instead.
-
-Binding — use the explicit id token or "← THIS THREAD" in PENDING APPROVALS. The handler can also bind the owner's named subject/counterpart or an attributed contextual decision accepting the existing action. For acceptance of that action, omit \`data\` (or pass {}); its canonical terms execute. A request to amend or search is not approval of the old action. Ambiguous bare yes/no with several open remains refused. No anchor and several open → call list_pending_approvals and ask which subject, or ask for a reply in its approval thread.`,
+        description: "Resolve the identified tracked request using the owner's actual decision. Match the explicit approval ID, bound thread or supplied contextual decision. For several pending asks, keep each action and roster attached to its own request.\n\napprove: accept the stored action with no data. If the owner instructed a replacement, pass data={tool,args} containing the complete decided action. For a requested recovery use the exact recovery fields the prior result supplied. A colleague can accept the stored counter without data; changing it requires the owner's decision.\nreject: a genuine refusal or withdrawal of this request; it closes coordination and sends the requester the decline. A request to ask a question, defer, or negotiate remains open through amend.\namend: send the owner's counter or question to the requester and keep the request tracked. Put changed terms (time, participants, is_online, location) and any question in counter; omitted terms retain their stored values. For an open_options calendar request, the owner's selected time uses amend with counter.new_start and optional new_end. An instruction to leave that meeting unchanged rejects that proposed change.\n\nAn instruction to search or amend does not approve the previous action. Search when needed, then apply the owner's decided replacement through this request. Report the returned execution and notification outcomes; a recorded approval alone does not prove a booking, and an unconfirmed attempt must be reconciled before repeating.",
         input_schema: {
           type: 'object',
           properties: {
@@ -2219,6 +2199,7 @@ Binding — use the explicit id token or "← THIS THREAD" in PENDING APPROVALS.
         // still refuses to bind, same protection the DM path gets.
         let contextualDecisionDetails: string | null | undefined;
         let confirmedStandaloneApproval = false;
+        let confirmedContextualRecipients = false;
         if (context.authority === 'owner' && (verdict !== 'amend' || context.standaloneBookingApproval)) {
           const ownerRow = getRequest(requestId);
           if (ownerRow) {
@@ -2364,8 +2345,7 @@ Binding — use the explicit id token or "← THIS THREAD" in PENDING APPROVALS.
             // terms are not permission to replay the old action. Tool-authored
             // reason/data never manufacture this independent attribution.
             let contextualAnchor = false;
-            if (!anchored && !namedMatch && !chronoAnchor
-              && ownerRow.kind === 'approval' && ownerRow.state === 'awaiting_owner'
+            if (ownerRow.kind === 'approval' && ownerRow.state === 'awaiting_owner'
               && ownerRow.owner_user_id === context.userId
               && context.userId === profile.user.slack_user_id
               && context.surface === 'owner_dm' && context.channel === 'slack'
@@ -2375,22 +2355,51 @@ Binding — use the explicit id token or "← THIS THREAD" in PENDING APPROVALS.
               const unchangedData = verdict !== 'approve' || args.data === undefined
                 || (!!args.data && typeof args.data === 'object' && !Array.isArray(args.data)
                   && Object.keys(args.data).length === 0);
-              if (attributed && unchangedData
+              const data = args.data as {tool?:unknown;args?:unknown} | undefined;
+              // A time amendment can add execution fields without changing who
+              // the owner meant. Recipient identity is checked independently
+              // of those fields, against the exact stored roster and snapshot.
+              const sameRecipients = attributed?.preservesRecipients === true
+                && verdict === 'approve' && data?.tool === attributed.action.tool
+                && data.args && typeof data.args === 'object' && !Array.isArray(data.args)
+                && isDeepStrictEqual((data.args as Record<string,unknown>).attendees,attributed.action.args.attendees);
+              // Changed timing stays on the original request. Only its temporal
+              // fields may change here; participant/subject/operation changes
+              // still use the resolver's explicit correction flow.
+              let timingOnlyChange = false;
+              if (attributed?.disposition === 'amend_or_search' && attributed.preservesRecipients === true
+                && verdict === 'approve' && data?.tool === attributed.action.tool
+                && data.args && typeof data.args === 'object' && !Array.isArray(data.args)) {
+                const temporal = attributed.action.tool === 'create_meeting' ? ['start','end']
+                  : attributed.action.tool === 'move_meeting' ? ['new_start','new_end'] : [];
+                const proposed = data.args as Record<string, unknown>;
+                timingOnlyChange = temporal.length > 0 && temporal.some(key=>typeof proposed[key] === 'string')
+                  && Object.entries(proposed).every(([key,value]) => temporal.includes(key)
+                    || isDeepStrictEqual(value, attributed.action.args[key]));
+              }
+              if (attributed && (unchangedData || timingOnlyChange || sameRecipients)
                 && attributed.requestDetailsJson === ownerRow.details_json
                 && typeof attributed.instructionQuote === 'string' && attributed.instructionQuote.trim()
                 && ownerLiteralMessage.includes(attributed.instructionQuote)
                 && typeof attributed.sourceQuote === 'string' && attributed.sourceQuote.trim()
                 && Number.isInteger(attributed.sourceMessageIndex) && attributed.sourceMessageIndex >= 0
-                && attributed.disposition === (verdict === 'approve' ? 'approve_existing' : 'reject')) {
+                && (timingOnlyChange || (sameRecipients && attributed.disposition === 'amend_or_search')
+                  || attributed.disposition === (verdict === 'approve' ? 'approve_existing' : 'reject'))) {
                 try {
                   const details = parseDetails<Record<string, unknown>>(ownerRow) ?? {};
                   let action = extractCallbacks(details).on_approve;
                   if (action && details.counter && typeof details.counter === 'object') {
                     action = mergeAmendIntoApprove(action, details.counter as Record<string, unknown>, profile);
                   }
-                  contextualAnchor = !!action && isDeepStrictEqual(
+                  const matchesStoredAction = !!action && isDeepStrictEqual(
                     JSON.parse(JSON.stringify(action)), JSON.parse(JSON.stringify(attributed.action ?? null)));
-                  if (contextualAnchor) contextualDecisionDetails = ownerRow.details_json;
+                  contextualAnchor = matchesStoredAction && (unchangedData || timingOnlyChange);
+                  if (matchesStoredAction) {
+                    contextualDecisionDetails = ownerRow.details_json;
+                    confirmedContextualRecipients = attributed.preservesRecipients === true;
+                    if (timingOnlyChange) args.data = {tool:data!.tool,
+                      args:{...attributed.action.args,...data!.args as Record<string, unknown>}};
+                  }
                 } catch { /* Malformed or unresolved action cannot authorize replay. */ }
               }
             }
@@ -2487,6 +2496,7 @@ Binding — use the explicit id token or "← THIS THREAD" in PENDING APPROVALS.
               ? context.typedUserMessage ?? context.currentUserMessage : undefined,
             ...(contextualDecisionDetails !== undefined ? { expectedOwnerDecisionDetails: contextualDecisionDetails } : {}),
             confirmedStandaloneApproval,
+            confirmedContextualRecipients,
             // v3.1.3 — the colleague-path is permitted only for amending
             // approvals; that's the one case where a reject/amend should
             // bounce back to the owner. An OWNER reject must close.
@@ -2551,8 +2561,24 @@ Binding — use the explicit id token or "← THIS THREAD" in PENDING APPROVALS.
             });
           }
           // Surface as approval_id for tool-API back-compat.
+          // A completed decision disappears from the pending list. Preserve
+          // its identity for follow-up questions, including uncertain actions;
+          // the owner must not have to reconstruct people from a short title.
+          let requestContext: Record<string, unknown> | undefined;
+          if (context.surface === 'owner_dm' && context.authority === 'owner'
+            && context.userId === profile.user.slack_user_id) {
+            const row=getRequest(result.request_id);
+            if (row?.owner_user_id === profile.user.slack_user_id) {
+              const {getPersonMemory}=await import('../db/people');
+              const person=row.requester_slack_id ? getPersonMemory(row.requester_slack_id) : undefined;
+              requestContext={subject:row.subject,requester:row.requester_slack_id
+                ? {slack_id:row.requester_slack_id,name:person?.name ?? row.requester_name,email:person?.email} : null,
+                action:extractCallbacks(parseDetails<Record<string,unknown>>(row)).on_approve};
+            }
+          }
           return {
             ...result,
+            ...(requestContext ? {request_context:requestContext} : {}),
             approval_id: result.request_id,
             requester_notified: requesterNotified,
             ...(requesterNotified

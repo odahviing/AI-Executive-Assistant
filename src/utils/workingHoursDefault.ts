@@ -151,7 +151,10 @@ export function formatWorkingHoursWindow(hours: Pick<WorkingHours, 'week' | 'tim
 }
 
 export function describeEffectiveWorkingHours(person: PersonMemory): (Omit<WorkingHours, 'timezone'> & { timezone: string | null; window: string }) | null {
-  const hours = getEffectiveWorkingHours(person);
+  // Use the same missing-record fallback as availability checks. A contact
+  // whose stored week is absent still has the zone defaults applied by search.
+  const hours = getEffectiveWorkingHours(person)
+    ?? (person.timezone && isStrictIana(person.timezone) ? defaultWorkingHoursForTz(person.timezone) : null);
   if (!hours) return null;
   const timezone = hours.timezone ?? person.timezone ?? null;
   return { ...hours, timezone, window: formatWorkingHoursWindow({ ...hours, timezone: timezone ?? undefined }) };

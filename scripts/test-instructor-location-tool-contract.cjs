@@ -60,36 +60,13 @@ function loadDescription() {
 const description = loadDescription();
 if (process.argv.includes('--metrics')) console.log(`# prompt-metrics ${JSON.stringify({ descriptionChars: description.length })}`);
 
-test('owner and one external on an office day defaults online regardless of timezone', () => {
-  assert.match(description, /regardless of the external's timezone:[^\n]+owner plus one external[^\n]+online/i);
-  assert.doesNotMatch(description, /External \+ office \+ different TZ[^\n]+online/);
+// Day/roster defaults are executed in test-location-rules-and-venue.cjs.
+// The tool should delegate that decision instead of duplicating its algorithm.
+test('unspecified modality and venue defer to the location handler', () => {
+  assert.match(description, /handler chooses location and online mode from the configured day and roster/i);
+  assert.match(description, /Omit is_online and location unless the conversation specifies them/i);
 });
-
-test('owner office-day roster of three or more asks once regardless of timezone', () => {
-  assert.match(description, /regardless of the external's timezone:[^\n]+three or more total participants[^\n]+asks/i);
-  assert.match(description, /create, move, or an update_meeting attendee change/i);
-});
-
-test('colleague-path external office-day booking defaults online without owner approval', () => {
-  assert.match(description, /colleague path[^\n]+external office-day[^\n]+online without owner approval/i);
-});
-
-test('explicit online and physical choices still override defaults', () => {
-  assert.match(description, /Pass `is_online: true` ONLY when the conversation explicitly said online/i);
-  assert.match(description, /Pass `is_online: false` ONLY when the conversation explicitly said in-person/i);
-});
-
-test('an explicit venue remains an in-person signal', () => {
-  assert.match(description, /Specific venue mentioned[^\n]+pass `location` as the venue/i);
-  assert.match(description, /Helper will mark in-person/i);
-});
-
-test('external home-day booking remains online', () => {
-  assert.match(description, /External \+ home[^\n]+online with Teams/i);
-});
-
-test('internal home and office defaults remain delegated to the handler', () => {
-  assert.match(description, /home day \+ internal-only[^\n]+Huddle/i);
-  assert.match(description, /office day \+ internal-only[^\n]+Office/i);
-  assert.match(description, /THE HANDLER DECIDES/i);
+test('location questions follow a real handler result and preserve the human choice', () => {
+  assert.match(description, /ask a location question only if the handler returns one/i);
+  assert.match(description, /Preserve a previously stated visit, online choice or venue/i);
 });

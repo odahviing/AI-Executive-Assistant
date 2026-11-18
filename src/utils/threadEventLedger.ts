@@ -55,7 +55,10 @@ export function getThreadEvents(threadTs: string): LedgerEntry[] {
 // exactly like the created/edited ledger above. SEPARATE store + its own cap so a
 // broad "what's my week" read (dozens of events) can neither evict the deliberate
 // created/edited entries nor bloat the injected prompt block.
-const VIEWED_MAX_PER_THREAD = 20;
+const VIEWED_MAX_PER_THREAD = 100;
+// A broad selection is useful recall, not authority to choose one occurrence
+// for a mutation. Keep that stricter selection boundary separate from memory.
+const MAX_SELECTION_FOR_IDENTITY = 20;
 const viewedLedger = new Map<string, LedgerEntry[]>();
 
 /** Record events surfaced by a get_calendar read in this thread. Dedup by id
@@ -69,7 +72,7 @@ export function recordViewedThreadEvents(
   const byId = new Map((viewedLedger.get(threadTs) ?? []).map(e => [e.eventId, e]));
   // One timestamp identifies one returned calendar selection. Keep it monotonic
   // even for two reads in the same millisecond; older recall stays available.
-  const complete = events.length < VIEWED_MAX_PER_THREAD;
+  const complete = events.length < MAX_SELECTION_FOR_IDENTITY;
   // Zero retains recall without claiming complete selection evidence. Invalidate
   // older batches too, so truncation (or deleting one retained event later)
   // cannot make an incomplete result appear unique.
@@ -97,7 +100,7 @@ export function getLatestViewedThreadEvents(threadTs: string): LedgerEntry[] {
   const batch = entries.filter(e => e.at === latest);
   // At the cap we cannot prove the complete result survived. Recall is useful,
   // but a potentially truncated selection cannot establish uniqueness.
-  return batch.length >= VIEWED_MAX_PER_THREAD ? [] : batch;
+  return batch.length >= MAX_SELECTION_FOR_IDENTITY ? [] : batch;
 }
 
 /**

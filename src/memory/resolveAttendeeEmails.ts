@@ -95,7 +95,7 @@ export function resolveAttendeeEmail(input: AttendeeContactInput): ResolvedAtten
 
 export interface ResolvedInternalAttendee {
   name: string;   // the people_memory name (canonical), for narration
-  email: string;  // resolved, lowercased, internal (owner-domain)
+  email: string;  // resolved, lowercased; company address or verified workspace identity
 }
 
 /**
@@ -104,9 +104,9 @@ export interface ResolvedInternalAttendee {
  * substring-matches "Gloria" and "Simon" matches "Simone". That's fine for a
  * fuzzy people search, but the deterministic attendee resolver must NEVER
  * bind the wrong person — so we re-check the match here on word boundaries.
- * Language-agnostic (splits on whitespace/punctuation; a Hebrew token compares
- * as a Hebrew token). A one-word query must equal a name token (first/last),
- * never a substring of one; a multi-word query must have all its tokens present.
+ * Language-agnostic: a one-word query equals a complete name token or the
+ * complete first component of a stored mailbox, never a substring or initial.
+ * A multi-word query must have all its tokens present in the display name.
  */
 export function nameGenuinelyMatches(candidateName: string | undefined, candidateEmail: string | undefined, query: string): boolean {
   const q = query.toLowerCase().trim();
@@ -119,6 +119,11 @@ export function nameGenuinelyMatches(candidateName: string | undefined, candidat
   const nameTokens = tokenize(name);
   const qTokens = tokenize(q);
   if (qTokens.length === 0 || nameTokens.length === 0) return false;
+  // The stored mailbox can preserve a legitimate spelling absent from the
+  // display name (Ayalla at ayalla.g@…, displayed as Ayala Geni). Accept only
+  // its complete first component, never an initial or a substring. Callers
+  // still require one distinct directory person before binding an address.
+  if (qTokens.length===1 && q.length>=2 && tokenize(emailLocal)[0]===q) return true;
   // Single-word query ("Lori") → must equal a whole name token, so "Gloria"
   // and "Simone" no longer match. Multi-word ("Lori Sarsfield") → every query
   // token must be present as a name token.
@@ -131,7 +136,7 @@ export function nameGenuinelyMatches(candidateName: string | undefined, candidat
  *
  * Given the raw participant names a colleague/owner used ("Simon", "Lori"),
  * resolve ONLY those that map to a SINGLE UNAMBIGUOUS internal colleague in
- * people_memory (same email domain as the owner). This is the "resolve WHO
+ * people_memory (company domain or a verified Slack identity). This is the "resolve WHO
  * before searching WHEN" guarantee moved into code — it must not depend on
  * Sonnet remembering to call find_slack_user.
  *
@@ -180,7 +185,7 @@ export function resolveNamedInternalAttendees(params: {
       if (mention) {
         const person = getPersonMemory(mention[1]);
         const email = person?.email?.toLowerCase().trim();
-        if (!person || !email || !email.endsWith('@' + ownerDomain)) unresolved.push(name);
+        if (!person || !email || !email.includes('@')) unresolved.push(name);
         else if (!exclude.has(email) && !seen.has(email)) {
           resolved.push({name:person.name || name,email});
           seen.add(email);
@@ -191,17 +196,28 @@ export function resolveNamedInternalAttendees(params: {
       // Idan and Simon") is the search base — never an attendee, never external.
       if ((ownerName && nameGenuinelyMatches(ownerName, ownerEmail, name))
         || (params.ownerLocalName && nameGenuinelyMatches(params.ownerLocalName, undefined, name))) continue;
-      let matches: Array<{ name?: string; name_he?: string | null; email?: string }>;
+      // An explicitly supplied address already identifies the requested inbox.
+      // Its calendar may be unavailable; that is separate from its identity.
+      if (/^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(name)) {
+        const email=name.toLowerCase();
+        if (!exclude.has(email) && !seen.has(email)) {
+          resolved.push({name:getPersonByEmail(email)?.name || name,email});seen.add(email);
+        }
+        continue;
+      }
+      let matches: Array<{ name?: string; name_he?: string | null; email?: string; slack_id?:string|null }>;
       try {
         matches = searchPeopleMemory(name) ?? [];
       } catch {
         unresolved.push(name);  // a bad lookup ≠ resolved; let the model handle it
         continue;
       }
-      // Internal = a resolvable email on the owner's own domain AND a genuine
-      // whole-name match (not a loose LIKE substring — no Lori→Gloria binds).
+      // A workspace member can use a different mail domain. Resolve that
+      // identity without claiming access to their calendar. Ordinary external
+      // contacts still require their booking-time identity resolution.
       const internal = matches.filter(m =>
-        m.email && m.email.includes('@') && m.email.toLowerCase().endsWith('@' + ownerDomain)
+        m.email && m.email.includes('@') && (m.email.toLowerCase().endsWith('@' + ownerDomain)
+          || typeof m.slack_id==='string' && /^[UW][A-Z0-9]{6,}$/.test(m.slack_id))
         && (nameGenuinelyMatches(m.name, m.email, name) || nameGenuinelyMatches(m.name_he ?? undefined, undefined, name)),
       );
       // Collapse duplicate rows for the SAME person before the ambiguity test.

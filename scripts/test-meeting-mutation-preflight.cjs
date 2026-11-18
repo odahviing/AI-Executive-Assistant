@@ -26,7 +26,7 @@ async function run(tool,{id='id',type='singleInstance',subject='Fixture',failure
     await write(); return {wrote:true};
   };`,{
     args:{meeting_id:'id',meeting_subject:'Fixture'},meetingId:'id',userEmail:'owner@example.test',
-    context:{profile:{},threadTs:'thread'},logger,displaySubject:p=>viewer==='owner'?p.subject:'[Private]',subjectViewerFor:()=>viewer,viewerEmailFor:()=>undefined,
+    context:{profile:{},threadTs:'thread',authority:'owner'},logger,displaySubject:p=>viewer==='owner'?p.subject:'[Private]',subjectViewerFor:()=>viewer,viewerEmailFor:()=>undefined,
     subjectsPlausiblyMatch:(a,b)=>a===b,write:async()=>{writes++;},
   },{'../../../../connectors/graph/calendar':{getEventType},'../../../../utils/threadEventLedger':{forgetThreadEvent(){}}});
   try { return {result:await fn(),writes}; } catch(error) {return {error,writes};}

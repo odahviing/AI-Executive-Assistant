@@ -1,6 +1,6 @@
 // Real calendar result summaries and checker/gate modules; synthetic semantic flags.
 const fs=require('node:fs'),path=require('node:path'),Module=require('node:module'),assert=require('node:assert/strict'),{test}=require('node:test');
-const file=path.resolve('scripts/test-gatekeeper-booking-claim.cjs'),m=new Module(file,module);m.filename=file;m.paths=Module._nodeModulePaths(path.dirname(file));const s=fs.readFileSync(file,'utf8').split('const draft=')[0].replace("req.messages[0].content.includes('You audit a draft reply an executive assistant')",'true');m._compile(s+'\nmodule.exports={harness,ctx,profile};',file);const {harness,ctx,profile}=m.exports;
+const file=path.resolve('scripts/test-gatekeeper-booking-claim.cjs'),m=new Module(file,module);m.filename=file;m.paths=Module._nodeModulePaths(path.dirname(file));const s=fs.readFileSync(file,'utf8').split('const draft=')[0];m._compile(s+'\nmodule.exports={harness,ctx,profile};',file);const {harness,ctx,profile}=m.exports;
 const draft='I booked it for you as requested.';
 const claim={claimed_action:true,action_type:'book',target_name:null,claim_specifics_mismatch:false};
 const tools=['create_meeting','move_meeting','update_meeting','delete_meeting','book_floating_block'];

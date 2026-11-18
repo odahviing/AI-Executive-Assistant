@@ -6,7 +6,7 @@ source=source.replace('fs.readFileSync(path.join(root,rel)', 'fs.readFileSync(pr
 vm.runInNewContext(source,{require:createRequire(f),module:m,exports:m.exports,__dirname,process,console,Date,Buffer,setTimeout,clearTimeout});
 async function run({channel="email",clean=false,offline=false,candidate=false,preferred=false,relaxed=true,overrideRows={},ownerEvents=[]}={}){const h=m.exports.harness(overrideRows, {offline,calendar:{oofUntilDisplayFor:()=>undefined,GraphPermissionError:class GraphPermissionError extends Error{},firstRejectReason:(...a)=>h.load('src/connectors/graph/findAvailableSlots.ts').firstRejectReason(...a)},extraMocks:{
  'src/skills/meetings/ops/analysis.ts':{},'src/skills/meetings/ops/handlers/createMeeting.ts':{},'src/skills/meetings/ops/handlers/moveMeeting.ts':{},'src/skills/meetings/ops/handlers/calendarReads.ts':{},
- 'src/skills/meetings/ops/violationLabels.ts':{humanizeViolationLabel:x=>x},
+ 'src/skills/meetings/ops/violationLabels.ts':{humanizeViolationLabel:x=>x,attendeeFirstName:email=>email.split('@')[0],attendeeConflictLine:row=>row.email+' '+row.reason},
  'src/skills/meetings/bookingRequest.ts':{grantRelaxed:()=>({relaxed})},
  'src/db/slotHolds.ts':{getActiveSlotHolds:()=>[]},'src/utils/offeredSlotsStash.ts':{getOfferedSlots:()=>[],getOfferedSearchFingerprint:()=>null,recordOfferedSlots:()=>{}},
  'src/db.ts':{getPersonMemory:()=>({})},

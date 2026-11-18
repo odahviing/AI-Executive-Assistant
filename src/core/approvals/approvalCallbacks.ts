@@ -318,7 +318,8 @@ function slotSignature(cb: ToolCallback | undefined): string | null {
  *      ONLY by the code path that PROVED it (never by the model).
  *   3. `askText` — nonmeeting/open-ended context only. Concrete timed meeting
  *      asks use their stored action and proven reason, never duplicate clocks
- *      from model-authored prose.
+ *      from model-authored prose as execution terms. An uncountered meeting
+ *      also retains `details.context` as a separately labelled requester quote.
  *   4. the consequence (v2.9.1) — "If yes → I'll X", verbalized from the stored
  *      on_approve with any stored counter merged in exactly as the resolver
  *      merges it, so it always describes the action a ✅ actually replays. Last,
@@ -483,7 +484,13 @@ export async function composeOwnerAskText(input: {
   // prose clocks (or invent a reason) while presenting the exact stored action.
   // The request remains pending; this is a preview, never execution authority.
   const reason = hardReason || (concreteMeeting ? relayNotice(lang, 'approval_reason_unavailable') : '');
-  return [repeatHistory, lead, bookingQuestion, reason, concreteMeeting ? undefined : askText, consequence].filter(Boolean).join('\n\n');
+  // The checked action replaces unverified prose clocks, not the person's
+  // reason for asking (for example urgency). Keep that context as a quote on
+  // an uncountered request; the consequence remains the execution authority.
+  const requesterContext=concreteMeeting && !countered && typeof details?.context==='string'
+    && details.context.trim() && details.context.trim()!==reason
+    ? relayNotice(lang,'requester_context',{quote:details.context.trim()}) : undefined;
+  return [repeatHistory, lead, bookingQuestion, reason, concreteMeeting ? undefined : askText, requesterContext, consequence].filter(Boolean).join('\n\n');
 }
 
 /**

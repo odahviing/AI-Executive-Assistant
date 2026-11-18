@@ -13,7 +13,7 @@ const outputArg = process.argv.indexOf('--output-dir');
 const outputDir = outputArg >= 0 ? path.resolve(process.argv[outputArg + 1]) : path.join(dir, 'current');
 const results = [];
 Settings.now = () => Date.parse('2026-09-19T10:00:00Z');
-function source(file) { const old = path.join(dir, 'before', file); return fs.readFileSync(before && fs.existsSync(old) ? old : path.join(root, file), 'utf8'); }
+function source(file) { const overlay=process.env.FLOATING_SOURCE_ROOT && path.join(root,process.env.FLOATING_SOURCE_ROOT,file);const old = path.join(dir, 'before', file); return fs.readFileSync(overlay && fs.existsSync(overlay)?overlay:before && fs.existsSync(old) ? old : path.join(root, file), 'utf8'); }
 function compile(code, req) {
   const m = { exports: {} };
   const js = ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } }).outputText;
@@ -192,7 +192,7 @@ const health = healthModule.exports;
       if(n.endsWith('/graph/calendar')) return {CalendarOfflineError:class extends Error {}, getOwnerEventsForDecision:async()=>{if(opts.readError)throw Error('calendar unavailable'); return structuredClone(state);},createMeeting:async a=>{writes.push(a);if(opts.writeError)throw Error('write rejected');const e={id:`created-${writes.length}`,subject:a.subject,start:{dateTime:a.start,timeZone:zone},end:{dateTime:a.end,timeZone:zone},showAs:'busy',categories:a.categories??[]};state.push(e);return e;}};
       throw Error(`unmocked booking dependency ${n}`);
     });
-    return {state,writes,activities,book:(name,args={})=>mod.handleBookFloatingBlock({date,block_name:name,...args},{profile:p,userEmail:p.user.email,timezone:zone,context:{profile:p,userId:'owner',senderRole:'owner'}})};
+    return {state,writes,activities,book:(name,args={})=>mod.handleBookFloatingBlock({date,block_name:name,...args},{profile:p,userEmail:p.user.email,timezone:zone,context:{profile:p,userId:'owner',senderRole:'owner',...opts.context}})};
   }
   for(const count of [1,2,3]) await test(`initial-placement-${count}-objects-and-repeat-control`,async()=>{
     const names=['lunch','coffee','focus'].slice(0,count), h=bookHarness(names.map(n=>block(n)));
@@ -220,6 +220,25 @@ const health = healthModule.exports;
   await test('initial-placement-latest-WE-fallback',async()=>{const h=bookHarness([{...block('lunch'),prefer_position:'latest_in_window'}],[{...event('optional','11:00','14:00'),showAs:'workingElsewhere'}]);const r=await h.book('lunch');assert.equal(r.start,'13:30');assert.match(r.message,/Working Elsewhere/);});
   await test('initial-placement-anchor-WE-fallback',async()=>{const h=bookHarness([block('lunch')],[event('anchor','10:00','11:00'),{...event('optional','11:00','14:00'),showAs:'workingElsewhere'}]);const r=await h.book('lunch',{prefer_position:'abut_after',anchor_event_id:'anchor'});assert.equal(r.start,'11:00');});
   await test('initial-placement-invalid-anchor-preserved-control',async()=>{const h=bookHarness([block('lunch')],[event('anchor','14:00','15:00')]);const r=await h.book('lunch',{prefer_position:'abut_after',anchor_event_id:'anchor'});assert.equal(r.error,'anchor_outside_window');assert.equal(h.writes.length,0);});
+  for(const override of [false,true])await test('explicit-owner-duration-reaches-every-placement-branch-'+override,async()=>{
+    const configured=block('lunch','11:00','14:00',25),h=bookHarness([configured]);
+    const r=await h.book('lunch',{duration_minutes:40,...(override?{confirm_outside_window:true,start_time:'14:00'}:{})});
+    assert.equal(r.created,true);assert.equal(DateTime.fromISO(h.writes[0].end).diff(DateTime.fromISO(h.writes[0].start),'minutes').minutes,40);
+    assert.equal(configured.duration_minutes,25,'one occurrence does not mutate profile defaults');
+    assert.equal((await h.book('lunch',{duration_minutes:40})).created,false);assert.equal(h.writes.length,1);
+  });
+  for(const override of [false,true])await test('existing-shorter-block-is-identified-for-update-never-claimed-as-resized-'+override,async()=>{
+    const h=bookHarness([block('lunch','11:00','14:00',25)],[event('lunch','12:00','12:25')]);
+    const r=await h.book('lunch',{duration_minutes:40,...(override?{confirm_outside_window:true,start_time:'14:00'}:{})});
+    assert.equal(r.error,'existing_block_duration_differs');assert.equal(r.event_id,'lunch');assert.equal(h.writes.length,0);
+  });
+  await test('invalid-explicit-block-duration-is-not-silently-replaced-with-default',async()=>{
+    const h=bookHarness([block('lunch')]);assert.equal((await h.book('lunch',{duration_minutes:0})).error,'invalid_block_duration');assert.equal(h.writes.length,0);
+  });
+  await test('non-owner-cannot-change-the-configured-block-length',async()=>{
+    const h=bookHarness([block('lunch')],[],{context:{senderRole:'colleague',userId:'other'}});
+    assert.equal((await h.book('lunch',{duration_minutes:40})).error,'owner_duration_required');assert.equal(h.writes.length,0);
+  });
   const report = { baseline: '63221e4', snapshot: before ? 'preserved before' : 'working tree', results, passed: results.filter(r => r.status === 'pass').length, failed: results.filter(r => r.status === 'fail').length };
   fs.mkdirSync(outputDir, {recursive:true});
   fs.writeFileSync(path.join(outputDir, before ? 'before-results.json' : 'after-results.json'), JSON.stringify(report, null, 2));
