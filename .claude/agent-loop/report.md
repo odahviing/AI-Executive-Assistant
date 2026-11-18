@@ -1,5 +1,5 @@
 <!-- workshop-ledger-report-v1 -->
-**5 product decisions await you** — 8 open items; 0 captured, 0 ready for an authorized lane batch, 2 held, 0 dependency blocked, 1 awaiting review/repair, 0 in flight.
+**5 product decisions await you** — 10 open items; 0 captured, 0 ready for an authorized lane batch, 4 held, 0 dependency blocked, 1 awaiting review/repair, 0 in flight.
 
 **Independently verified, awaiting wrap (0):** none
 
@@ -13,12 +13,14 @@
 | matchmaker · nov13-reported-duplicate-visit | bug: W2: one matching creation per requested visit title, three distinct organizer IDs, six matching iCalUIds with six different attendee IDs. Cannot identify a deleted second organizer event or its author from surviving rows. Reopen with a s… (1 retained example) | W2: one matching creation per requested visit title, three distinct organizer IDs, six matching iCalUIds with six different attendee IDs. Cannot identify a deleted second organizer event or its author from surviving rows. Reopen with a second organizer ID or calendar deletion audit, if available. Distinct duplicate address defect has separate nov13-duplicate-invite-address ref. Evidence: artifacts/workshop-verification/nov13-incident/visit-provider-correlations.json Recommend: Defer duplicate-event attribution until a second organizer event ID or deletion audit is available. | Not assessed |
 | librarian · nov13-family-coda-scheduling | bug: Family-size question was sent after an explicitly accepted and completed booking. (1 retained example) | L7/L8 and the approved category catalog allow this completed-booking family coda. Should Maelle wait for a person to introduce family before asking a personal family question? Evidence artifacts/workshop-verification/nov13-incident/cloud.json at 17:45:04Z. Recommend: Keep current completed-work eligibility. Change family discovery only if the owner wants a different topic policy. | Not assessed |
 
-### Held — recorded rulings / existing backlog (2)
+### Held — recorded rulings / existing backlog (4)
 
 | Lane · ref | What happened | Your options | Risk |
 |---|---|---|---|
+| unassigned · gh#155 | backlog: Owner removed inactive ticket mirrors and parked proposals from the active release backlog; no product investigation or implementation. | Held: Owner: git hub ... should we fix #206 ... what is the issue with #204 and #205 ... the rest not for now. No GitHub issue closed. | Not assessed |
 | librarian · knowledge-uploaded-document-persistence | suggestion: Uploaded document retention and provenance policy needs owner choice | Held: Correcting mistaken inclusion from generic run-all: original committed report owner ruling was Yes handle separate. Current owner says do not know what item is; no explicit per-item release was supplied. Restore separate held scope… | Not assessed |
 | handyman · meeting-hard-deadline-followup | backlog: A colleague supplies the remaining meeting details after requesting a fixed day, but Maelle repeats later options instead of resolving the pending decision. | Held: Owner requested continued repair in 5.5. Reproduced in offline conversation 8. | Not assessed |
+| unassigned · gh#33 | backlog:  | Held: 5.5.0 (`f8a3562d6084e763075f9c51fefa15c3f5ee1ba8`) hardens the existing cancellation/decline path: declined or deleted events are confirmed before related request work is closed, failures keep their actual authority and outcome, an… | Not assessed |
 
 ### Awaiting independent review or repair (1)
 

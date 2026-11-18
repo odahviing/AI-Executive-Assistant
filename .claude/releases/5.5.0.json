@@ -1,6 +1,6 @@
 {
   "version": "5.5.0",
-  "status": "validation-complete",
+  "status": "publication-ready-awaiting-live-boot",
   "previousMinor": {
     "version": "5.4.0",
     "sha": "b49b64b585963fa49f4d5d9ff43abeee80565ac6"
@@ -89,8 +89,25 @@
       "ownerOverride": "Explicit SOLO instruction; no independent Bouncer pass is manufactured.",
       "configurationProof": "artifacts/workshop-verification/wrap-5.5.0/solo-review/vm-office-label.txt",
       "disposition": "Original wrong-city field read directly from local and deployed YAML and reassessed as already-fixed. The native engine still requests an independent review for this historic implemented ref. This is retained, not reported green.",
-      "reportCheck": "artifacts/workshop-verification/wrap-5.5.0/solo-review/report-preflight-final.log"
-    }
+      "reportCheck": "artifacts/workshop-verification/wrap-5.5.0/solo-review/report-postcommit.log"
+    },
+    "watcher": "Remote maelle-deploy-watcher reloaded 2026-11-18T12:44:37.656Z from /mnt/disks/maelle/app/scripts/deploy-watcher.mjs before the two-push release. Maelle remained on 5.4.7 during that watcher-only restart.",
+    "watcherObservedDeferral": "After source push, remote PM2 logs showed: wrap still running — awaiting final bookkeeping revision. No app restart for the source-only revision.",
+    "githubPublished": [
+      {
+        "issue": 33,
+        "state": "open",
+        "disposition": "partial",
+        "comment": "https://github.com/odahviing/AI-Executive-Assistant/issues/33#issuecomment-6978975148"
+      },
+      {
+        "issue": 155,
+        "state": "open",
+        "disposition": "partial",
+        "comment": "https://github.com/odahviing/AI-Executive-Assistant/issues/155#issuecomment-6978985341"
+      }
+    ],
+    "liveVerification": "Must observe final bookkeeping HEAD in the VM boot stamp. Retained local evidence will be artifacts/workshop-verification/wrap-5.5.0/solo-review/live-verification.json. This pre-push record does not assert deployment."
   },
   "checks": {
     "full": {
@@ -171,5 +188,9 @@
       "change": "Version fields only, 5.4.7 to 5.5.0; dependencies unchanged."
     }
   ],
-  "sessionStarter": "Version remains derived from package.json by the canonical SESSION_STARTER.md command pointer; no copied stale literal."
+  "sessionStarter": "Version remains derived from package.json by the canonical SESSION_STARTER.md command pointer; no copied stale literal.",
+  "sourceRelease": {
+    "sha": "f8a3562d6084e763075f9c51fefa15c3f5ee1ba8",
+    "authorDate": "2026-11-18T07:45:51-05:00"
+  }
 }
