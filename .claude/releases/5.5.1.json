@@ -150,5 +150,9 @@
     "openBacklog": 10
   },
   "sessionStarter": "Version is derived from package.json; no stale copied version literal.",
-  "liveVerification": "Pending final bookkeeping HEAD boot stamp, database/Slack/email readiness and errors-since-boot check. Artifact: artifacts/workshop-verification/wrap-5.5.1/live-verification.json."
+  "liveVerification": "Pending final bookkeeping HEAD boot stamp, database/Slack/email readiness and errors-since-boot check. Artifact: artifacts/workshop-verification/wrap-5.5.1/live-verification.json.",
+  "sourceRelease": {
+    "sha": "5a8d6f5f8d042af3ed71349d3bc8e815c195b4ef",
+    "authorDate": "2026-11-18T09:57:11-05:00"
+  }
 }
